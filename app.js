@@ -64,6 +64,8 @@ subCards.forEach(card => {
     console.log(`[Wifix] Subcategoría seleccionada: ${sub}`);
     if (sub === 'personales') openDatosPersonales();
     if (sub === 'servicio' && currentCategory === 'instalaciones') openDatosServicio();
+    if (sub === 'herramientas') openHerramientas();
+    if (sub === 'retirados') openRetirados();
   });
 });
 
@@ -76,6 +78,502 @@ backFromServicio.addEventListener('click', () => {
   detailServicio.classList.remove('open');
   detailServicio.setAttribute('aria-hidden', 'true');
 });
+
+// === Herramientas + Equipos Retirados ===
+const detailHerramientas = document.getElementById('detailHerramientas');
+const herramientasChip = document.getElementById('herramientasChip');
+const herramientasList = document.getElementById('herramientasList');
+const backFromHerramientas = document.getElementById('backFromHerramientas');
+
+const detailRetirados = document.getElementById('detailRetirados');
+const retiradosChip = document.getElementById('retiradosChip');
+const retiradosForm = document.getElementById('retiradosForm');
+const backFromRetirados = document.getElementById('backFromRetirados');
+
+backFromHerramientas.addEventListener('click', () => {
+  detailHerramientas.classList.remove('open');
+  detailHerramientas.setAttribute('aria-hidden', 'true');
+});
+backFromRetirados.addEventListener('click', () => {
+  detailRetirados.classList.remove('open');
+  detailRetirados.setAttribute('aria-hidden', 'true');
+});
+
+function currentAccount() {
+  return (accountInput.value || '').trim();
+}
+
+function showSaveFeedback(button, message, success) {
+  const original = button.textContent;
+  button.textContent = message;
+  button.classList.remove('ok', 'fail');
+  button.classList.add(success ? 'ok' : 'fail');
+  button.disabled = true;
+  setTimeout(() => {
+    button.textContent = original;
+    button.classList.remove('ok', 'fail');
+    button.disabled = false;
+  }, 2200);
+}
+
+function num(value) {
+  if (value === '' || value === null || value === undefined) return undefined;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+function nonEmpty(value) {
+  if (value === '' || value === null || value === undefined) return undefined;
+  return String(value).trim() || undefined;
+}
+
+const TOOL_ICONS = {
+  distance: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h18"/><path d="M3 8l-2 4 2 4M21 8l2 4-2 4"/></svg>',
+  speed:    '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 18 0"/><path d="M12 12l4-3"/><circle cx="12" cy="12" r="1.2" fill="currentColor"/></svg>',
+  heatmap:  '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8a4 4 0 0 1 8 0"/><path d="M3 14a4 4 0 0 1 8 0"/><path d="M13 11a4 4 0 0 1 8 0"/><circle cx="6" cy="20" r="1.2" fill="currentColor"/></svg>',
+  ping:     '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="2"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="10"/></svg>',
+  trace:    '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="6" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="18" r="2"/><path d="M7 6h3l2 4M14 12h3l2 4"/></svg>',
+  chev:     SERVICIO_ICONS.chev,
+};
+
+// --- Renderers de formularios de cada herramienta ---
+function distanceFormHtml() {
+  return `
+    <div class="tool-form" data-tool="distance">
+      <label class="form-row"><span class="form-label">Distancia (metros) *</span>
+        <input type="number" step="0.01" min="0" data-field="distanceMeters" placeholder="142.7"></label>
+      <div class="form-grid-2">
+        <label class="form-row"><span class="form-label">Latitud inicio</span>
+          <input type="number" step="any" data-field="startLat" placeholder="-0.180653"></label>
+        <label class="form-row"><span class="form-label">Longitud inicio</span>
+          <input type="number" step="any" data-field="startLng" placeholder="-78.467834"></label>
+      </div>
+      <div class="form-grid-2">
+        <label class="form-row"><span class="form-label">Latitud fin</span>
+          <input type="number" step="any" data-field="endLat" placeholder="-0.180700"></label>
+        <label class="form-row"><span class="form-label">Longitud fin</span>
+          <input type="number" step="any" data-field="endLng" placeholder="-78.468000"></label>
+      </div>
+      <label class="form-row"><span class="form-label">Notas</span>
+        <textarea data-field="notes" rows="2" placeholder="Casa al poste"></textarea></label>
+      <button class="save-btn" data-action="save">Guardar medición</button>
+    </div>`;
+}
+
+function speedtestFormHtml() {
+  return `
+    <div class="tool-form" data-tool="speedtest">
+      <div class="form-grid-2">
+        <label class="form-row"><span class="form-label">Descarga (Mbps) *</span>
+          <input type="number" step="0.1" min="0" data-field="downloadMbps" placeholder="185.4"></label>
+        <label class="form-row"><span class="form-label">Subida (Mbps) *</span>
+          <input type="number" step="0.1" min="0" data-field="uploadMbps" placeholder="92.1"></label>
+      </div>
+      <div class="form-grid-2">
+        <label class="form-row"><span class="form-label">Latencia (ms)</span>
+          <input type="number" step="0.1" data-field="latencyMs" placeholder="11.3"></label>
+        <label class="form-row"><span class="form-label">Jitter (ms)</span>
+          <input type="number" step="0.1" data-field="jitterMs" placeholder="1.8"></label>
+      </div>
+      <label class="form-row"><span class="form-label">Pérdida de paquetes (%)</span>
+        <input type="number" step="0.1" min="0" max="100" data-field="packetLossPercent" placeholder="0"></label>
+      <label class="form-row"><span class="form-label">Servidor / ISP</span>
+        <input type="text" data-field="serverName" placeholder="Servidor Quito"></label>
+      <label class="form-row"><span class="form-label">Notas</span>
+        <textarea data-field="notes" rows="2"></textarea></label>
+      <button class="save-btn" data-action="save">Guardar speedtest</button>
+    </div>`;
+}
+
+function heatmapFormHtml() {
+  return `
+    <div class="tool-form" data-tool="heatmap">
+      <label class="form-row"><span class="form-label">Etiqueta del relevamiento</span>
+        <input type="text" data-field="label" placeholder="Piso 1"></label>
+      <div class="rooms-list" data-slot="rooms"></div>
+      <button class="add-row-btn" data-action="add-room">+ Agregar habitación</button>
+      <label class="form-row"><span class="form-label">Notas generales</span>
+        <textarea data-field="notes" rows="2"></textarea></label>
+      <button class="save-btn" data-action="save">Guardar mapa de calor</button>
+    </div>`;
+}
+
+function roomRowHtml(index) {
+  return `
+    <div class="room-row" data-room-index="${index}">
+      <div class="room-row-head">
+        <span class="form-label">Habitación ${index + 1}</span>
+        <button class="row-remove" data-action="remove-room">×</button>
+      </div>
+      <div class="form-grid-2">
+        <label class="form-row"><span class="form-label">Nombre *</span>
+          <input type="text" data-field="roomName" placeholder="Dormitorio"></label>
+        <label class="form-row"><span class="form-label">Piso</span>
+          <input type="number" step="1" min="1" value="1" data-field="floor"></label>
+      </div>
+      <label class="form-row"><span class="form-label">signalDbm * (-120 a 0)</span>
+        <input type="number" step="1" min="-120" max="0" data-field="signalDbm" placeholder="-58"></label>
+    </div>`;
+}
+
+function pingFormHtml() {
+  return `
+    <div class="tool-form" data-tool="ping">
+      <label class="form-row"><span class="form-label">Target (IP o URL) *</span>
+        <input type="text" data-field="target" placeholder="8.8.8.8"></label>
+      <div class="form-grid-2">
+        <label class="form-row"><span class="form-label">Paquetes enviados</span>
+          <input type="number" step="1" min="0" data-field="packetsSent" placeholder="10"></label>
+        <label class="form-row"><span class="form-label">Paquetes recibidos</span>
+          <input type="number" step="1" min="0" data-field="packetsReceived" placeholder="10"></label>
+      </div>
+      <div class="form-grid-2">
+        <label class="form-row"><span class="form-label">Latencia mín (ms)</span>
+          <input type="number" step="0.1" data-field="minLatencyMs"></label>
+        <label class="form-row"><span class="form-label">Latencia prom (ms)</span>
+          <input type="number" step="0.1" data-field="avgLatencyMs"></label>
+      </div>
+      <label class="form-row"><span class="form-label">Latencia máx (ms)</span>
+        <input type="number" step="0.1" data-field="maxLatencyMs"></label>
+      <label class="form-row"><span class="form-label">Habitación (si asocias a mapa de calor)</span>
+        <input type="text" data-field="roomName" placeholder="Sala"></label>
+      <button class="save-btn" data-action="save">Guardar ping</button>
+    </div>`;
+}
+
+function tracerouteFormHtml() {
+  return `
+    <div class="tool-form" data-tool="traceroute">
+      <label class="form-row"><span class="form-label">Target *</span>
+        <input type="text" data-field="target" placeholder="www.example.com"></label>
+      <div class="hops-list" data-slot="hops"></div>
+      <button class="add-row-btn" data-action="add-hop">+ Agregar salto</button>
+      <label class="form-row"><span class="form-label">Notas</span>
+        <textarea data-field="notes" rows="2"></textarea></label>
+      <button class="save-btn" data-action="save">Guardar traceroute</button>
+    </div>`;
+}
+
+function hopRowHtml(index) {
+  return `
+    <div class="hop-row" data-hop-index="${index}">
+      <div class="hop-row-head">
+        <span class="form-label">Salto ${index + 1}</span>
+        <button class="row-remove" data-action="remove-hop">×</button>
+      </div>
+      <div class="form-grid-3">
+        <label class="form-row"><span class="form-label">#</span>
+          <input type="number" step="1" min="1" value="${index + 1}" data-field="hopNumber"></label>
+        <label class="form-row"><span class="form-label">Host / IP</span>
+          <input type="text" data-field="host" placeholder="10.0.0.1"></label>
+        <label class="form-row"><span class="form-label">Latencia (ms)</span>
+          <input type="number" step="0.1" data-field="latencyMs"></label>
+      </div>
+    </div>`;
+}
+
+// --- Recolectores: leen el DOM del formulario y devuelven el payload ---
+function collectFields(formEl) {
+  const out = {};
+  formEl.querySelectorAll(':scope > .form-row [data-field], :scope > .form-grid-2 [data-field], :scope > .form-grid-3 [data-field]').forEach(el => {
+    out[el.dataset.field] = el.value;
+  });
+  return out;
+}
+function collectRows(listEl, perRow) {
+  return Array.from(listEl.children).map(perRow);
+}
+
+function collectDistance(formEl) {
+  const f = collectFields(formEl);
+  const payload = { distanceMeters: num(f.distanceMeters) };
+  if (num(f.startLat) !== undefined && num(f.startLng) !== undefined) {
+    payload.startPoint = { latitude: num(f.startLat), longitude: num(f.startLng) };
+  }
+  if (num(f.endLat) !== undefined && num(f.endLng) !== undefined) {
+    payload.endPoint = { latitude: num(f.endLat), longitude: num(f.endLng) };
+  }
+  if (nonEmpty(f.notes)) payload.notes = nonEmpty(f.notes);
+  return payload;
+}
+function collectSpeedtest(formEl) {
+  const f = collectFields(formEl);
+  const payload = { downloadMbps: num(f.downloadMbps), uploadMbps: num(f.uploadMbps) };
+  ['latencyMs', 'jitterMs', 'packetLossPercent'].forEach(k => {
+    if (num(f[k]) !== undefined) payload[k] = num(f[k]);
+  });
+  if (nonEmpty(f.serverName)) payload.serverName = nonEmpty(f.serverName);
+  if (nonEmpty(f.notes)) payload.notes = nonEmpty(f.notes);
+  return payload;
+}
+function collectHeatmap(formEl) {
+  const f = collectFields(formEl);
+  const roomsEl = formEl.querySelector('[data-slot="rooms"]');
+  const rooms = collectRows(roomsEl, (row) => {
+    const get = (k) => row.querySelector(`[data-field="${k}"]`).value;
+    return {
+      roomName: nonEmpty(get('roomName')),
+      floor: num(get('floor')) || 1,
+      signalDbm: num(get('signalDbm')),
+      measuredAt: new Date().toISOString(),
+    };
+  });
+  const payload = { rooms };
+  if (nonEmpty(f.label)) payload.label = nonEmpty(f.label);
+  if (nonEmpty(f.notes)) payload.notes = nonEmpty(f.notes);
+  return payload;
+}
+function collectPing(formEl) {
+  const f = collectFields(formEl);
+  const payload = { target: nonEmpty(f.target) };
+  ['packetsSent','packetsReceived','minLatencyMs','avgLatencyMs','maxLatencyMs'].forEach(k => {
+    if (num(f[k]) !== undefined) payload[k] = num(f[k]);
+  });
+  if (nonEmpty(f.roomName)) payload.roomName = nonEmpty(f.roomName);
+  return payload;
+}
+function collectTraceroute(formEl) {
+  const f = collectFields(formEl);
+  const hopsEl = formEl.querySelector('[data-slot="hops"]');
+  const hops = collectRows(hopsEl, (row) => {
+    const get = (k) => row.querySelector(`[data-field="${k}"]`).value;
+    return {
+      hopNumber: num(get('hopNumber')),
+      host: nonEmpty(get('host')) || null,
+      latencyMs: num(get('latencyMs')),
+    };
+  });
+  const payload = { target: nonEmpty(f.target), hops };
+  if (nonEmpty(f.notes)) payload.notes = nonEmpty(f.notes);
+  return payload;
+}
+
+const HERRAMIENTAS_ITEMS = [
+  { id: 'distance', title: 'Medición de Distancia', icon: TOOL_ICONS.distance,
+    render: distanceFormHtml,
+    collect: collectDistance,
+    save: (acct, payload) => WifixAPI.createDistanceMeasurement(acct, payload) },
+  { id: 'speedtest', title: 'Test de Velocidad', icon: TOOL_ICONS.speed,
+    render: speedtestFormHtml,
+    collect: collectSpeedtest,
+    save: (acct, payload) => WifixAPI.createSpeedtest(acct, payload) },
+  { id: 'heatmap', title: 'Mapa de Calor WiFi', icon: TOOL_ICONS.heatmap,
+    render: heatmapFormHtml,
+    collect: collectHeatmap,
+    save: (acct, payload) => WifixAPI.createWifiHeatmap(acct, payload) },
+  { id: 'ping', title: 'Ping', icon: TOOL_ICONS.ping,
+    render: pingFormHtml,
+    collect: collectPing,
+    save: (acct, payload) => WifixAPI.createPingTest(acct, payload) },
+  { id: 'traceroute', title: 'Traceroute', icon: TOOL_ICONS.trace,
+    render: tracerouteFormHtml,
+    collect: collectTraceroute,
+    save: (acct, payload) => WifixAPI.createTracerouteTest(acct, payload) },
+];
+
+function openHerramientas() {
+  const cuenta = currentAccount() || `WX-${randInt(100000, 999999)}`;
+  herramientasChip.textContent = cuenta;
+
+  herramientasList.innerHTML = HERRAMIENTAS_ITEMS.map(item => `
+    <div class="servicio-item" data-id="${item.id}">
+      <button class="servicio-head" type="button">
+        <div class="servicio-icon">${item.icon}</div>
+        <div class="servicio-title">${item.title}</div>
+        <div class="servicio-chev">${TOOL_ICONS.chev}</div>
+      </button>
+      <div class="servicio-body">
+        <div class="servicio-body-inner" data-slot="body"></div>
+      </div>
+    </div>`).join('');
+
+  herramientasList.querySelectorAll('.servicio-item').forEach(node => {
+    const id = node.dataset.id;
+    const item = HERRAMIENTAS_ITEMS.find(x => x.id === id);
+    const head = node.querySelector('.servicio-head');
+    const body = node.querySelector('[data-slot="body"]');
+
+    head.addEventListener('click', () => {
+      const wasOpen = node.classList.contains('open');
+      if (!wasOpen && !body.dataset.rendered) {
+        body.innerHTML = item.render();
+        body.dataset.rendered = '1';
+        wireToolForm(body, item);
+      }
+      node.classList.toggle('open');
+    });
+  });
+
+  detailHerramientas.classList.add('open');
+  detailHerramientas.setAttribute('aria-hidden', 'false');
+}
+
+function wireToolForm(bodyEl, item) {
+  const formEl = bodyEl.querySelector('.tool-form');
+  if (!formEl) return;
+
+  // habitaciones (heatmap) y saltos (traceroute) dinámicos
+  const roomsSlot = formEl.querySelector('[data-slot="rooms"]');
+  const hopsSlot = formEl.querySelector('[data-slot="hops"]');
+  if (roomsSlot) {
+    let idx = 0;
+    const addRoom = () => {
+      roomsSlot.insertAdjacentHTML('beforeend', roomRowHtml(idx));
+      idx++;
+    };
+    addRoom();
+    formEl.querySelector('[data-action="add-room"]').addEventListener('click', addRoom);
+    roomsSlot.addEventListener('click', (ev) => {
+      if (ev.target.matches('[data-action="remove-room"]')) {
+        const row = ev.target.closest('.room-row');
+        if (roomsSlot.children.length > 1) row.remove();
+      }
+    });
+  }
+  if (hopsSlot) {
+    let idx = 0;
+    const addHop = () => {
+      hopsSlot.insertAdjacentHTML('beforeend', hopRowHtml(idx));
+      idx++;
+    };
+    addHop();
+    formEl.querySelector('[data-action="add-hop"]').addEventListener('click', addHop);
+    hopsSlot.addEventListener('click', (ev) => {
+      if (ev.target.matches('[data-action="remove-hop"]')) {
+        const row = ev.target.closest('.hop-row');
+        if (hopsSlot.children.length > 1) row.remove();
+      }
+    });
+  }
+
+  const saveBtn = formEl.querySelector('[data-action="save"]');
+  saveBtn.addEventListener('click', async () => {
+    const cuenta = currentAccount();
+    if (!cuenta) {
+      showSaveFeedback(saveBtn, 'Falta nº de cuenta', false);
+      return;
+    }
+    let payload;
+    try {
+      payload = item.collect(formEl);
+    } catch (err) {
+      console.error('[Wifix]', err);
+      showSaveFeedback(saveBtn, 'Datos inválidos', false);
+      return;
+    }
+    try {
+      const saved = await item.save(cuenta, payload);
+      console.log(`[Wifix] ${item.id} guardado:`, saved);
+      showSaveFeedback(saveBtn, '✓ Guardado', true);
+    } catch (err) {
+      console.error('[Wifix] error al guardar:', err);
+      showSaveFeedback(saveBtn, '✗ ' + (err.message || 'Error'), false);
+    }
+  });
+}
+
+// === Equipos Retirados ===
+async function openRetirados() {
+  const cuenta = currentAccount() || `WX-${randInt(100000, 999999)}`;
+  retiradosChip.textContent = cuenta;
+
+  retiradosForm.innerHTML = `
+    <div class="tool-form" data-form="retired">
+      <label class="form-row"><span class="form-label">Número de serie *</span>
+        <input type="text" data-field="serialValue" placeholder="48575443A1B2C3D4"></label>
+      <label class="form-row"><span class="form-label">Modelo del equipo *</span>
+        <select data-field="equipmentModelId"><option value="">Cargando...</option></select></label>
+      <label class="form-row"><span class="form-label">Motivo de retiro *</span>
+        <select data-field="removalReasonCode"><option value="">Cargando...</option></select></label>
+      <label class="form-row"><span class="form-label">Observaciones</span>
+        <textarea data-field="observations" rows="3" placeholder="Detalles del retiro"></textarea></label>
+      <label class="form-row"><span class="form-label">Foto del código de barras (opcional)</span>
+        <input type="file" accept="image/jpeg,image/png" data-field="barcodePhoto"></label>
+      <div class="barcode-status" data-slot="barcodeStatus"></div>
+      <button class="save-btn" data-action="save">Guardar retiro</button>
+    </div>`;
+
+  const formEl = retiradosForm.querySelector('[data-form="retired"]');
+  const modelSel = formEl.querySelector('[data-field="equipmentModelId"]');
+  const reasonSel = formEl.querySelector('[data-field="removalReasonCode"]');
+  const fileInput = formEl.querySelector('[data-field="barcodePhoto"]');
+  const barcodeStatus = formEl.querySelector('[data-slot="barcodeStatus"]');
+  const saveBtn = formEl.querySelector('[data-action="save"]');
+
+  try {
+    const [models, reasons] = await Promise.all([
+      WifixAPI.listEquipmentModels(),
+      WifixAPI.listRemovalReasons(),
+    ]);
+    modelSel.innerHTML = `<option value="">Selecciona un modelo</option>` +
+      models.filter(m => m.active).map(m =>
+        `<option value="${m.id}">${m.name} (${m.serialFieldType})</option>`).join('');
+    reasonSel.innerHTML = `<option value="">Selecciona un motivo</option>` +
+      reasons.filter(r => r.active).map(r =>
+        `<option value="${r.code}">${r.label}</option>`).join('');
+  } catch (err) {
+    console.error('[Wifix] catálogos:', err);
+    modelSel.innerHTML = `<option value="">No se pudo cargar</option>`;
+    reasonSel.innerHTML = `<option value="">No se pudo cargar</option>`;
+  }
+
+  let uploadedPhotoId = null;
+  fileInput.addEventListener('change', async () => {
+    uploadedPhotoId = null;
+    const file = fileInput.files && fileInput.files[0];
+    if (!file) {
+      barcodeStatus.textContent = '';
+      return;
+    }
+    barcodeStatus.textContent = 'Subiendo foto...';
+    try {
+      const media = await WifixAPI.uploadMedia(file);
+      uploadedPhotoId = media.id;
+      barcodeStatus.textContent = `✓ Foto cargada (${Math.round((media.sizeBytes || file.size) / 1024)} KB)`;
+      barcodeStatus.classList.add('ok');
+      barcodeStatus.classList.remove('fail');
+    } catch (err) {
+      console.error('[Wifix] upload media:', err);
+      barcodeStatus.textContent = `✗ ${err.message || 'No se pudo subir la foto.'}`;
+      barcodeStatus.classList.add('fail');
+      barcodeStatus.classList.remove('ok');
+    }
+  });
+
+  saveBtn.addEventListener('click', async () => {
+    const acct = currentAccount();
+    if (!acct) {
+      showSaveFeedback(saveBtn, 'Falta nº de cuenta', false);
+      return;
+    }
+    const serial = nonEmpty(formEl.querySelector('[data-field="serialValue"]').value);
+    const modelId = modelSel.value;
+    const reasonCode = reasonSel.value;
+    if (!serial || !modelId || !reasonCode) {
+      showSaveFeedback(saveBtn, 'Completa serie, modelo y motivo', false);
+      return;
+    }
+    const payload = {
+      serialValue: serial,
+      equipmentModelId: modelId,
+      removalReasonCode: reasonCode,
+      observations: nonEmpty(formEl.querySelector('[data-field="observations"]').value),
+    };
+    if (uploadedPhotoId) payload.barcodePhotoId = uploadedPhotoId;
+
+    try {
+      const saved = await WifixAPI.createRetiredEquipment(acct, payload);
+      console.log('[Wifix] retiro guardado:', saved);
+      showSaveFeedback(saveBtn, '✓ Guardado', true);
+    } catch (err) {
+      console.error('[Wifix] retiro error:', err);
+      showSaveFeedback(saveBtn, '✗ ' + (err.message || 'Error'), false);
+    }
+  });
+
+  detailRetirados.classList.add('open');
+  detailRetirados.setAttribute('aria-hidden', 'false');
+}
 
 // === Mock data generation ===
 const NOMBRES = ['Carlos','María','Luis','Andrea','José','Patricia','Daniel','Lucía','Ricardo','Camila','Andrés','Sofía','Diego','Valentina'];
