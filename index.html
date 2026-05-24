@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>Wifix</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;900&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="phone-frame">
+    <div class="app">
+      <!-- Fiber optics background -->
+      <div class="bg">
+        <div class="bg-image"></div>
+        <div class="bg-overlay"></div>
+        <div class="bg-grid"></div>
+        <div class="bg-glow glow-1"></div>
+        <div class="bg-glow glow-2"></div>
+      </div>
+
+      <!-- Status bar spacer -->
+      <div class="status-bar"></div>
+
+      <!-- Header -->
+      <header class="header">
+        <div class="logo">
+          <div class="logo-mark">
+            <span class="signal-bar b1"></span>
+            <span class="signal-bar b2"></span>
+            <span class="signal-bar b3"></span>
+            <span class="signal-bar b4"></span>
+          </div>
+          <div class="logo-text">
+            <h1>WIFIX</h1>
+            <span class="logo-sub">Fiber Network Solutions</span>
+          </div>
+        </div>
+        <button class="icon-btn" aria-label="Perfil">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4.4 3.6-8 8-8s8 3.6 8 8"/></svg>
+        </button>
+      </header>
+
+      <!-- Greeting -->
+      <section class="greeting">
+        <p class="greet-hi">Bienvenido</p>
+        <h2 class="greet-title">¿Qué deseas <span class="accent">gestionar</span> hoy?</h2>
+      </section>
+
+      <!-- Category cards -->
+      <main class="categories">
+        <button class="category-card" data-type="instalaciones">
+          <div class="card-glow"></div>
+          <div class="card-icon">
+            <svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M3 12a9 9 0 0 1 18 0"/>
+              <path d="M6.5 12a5.5 5.5 0 0 1 11 0"/>
+              <path d="M10 12a2 2 0 1 1 4 0"/>
+              <circle cx="12" cy="18" r="1.2" fill="currentColor"/>
+            </svg>
+          </div>
+          <div class="card-content">
+            <h3>Instalaciones</h3>
+            <p>Registrar nuevas instalaciones de fibra óptica</p>
+          </div>
+          <div class="card-arrow">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
+          </div>
+        </button>
+
+        <button class="category-card" data-type="visitas">
+          <div class="card-glow"></div>
+          <div class="card-icon">
+            <svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M3 21h18"/>
+              <path d="M5 21V10l7-5 7 5v11"/>
+              <path d="M9 21v-6h6v6"/>
+              <circle cx="12" cy="11" r="1.2" fill="currentColor"/>
+            </svg>
+          </div>
+          <div class="card-content">
+            <h3>Visitas Técnicas</h3>
+            <p>Gestionar visitas y soporte técnico</p>
+          </div>
+          <div class="card-arrow">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
+          </div>
+        </button>
+      </main>
+
+      <!-- Footer status -->
+      <footer class="footer">
+        <div class="status-dot"></div>
+        <span>Conectado · Red estable</span>
+      </footer>
+
+      <!-- Sub-menu screen (slides in) -->
+      <section class="subscreen" id="subscreen" aria-hidden="true">
+        <div class="status-bar"></div>
+        <header class="sub-header">
+          <button class="icon-btn back-btn" id="backBtn" aria-label="Volver">
+            <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg>
+          </button>
+          <div class="sub-title">
+            <span class="sub-eyebrow" id="subEyebrow">Categoría</span>
+            <h2 id="subHeading">Instalaciones</h2>
+          </div>
+          <div class="sub-spacer"></div>
+        </header>
+
+        <div class="account-field">
+          <label for="accountInput">
+            <span class="field-label">Cuenta del Cliente</span>
+            <span class="field-hint">Nº de cuenta</span>
+          </label>
+          <div class="input-wrap">
+            <span class="input-icon">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="3" y="5" width="18" height="14" rx="2"/>
+                <path d="M3 10h18"/>
+                <path d="M7 15h3"/>
+              </svg>
+            </span>
+            <input
+              type="text"
+              id="accountInput"
+              inputmode="numeric"
+              autocomplete="off"
+              placeholder="Ingresa el número de cuenta"
+              maxlength="20"
+            />
+            <button class="input-clear" id="clearAccount" aria-label="Limpiar" type="button">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+            </button>
+          </div>
+        </div>
+
+        <div class="sub-intro">
+          <p>Selecciona la sección que deseas <span class="accent">gestionar</span></p>
+        </div>
+
+        <main class="sub-grid">
+          <button class="sub-card" data-sub="personales">
+            <div class="sub-card-glow"></div>
+            <div class="sub-card-icon ic-personales">
+              <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="8" r="4"/>
+                <path d="M4 21c0-4.4 3.6-8 8-8s8 3.6 8 8"/>
+              </svg>
+            </div>
+            <h3>Datos<br/>Personales</h3>
+            <span class="sub-card-hint">Cliente y contacto</span>
+          </button>
+
+          <button class="sub-card" data-sub="servicio">
+            <div class="sub-card-glow"></div>
+            <div class="sub-card-icon ic-servicio">
+              <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="3" y="6" width="18" height="12" rx="2"/>
+                <path d="M7 10h.01M7 14h.01"/>
+                <path d="M11 10h6M11 14h6"/>
+              </svg>
+            </div>
+            <h3>Datos del<br/>Servicio</h3>
+            <span class="sub-card-hint">Plan y conexión</span>
+          </button>
+
+          <button class="sub-card" data-sub="red">
+            <div class="sub-card-glow"></div>
+            <div class="sub-card-icon ic-red">
+              <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="4" y="3" width="16" height="8" rx="1.5"/>
+                <rect x="4" y="13" width="16" height="8" rx="1.5"/>
+                <path d="M8 7h.01M8 17h.01"/>
+                <path d="M12 7h6M12 17h6"/>
+              </svg>
+            </div>
+            <h3>Red<br/>Interna</h3>
+            <span class="sub-card-hint">WiFi y dispositivos</span>
+          </button>
+
+          <button class="sub-card" data-sub="herramientas">
+            <div class="sub-card-glow"></div>
+            <div class="sub-card-icon ic-herramientas">
+              <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18v3h3l6.3-6.3a4 4 0 0 0 5.4-5.4l-2.5 2.5-2.5-2.5 2.5-2.5z"/>
+              </svg>
+            </div>
+            <h3>Herramientas</h3>
+            <span class="sub-card-hint">Diagnóstico y tests</span>
+          </button>
+        </main>
+
+        <footer class="footer">
+          <div class="status-dot"></div>
+          <span>Conectado · Red estable</span>
+        </footer>
+      </section>
+
+      <!-- Detail screen: Datos del Servicio (Instalaciones) -->
+      <section class="detailscreen" id="detailServicio" aria-hidden="true">
+        <div class="status-bar"></div>
+        <header class="sub-header">
+          <button class="icon-btn back-btn" id="backFromServicio" aria-label="Volver">
+            <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg>
+          </button>
+          <div class="sub-title">
+            <span class="sub-eyebrow">Instalaciones</span>
+            <h2>DATOS DEL SERVICIO</h2>
+          </div>
+          <div class="sub-spacer"></div>
+        </header>
+
+        <div class="account-chip">
+          <span class="chip-label">Cuenta</span>
+          <span class="chip-value" id="servicioChip">—</span>
+          <span class="chip-status">
+            <span class="status-dot"></span>
+            Activa
+          </span>
+        </div>
+
+        <main class="servicio-list" id="servicioList">
+          <!-- populated by JS -->
+        </main>
+
+        <footer class="footer">
+          <div class="status-dot"></div>
+          <span>Conectado · Red estable</span>
+        </footer>
+      </section>
+
+      <!-- Detail screen: Datos Personales -->
+      <section class="detailscreen" id="detailPersonales" aria-hidden="true">
+        <div class="status-bar"></div>
+        <header class="sub-header">
+          <button class="icon-btn back-btn" id="backFromPersonales" aria-label="Volver">
+            <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg>
+          </button>
+          <div class="sub-title">
+            <span class="sub-eyebrow" id="detailEyebrow">Instalaciones</span>
+            <h2>DATOS PERSONALES</h2>
+          </div>
+          <div class="sub-spacer"></div>
+        </header>
+
+        <div class="account-chip">
+          <span class="chip-label">Cuenta</span>
+          <span class="chip-value" id="accountChip">—</span>
+          <span class="chip-status">
+            <span class="status-dot"></span>
+            Activa
+          </span>
+        </div>
+
+        <main class="detail-list" id="detailList">
+          <!-- populated by JS -->
+        </main>
+
+        <footer class="footer">
+          <div class="status-dot"></div>
+          <span>Conectado · Red estable</span>
+        </footer>
+      </section>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
