@@ -1,0 +1,22 @@
+{
+  "name": "wifix-webapp",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Wifix mobile webapp + Capacitor Android shell with native network tools.",
+  "scripts": {
+    "build:web": "node scripts/build-www.mjs",
+    "serve": "npx http-server . -p 5173 -c-1",
+    "cap:sync": "npm run build:web && cap sync android",
+    "cap:open": "cap open android",
+    "cap:run": "npm run build:web && cap run android"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^6.1.2"
+  },
+  "dependencies": {
+    "@capacitor/android": "^6.1.2",
+    "@capacitor/core": "^6.1.2",
+    "@capacitor/device": "^6.0.1",
+    "@capacitor/network": "^6.0.3"
+  }
+}

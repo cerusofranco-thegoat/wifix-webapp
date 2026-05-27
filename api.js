@@ -12,7 +12,25 @@
 (function (global) {
   'use strict';
 
-  const API_BASE_URL = 'http://localhost:8080/herramientas/v1';
+  // Backend URL: por default deriva del host actual usando puerto 8080.
+  // Excepción: si la app está cargada desde localhost (APK Capacitor) o desde
+  // un archivo (file://), no hay backend ahí — apuntamos al LAN_BACKEND_URL.
+  // Cualquier consumidor puede sobrescribir con `WifixAPI.baseUrl = '...'`.
+  const LAN_BACKEND_URL = 'http://192.168.1.172:8080/herramientas/v1';
+
+  function defaultBaseUrl() {
+    try {
+      const host = (window.location.hostname || '').toLowerCase();
+      const proto = window.location.protocol;
+      const inApk = proto === 'file:' || host === 'localhost' || host === '127.0.0.1' || host === '';
+      if (inApk) return LAN_BACKEND_URL;
+      const httpProto = proto === 'https:' ? 'https:' : 'http:';
+      return `${httpProto}//${host}:8080/herramientas/v1`;
+    } catch (_) {
+      return LAN_BACKEND_URL;
+    }
+  }
+  const API_BASE_URL = defaultBaseUrl();
   const TOKEN_STORAGE_KEY = 'wifix_token';
   const USER_STORAGE_KEY = 'wifix_user';
 
@@ -233,7 +251,9 @@
   // API pública
   // ---------------------------------------------------------------------------
   const WifixAPI = {
-    useRealApi: false,
+    // true = habla con el backend real (default). Poner false para usar
+    // los mocks locales sin backend (útil para demos sin servidor).
+    useRealApi: true,
     baseUrl: API_BASE_URL,
 
     // ---- Sesión ------------------------------------------------------------

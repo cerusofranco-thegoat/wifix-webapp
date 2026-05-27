@@ -1,0 +1,12 @@
+{
+  "appId": "com.tulpa.wifix",
+  "appName": "Wifix",
+  "webDir": "www",
+  "server": {
+    "androidScheme": "http",
+    "cleartext": true
+  },
+  "android": {
+    "allowMixedContent": true
+  }
+}

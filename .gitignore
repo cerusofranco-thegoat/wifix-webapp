@@ -1,4 +1,16 @@
 .DS_Store
+Thumbs.db
 node_modules/
 .vscode/
 *.log
+
+# Capacitor build output (regenerable desde npm run build:web)
+www/
+
+# Android Studio / Gradle
+android/.gradle/
+android/.idea/
+android/local.properties
+android/app/build/
+android/build/
+android/captures/
