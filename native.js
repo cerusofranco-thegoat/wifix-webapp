@@ -133,83 +133,262 @@
     },
 
     async speedtest(opts) {
-      // Speedtest real contra speed.cloudflare.com (público, Anycast — la red
-      // de Cloudflare entrega desde el PoP más cercano automáticamente).
-      // Devuelve { downloadMbps, uploadMbps, latencyMs, jitterMs, packetLossPercent, serverName }.
-      // TODO ISP Monitor: cuando esté la API, comparar estos resultados con
-      // las mediciones del lado del ISP para validar QoS y degradación.
-      const CF = 'https://speed.cloudflare.com';
+      // Speedtest tipo Ookla contra servidores Ookla reales (los mismos que
+      // usa speedtest.net), geo-elegidos por la API a la IP del cliente.
+      // En Quito típicamente devuelve CNT, Movistar, Netlife, NEDETEL, Setel.
+      //
+      //  1) Discover: API de Ookla (via CapacitorHttp para saltar CORS) →
+      //     lista de ~20 servers cercanos ordenados por distancia.
+      //  2) Ping a cada server (en paralelo) → eliminar offline y elegir
+      //     el de menor latencia como "seleccionado".
+      //  3) Latencia precisa: 12 muestras al server elegido.
+      //  4) Download multi-stream: 6 conexiones paralelas durante 15 s
+      //     contra ${server}/random4000x4000.jpg, throughput en vivo.
+      //  5) Upload multi-stream: 4 XHR paralelas a /upload.php con
+      //     payload 5 MB cada una, 15 s, throughput por xhr.upload.onprogress.
+      // TODO ISP Monitor: comparar con QoS del lado del ISP.
+
       const onProgress = (opts && opts.onProgress) || (() => {});
 
-      // 1) Server info (PoP de Cloudflare más cercano vía Anycast).
-      onProgress({ phase: 'server' });
-      let serverName = 'Cloudflare';
-      try {
-        const meta = await fetch(`${CF}/meta`, { cache: 'no-store' }).then(r => r.json());
-        const parts = [meta.colo, meta.city, meta.country].filter(Boolean);
-        if (parts.length) serverName = `Cloudflare · ${parts.join(', ')}`;
-      } catch (_) { /* sin server info, seguimos */ }
+      // ---------- Fase 1: Discovery con la API de Ookla ----------
+      // La API geo-localiza por IP del cliente y devuelve servers cercanos.
+      // CapacitorHttp.request hace requests nativas (Java) → bypass CORS.
+      onProgress({ phase: 'discover' });
+      const Http = global.Capacitor && global.Capacitor.Plugins && global.Capacitor.Plugins.CapacitorHttp;
+      const OOKLA_API = 'https://www.speedtest.net/api/js/servers?engine=js&https_functional=true&limit=20';
 
-      // 2) Latencia + jitter — 6 GET pequeños, descartamos el primero (warm-up).
-      onProgress({ phase: 'latency' });
+      let ooklaServers = [];
+      try {
+        if (!Http) throw new Error('CapacitorHttp no disponible en este runtime.');
+        const res = await Http.request({ url: OOKLA_API, method: 'GET' });
+        const list = typeof res.data === 'string' ? JSON.parse(res.data) : res.data;
+        if (!Array.isArray(list)) throw new Error('Respuesta inesperada de la API de Ookla.');
+        ooklaServers = list.map((s) => ({
+          id: String(s.id),
+          sponsor: s.sponsor,
+          city: s.name,
+          country: s.country,
+          label: `${s.sponsor} · ${s.name}, ${s.country}`,
+          host: s.host,
+          url: s.url,   // ej: https://speedtest.cnt.com.ec:8080/speedtest/upload.php
+          distance: s.distance,
+          lat: parseFloat(s.lat), lon: parseFloat(s.lon),
+        }));
+      } catch (err) {
+        throw new Error(`No se pudieron descubrir servidores Ookla: ${err.message || err}`);
+      }
+      if (ooklaServers.length === 0) {
+        throw new Error('La API de Ookla no devolvió servidores para tu ubicación.');
+      }
+
+      // ---------- Fase 2: Ping a cada server (paralelo) ----------
+      onProgress({ phase: 'discover', detail: 'pinging' });
+      const pingServer = async (server) => {
+        const base = server.url.replace(/\/upload\.php$/i, '');
+        const pingUrl = `${base}/random350x350.jpg`;
+        const samples = [];
+        for (let i = 0; i < 4; i++) {
+          const t0 = performance.now();
+          try {
+            const res = await fetch(`${pingUrl}?n=${Date.now()}_${i}`, { cache: 'no-store' });
+            await res.arrayBuffer();
+            if (i > 0) samples.push(performance.now() - t0);
+          } catch (_) {}
+        }
+        return samples.length ? samples.reduce((a, b) => a + b, 0) / samples.length : null;
+      };
+      // Pingueamos hasta los 8 más cercanos por geografía para no demorar.
+      const candidates = ooklaServers.slice(0, 8);
+      const pings = await Promise.all(candidates.map(pingServer));
+      const servers = candidates.map((s, i) => ({
+        id: s.id,
+        label: s.label,
+        sponsor: s.sponsor,
+        city: s.city,
+        country: s.country,
+        host: s.host,
+        url: s.url,
+        distance: s.distance,
+        pingMs: pings[i] != null ? Number(pings[i].toFixed(1)) : null,
+        online: pings[i] != null,
+      }));
+      const online = servers.filter((s) => s.online);
+      if (online.length === 0) {
+        throw new Error('Ningún servidor Ookla cercano respondió al ping (probable bloqueo CORS).');
+      }
+      online.sort((a, b) => a.pingMs - b.pingMs);
+      const selected = online[0];
+      selected.selected = true;
+      // Marca en el array original para que la UI lo muestre
+      const selectedIdx = servers.findIndex((s) => s.id === selected.id);
+      servers[selectedIdx].selected = true;
+
+      const serverName = selected.label;
+      const colo = selected.sponsor;
+      const city = selected.city;
+      const country = selected.country;
+
+      // ---------- Fase 3: Latencia precisa al server elegido ----------
+      onProgress({ phase: 'latency', progress: 0 });
+      const baseUrl = selected.url.replace(/\/upload\.php$/i, '');
+      const pingUrl = `${baseUrl}/random350x350.jpg`;
       const latencies = [];
       let lost = 0;
-      for (let i = 0; i < 7; i++) {
+      const LATENCY_SAMPLES = 12;
+      for (let i = 0; i < LATENCY_SAMPLES + 1; i++) {
         const t0 = performance.now();
         try {
-          await fetch(`${CF}/__down?bytes=1&t=${Date.now()}_${i}`, { cache: 'no-store' });
+          const res = await fetch(`${pingUrl}?n=${Date.now()}_${i}`, { cache: 'no-store' });
+          await res.arrayBuffer();
           if (i > 0) latencies.push(performance.now() - t0);
         } catch (_) { if (i > 0) lost++; }
+        onProgress({ phase: 'latency', progress: i / LATENCY_SAMPLES });
       }
       const latencyMs = latencies.length ? Math.min(...latencies) : NaN;
       const avgLat = latencies.reduce((a, b) => a + b, 0) / Math.max(1, latencies.length);
       const jitterMs = latencies.length > 1
         ? Math.sqrt(latencies.reduce((s, x) => s + (x - avgLat) ** 2, 0) / latencies.length)
         : 0;
-      const packetLossPercent = (lost / 6) * 100;
+      const packetLossPercent = (lost / LATENCY_SAMPLES) * 100;
 
-      // 3) Download — 25 MB. Medimos bytes recibidos mientras streamea.
-      onProgress({ phase: 'download', progress: 0 });
-      const dlBytes = 25 * 1024 * 1024;
-      const tDl = performance.now();
-      const dlRes = await fetch(`${CF}/__down?bytes=${dlBytes}&t=${Date.now()}`, { cache: 'no-store' });
-      let dlReceived = 0;
-      if (dlRes.body && dlRes.body.getReader) {
-        const reader = dlRes.body.getReader();
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          dlReceived += value.length;
-          onProgress({ phase: 'download', progress: dlReceived / dlBytes });
+      // ---------- Fase 4: Download multi-stream (saturando) ----------
+      // 6 conexiones paralelas durante mínimo 15 s. Esto satura el link
+      // — un solo stream HTTP raramente alcanza el bandwidth real por TCP
+      // slow-start y limitaciones de servidor.
+      onProgress({ phase: 'download', progress: 0, mbps: 0, elapsedMs: 0 });
+      const DL_PARALLEL = 6;
+      const DL_MIN_MS = 15000;
+      const DL_MAX_MS = 22000;
+      const dlFile = `${baseUrl}/random4000x4000.jpg`;
+      const dlCtrl = new AbortController();
+      let dlBytes = 0;
+      const dlStart = performance.now();
+
+      const dlRunner = async () => {
+        while (!dlCtrl.signal.aborted) {
+          try {
+            const res = await fetch(`${dlFile}?n=${Math.random()}`, { signal: dlCtrl.signal, cache: 'no-store' });
+            if (!res.body || !res.body.getReader) {
+              const buf = await res.arrayBuffer();
+              dlBytes += buf.byteLength;
+              continue;
+            }
+            const reader = res.body.getReader();
+            while (!dlCtrl.signal.aborted) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              dlBytes += value.length;
+            }
+          } catch (_) { /* abort u otro */ }
         }
-      } else {
-        const buf = await dlRes.arrayBuffer();
-        dlReceived = buf.byteLength;
-      }
-      const dlElapsedMs = performance.now() - tDl;
-      const downloadMbps = (dlReceived * 8) / (dlElapsedMs / 1000) / 1e6;
+      };
+      const dlTasks = Array.from({ length: DL_PARALLEL }, () => dlRunner());
 
-      // 4) Upload — POST 8 MB hacia /__up.
-      onProgress({ phase: 'upload', progress: 0 });
-      const ulBytes = 8 * 1024 * 1024;
-      const payload = new Uint8Array(ulBytes);
-      const tUl = performance.now();
-      await fetch(`${CF}/__up`, { method: 'POST', body: payload, cache: 'no-store' });
-      const ulElapsedMs = performance.now() - tUl;
+      const dlWindow = [];
+      const dlReporter = setInterval(() => {
+        const now = performance.now();
+        dlWindow.push({ ts: now, bytes: dlBytes });
+        while (dlWindow.length > 1 && now - dlWindow[0].ts > 2000) dlWindow.shift();
+        let liveMbps = 0;
+        if (dlWindow.length >= 2) {
+          const dt = (now - dlWindow[0].ts) / 1000;
+          const db = dlBytes - dlWindow[0].bytes;
+          liveMbps = (db * 8) / dt / 1e6;
+        }
+        onProgress({
+          phase: 'download',
+          progress: Math.min(1, (now - dlStart) / DL_MIN_MS),
+          mbps: Number(liveMbps.toFixed(2)),
+          elapsedMs: now - dlStart,
+        });
+        if (now - dlStart >= DL_MIN_MS) dlCtrl.abort();
+        if (now - dlStart >= DL_MAX_MS) dlCtrl.abort();
+      }, 300);
+      await Promise.allSettled(dlTasks);
+      clearInterval(dlReporter);
+      const dlElapsedMs = performance.now() - dlStart;
+      const downloadMbps = (dlBytes * 8) / (dlElapsedMs / 1000) / 1e6;
+
+      // ---------- Fase 5: Upload multi-stream con XHR progress ----------
+      // XMLHttpRequest expone xhr.upload.onprogress — único camino al bytes
+      // subidos en vivo (fetch no lo permite sin Web Streams hacia el server).
+      onProgress({ phase: 'upload', progress: 0, mbps: 0, elapsedMs: 0 });
+      const UL_PARALLEL = 4;
+      const UL_MIN_MS = 15000;
+      const UL_MAX_MS = 22000;
+      const UL_CHUNK = 5 * 1024 * 1024;
+      const ulPayload = new Uint8Array(UL_CHUNK);
+      // Datos pseudo-random para que no se comprima al vuelo.
+      for (let i = 0; i < UL_CHUNK; i++) ulPayload[i] = (i * 137) & 0xff;
+
+      const ulCtrl = new AbortController();
+      let ulBytes = 0;
+      const ulStart = performance.now();
+      const activeXhrs = new Set();
+      ulCtrl.signal.addEventListener('abort', () => {
+        for (const xhr of activeXhrs) { try { xhr.abort(); } catch (_) {} }
+      });
+
+      const ulRunner = () => new Promise((resolve) => {
+        const loop = () => {
+          if (ulCtrl.signal.aborted) return resolve();
+          const xhr = new XMLHttpRequest();
+          activeXhrs.add(xhr);
+          xhr.open('POST', selected.url + '?n=' + Math.random(), true);
+          xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+          let lastLoaded = 0;
+          xhr.upload.onprogress = (e) => {
+            const delta = e.loaded - lastLoaded;
+            lastLoaded = e.loaded;
+            if (delta > 0) ulBytes += delta;
+          };
+          xhr.onloadend = () => { activeXhrs.delete(xhr); loop(); };
+          try { xhr.send(ulPayload); }
+          catch (_) { activeXhrs.delete(xhr); resolve(); }
+        };
+        loop();
+      });
+      const ulTasks = Array.from({ length: UL_PARALLEL }, () => ulRunner());
+
+      const ulWindow = [];
+      const ulReporter = setInterval(() => {
+        const now = performance.now();
+        ulWindow.push({ ts: now, bytes: ulBytes });
+        while (ulWindow.length > 1 && now - ulWindow[0].ts > 2000) ulWindow.shift();
+        let liveMbps = 0;
+        if (ulWindow.length >= 2) {
+          const dt = (now - ulWindow[0].ts) / 1000;
+          const db = ulBytes - ulWindow[0].bytes;
+          liveMbps = (db * 8) / dt / 1e6;
+        }
+        onProgress({
+          phase: 'upload',
+          progress: Math.min(1, (now - ulStart) / UL_MIN_MS),
+          mbps: Number(liveMbps.toFixed(2)),
+          elapsedMs: now - ulStart,
+        });
+        if (now - ulStart >= UL_MIN_MS) ulCtrl.abort();
+        if (now - ulStart >= UL_MAX_MS) ulCtrl.abort();
+      }, 300);
+      await Promise.allSettled(ulTasks);
+      clearInterval(ulReporter);
+      const ulElapsedMs = performance.now() - ulStart;
       const uploadMbps = (ulBytes * 8) / (ulElapsedMs / 1000) / 1e6;
 
       onProgress({ phase: 'done' });
       return {
         serverName,
+        colo, city, country,
+        servers,
         downloadMbps: Number(downloadMbps.toFixed(2)),
         uploadMbps: Number(uploadMbps.toFixed(2)),
         latencyMs: Number(latencyMs.toFixed(1)),
         jitterMs: Number(jitterMs.toFixed(1)),
         packetLossPercent: Number(packetLossPercent.toFixed(1)),
-        downloadBytes: dlReceived,
+        downloadBytes: dlBytes,
         uploadBytes: ulBytes,
         downloadElapsedMs: dlElapsedMs,
-        uploadElapsedMs: ulElapsedMs
+        uploadElapsedMs: ulElapsedMs,
       };
     }
   };
@@ -1128,7 +1307,10 @@
     });
   }
 
-  // --- Speedtest contra Cloudflare (servidor Anycast → mejor PoP automático) ---
+  // --- Speedtest estilo Ookla --------------------------------------------------
+  // Descubre servidores, mide latencia con varias muestras, descarga 100 MB
+  // y sube 30 MB con throughput en vivo. Reporta servidor seleccionado +
+  // lista de candidatos con sus pings individuales.
   function wireSpeedtestForm(formEl) {
     if (formEl.dataset.nativeWired === '1') return;
     formEl.dataset.nativeWired = '1';
@@ -1138,8 +1320,21 @@
     panel.innerHTML = `
       <div class="speedtest-header">
         <span class="speedtest-label">Speedtest</span>
-        <span class="speedtest-server" data-slot="server">— elegirá el mejor servidor —</span>
+        <span class="speedtest-elapsed" data-slot="elapsed"></span>
       </div>
+
+      <div class="speedtest-server-card">
+        <div class="speedtest-server-row">
+          <span class="speedtest-server-label">Servidor seleccionado</span>
+          <span class="speedtest-server-name" data-slot="server-name">— pendiente —</span>
+        </div>
+        <button type="button" class="speedtest-server-toggle" data-action="toggle-servers">
+          <span data-slot="server-count">0</span> servidores disponibles
+          <span class="previous-caret" data-slot="servers-caret">▾</span>
+        </button>
+        <div class="speedtest-server-list" data-slot="server-list" hidden></div>
+      </div>
+
       <div class="speedtest-gauges">
         <div class="speedtest-gauge">
           <span class="speedtest-gauge-icon">↓</span>
@@ -1155,60 +1350,101 @@
       <div class="speedtest-extras">
         <span data-slot="latency">Latencia —</span>
         <span data-slot="jitter">Jitter —</span>
+        <span data-slot="loss">Loss —</span>
       </div>
+
       <div class="speedtest-progress"><div class="speedtest-progress-bar" data-slot="bar"></div></div>
       <button type="button" class="save-btn speedtest-run" data-action="run-speedtest">▶ Ejecutar speedtest</button>
-      <div class="speedtest-status" data-slot="status"></div>`;
+      <div class="speedtest-status" data-slot="status">Tocá ejecutar para empezar — el test toma ~30 s.</div>`;
     formEl.insertBefore(panel, formEl.firstChild);
 
-    const serverSlot = panel.querySelector('[data-slot="server"]');
-    const dlSlot = panel.querySelector('[data-slot="dl"]');
-    const ulSlot = panel.querySelector('[data-slot="ul"]');
-    const latencySlot = panel.querySelector('[data-slot="latency"]');
-    const jitterSlot = panel.querySelector('[data-slot="jitter"]');
-    const barSlot = panel.querySelector('[data-slot="bar"]');
-    const statusSlot = panel.querySelector('[data-slot="status"]');
+    const $ = (s) => panel.querySelector(`[data-slot="${s}"]`);
     const runBtn = panel.querySelector('[data-action="run-speedtest"]');
+    let testStartedAt = null;
+    let elapsedTimer = null;
 
     function setProgress(pct, hue) {
-      barSlot.style.width = `${Math.max(0, Math.min(100, pct))}%`;
-      barSlot.style.background = hue || '#00e0ff';
+      $('bar').style.width = `${Math.max(0, Math.min(100, pct))}%`;
+      $('bar').style.background = hue || '#00e0ff';
     }
+    function fmtElapsed(ms) {
+      const s = Math.floor(ms / 1000);
+      return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+    }
+
+    function renderServers(servers) {
+      const list = $('server-list');
+      $('server-count').textContent = String(servers.length);
+      list.innerHTML = servers.map((s) => {
+        const ping = s.online && s.pingMs != null ? `${s.pingMs} ms` : 'sin conexión';
+        const selected = s.selected ? ' selected' : '';
+        return `
+          <div class="speedtest-server-item${selected}">
+            <div class="speedtest-server-info">
+              <strong>${safeText(s.label)}</strong>
+              ${s.selected ? '<span class="speedtest-server-badge">más cercano</span>' : ''}
+            </div>
+            <span class="speedtest-server-ping ${s.online ? '' : 'offline'}">${ping}</span>
+          </div>`;
+      }).join('');
+    }
+
+    panel.querySelector('[data-action="toggle-servers"]').addEventListener('click', () => {
+      const list = $('server-list');
+      list.hidden = !list.hidden;
+      $('servers-caret').textContent = list.hidden ? '▾' : '▴';
+    });
 
     runBtn.addEventListener('click', async () => {
       runBtn.disabled = true;
       runBtn.textContent = 'Midiendo…';
-      statusSlot.style.color = 'rgba(180,210,255,0.7)';
-      dlSlot.textContent = '—';
-      ulSlot.textContent = '—';
-      latencySlot.textContent = 'Latencia —';
-      jitterSlot.textContent = 'Jitter —';
+      $('status').style.color = 'rgba(180,210,255,0.7)';
+      $('dl').textContent = '—';
+      $('ul').textContent = '—';
+      $('latency').textContent = 'Latencia —';
+      $('jitter').textContent = 'Jitter —';
+      $('loss').textContent = 'Loss —';
       setProgress(2);
+      testStartedAt = performance.now();
+      elapsedTimer = setInterval(() => {
+        $('elapsed').textContent = fmtElapsed(performance.now() - testStartedAt);
+      }, 250);
 
       try {
         const r = await WifixNative.speedtest({
           onProgress: (p) => {
-            if (p.phase === 'server')   { statusSlot.textContent = 'Eligiendo servidor…'; setProgress(8, '#6a5cff'); }
-            if (p.phase === 'latency')  { statusSlot.textContent = 'Midiendo latencia…'; setProgress(22, '#6a5cff'); }
-            if (p.phase === 'download') {
-              statusSlot.textContent = 'Descargando…';
-              setProgress(25 + (p.progress || 0) * 45, '#00e0ff');
-            }
-            if (p.phase === 'upload')   {
-              statusSlot.textContent = 'Subiendo…';
+            if (p.phase === 'discover') {
+              $('status').textContent = 'Descubriendo servidores cercanos…';
+              setProgress(4, '#6a5cff');
+            } else if (p.phase === 'latency') {
+              $('status').textContent = `Midiendo latencia (${Math.round((p.progress || 0) * 100)}%)…`;
+              setProgress(8 + (p.progress || 0) * 7, '#6a5cff');
+            } else if (p.phase === 'download') {
+              const mbps = p.mbps != null ? p.mbps.toFixed(1) : '—';
+              $('dl').textContent = mbps;
+              $('status').textContent = `Descargando · ${mbps} Mbps · ${fmtElapsed(p.elapsedMs || 0)}`;
+              setProgress(15 + (p.progress || 0) * 55, '#00e0ff');
+            } else if (p.phase === 'upload') {
+              $('status').textContent = `Subiendo · ${fmtElapsed(p.elapsedMs || 0)}`;
+              if (p.mbps != null) $('ul').textContent = p.mbps.toFixed(1);
               setProgress(70 + (p.progress || 0) * 28, '#00ff9d');
+            } else if (p.phase === 'done') {
+              $('status').textContent = 'Listo.';
+              setProgress(100, '#00ff9d');
             }
-            if (p.phase === 'done')     { statusSlot.textContent = 'Listo.'; setProgress(100, '#00ff9d'); }
-          }
+          },
         });
 
-        serverSlot.textContent = r.serverName;
-        dlSlot.textContent = r.downloadMbps;
-        ulSlot.textContent = r.uploadMbps;
-        latencySlot.textContent = `Latencia ${r.latencyMs} ms`;
-        jitterSlot.textContent = `Jitter ${r.jitterMs} ms`;
-        statusSlot.style.color = '#3fb950';
-        statusSlot.textContent = `↓ ${r.downloadMbps} / ↑ ${r.uploadMbps} Mbps · ${r.latencyMs} ms`;
+        // Mostrar resultado final
+        $('server-name').textContent = r.serverName || 'Cloudflare';
+        renderServers(r.servers || []);
+        $('dl').textContent = r.downloadMbps;
+        $('ul').textContent = r.uploadMbps;
+        $('latency').textContent = `Latencia ${r.latencyMs} ms`;
+        $('jitter').textContent = `Jitter ${r.jitterMs} ms`;
+        $('loss').textContent = `Loss ${r.packetLossPercent}%`;
+        $('status').style.color = '#3fb950';
+        $('status').textContent = `↓ ${r.downloadMbps} / ↑ ${r.uploadMbps} Mbps · ${r.latencyMs} ms · Cloudflare ${r.colo || ''}`.trim();
 
         setField(formEl, 'downloadMbps', r.downloadMbps);
         setField(formEl, 'uploadMbps', r.uploadMbps);
@@ -1218,10 +1454,11 @@
         setField(formEl, 'serverName', r.serverName);
       } catch (err) {
         console.error('[Wifix] speedtest:', err);
-        statusSlot.style.color = '#f85149';
-        statusSlot.textContent = err.message || String(err);
+        $('status').style.color = '#f85149';
+        $('status').textContent = err.message || String(err);
         setProgress(0);
       } finally {
+        if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
         runBtn.disabled = false;
         runBtn.textContent = '▶ Ejecutar speedtest';
       }

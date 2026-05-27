@@ -290,6 +290,110 @@ body {
   color: rgba(180, 210, 255, 0.7);
 }
 
+/* === Speedtest — descubrimiento de servidores (estilo Ookla) ============== */
+.speedtest-elapsed {
+  font-family: 'Orbitron', sans-serif;
+  font-size: 11px;
+  letter-spacing: 1px;
+  color: rgba(180, 210, 255, 0.55);
+  margin-left: auto;
+}
+
+.speedtest-server-card {
+  border: 1px solid rgba(0, 224, 255, 0.18);
+  border-radius: 12px;
+  padding: 10px 12px;
+  background: rgba(0, 0, 0, 0.28);
+  margin-bottom: 4px;
+}
+.speedtest-server-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 8px;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.speedtest-server-label {
+  font-size: 10.5px;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  color: rgba(180, 210, 255, 0.55);
+}
+.speedtest-server-name {
+  font-family: 'Orbitron', sans-serif;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: #00e0ff;
+  text-align: right;
+}
+.speedtest-server-toggle {
+  width: 100%;
+  background: transparent;
+  border: 0;
+  padding: 4px 0;
+  color: rgba(180, 210, 255, 0.7);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.speedtest-server-toggle:hover { color: #00e0ff; }
+
+.speedtest-server-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 6px;
+}
+.speedtest-server-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.25);
+  font-size: 11.5px;
+  gap: 8px;
+}
+.speedtest-server-item.selected {
+  background: rgba(0, 224, 255, 0.1);
+  border: 1px solid rgba(0, 224, 255, 0.35);
+}
+.speedtest-server-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.speedtest-server-info strong { color: #f0f6ff; font-size: 12px; }
+.speedtest-server-badge {
+  font-size: 9.5px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: #00e0ff;
+  background: rgba(0, 224, 255, 0.15);
+  border: 1px solid rgba(0, 224, 255, 0.4);
+  padding: 1px 6px;
+  border-radius: 999px;
+  display: inline-block;
+  margin-top: 2px;
+  width: max-content;
+}
+.speedtest-server-ping {
+  font-family: monospace;
+  color: #f0f6ff;
+  font-weight: 700;
+  font-size: 12px;
+}
+.speedtest-server-ping.offline {
+  color: #f85149;
+  font-weight: 500;
+  font-style: italic;
+}
+
 /* === Mapa de Calor WiFi (medidor + odómetro por habitación) =============== */
 .heatmap-router-card,
 .wifi-meter-card {
