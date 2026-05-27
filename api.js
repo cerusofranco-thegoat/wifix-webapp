@@ -1,27 +1,20 @@
 /* ===========================================================================
- * api.js — Capa de consumo de la API del backend "Herramientas y Equipos
- * Retirados" (Fase 1). Es el ÚNICO punto que sabe si los datos son mock o
- * vienen de un servidor real. Para cambiar de mock a backend real basta con
- * poner WifixAPI.useRealApi = true y configurar API_BASE_URL.
+ * api.js — Capa de consumo de la API del backend de la app Wifix (Fase 2).
+ * Es el ÚNICO punto que sabe si los datos son mock o vienen del servidor real.
+ * Para usar el backend real: WifixAPI.useRealApi = true y configurar
+ * API_BASE_URL.
  *
- * Sigue el patrón de buildXxxMock() del repo: cada función devuelve datos
- * con la forma de los esquemas del OpenAPI; al cambiar a fetch real ni
- * la pantalla ni el guardado se enteran del cambio.
+ * Maneja también el token: tras `login()` se guarda en localStorage y se
+ * envía como `Authorization: Bearer` en cada llamada protegida. Si el backend
+ * responde 401, dispara el evento DOM `wifix:unauthorized` para que la
+ * pantalla vuelva al login.
  * ========================================================================*/
 (function (global) {
   'use strict';
 
   const API_BASE_URL = 'http://localhost:8080/herramientas/v1';
-
-  // Identificadores upstream "por definir": en Fase 1 se rellenan aquí con
-  // valores de prueba. Cuando exista el sistema upstream se inyectarán desde
-  // afuera y se quitarán de aquí.
-  const STUB_IDS = {
-    clientId: 'CLI-FASE1-TEST',
-    contractId: 'CTR-FASE1-TEST',
-    visitId: 'VIS-FASE1-TEST',
-    technicianId: 'TEC-FASE1-TEST',
-  };
+  const TOKEN_STORAGE_KEY = 'wifix_token';
+  const USER_STORAGE_KEY = 'wifix_user';
 
   // ---------------------------------------------------------------------------
   // Datos de catálogo mock — alineados con SPEC §8 (mismos nombres y códigos).
@@ -65,7 +58,6 @@
   // Helpers comunes
   // ---------------------------------------------------------------------------
   function uuidMock() {
-    // RFC 4122 v4 con Math.random — suficiente para Fase 1 mock.
     return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
       const r = (Math.random() * 16) | 0;
       const v = c === 'x' ? r : (r & 0x3) | 0x8;
@@ -81,9 +73,16 @@
     if (!accountNumber || !String(accountNumber).trim()) {
       throw new Error('accountNumber es obligatorio.');
     }
+    // technicianId NO se envía desde el frontend: el backend lo derivará del
+    // user.id del JWT. clientId/visitId siguen como valores de prueba hasta
+    // que exista el sistema upstream.
     return Object.assign(
-      { accountNumber: String(accountNumber).trim() },
-      STUB_IDS,
+      {
+        accountNumber: String(accountNumber).trim(),
+        clientId: 'CLI-FASE2-TEST',
+        contractId: 'CTR-FASE2-TEST',
+        visitId: 'VIS-FASE2-TEST',
+      },
       body,
     );
   }
@@ -92,14 +91,50 @@
     return new Promise(function (resolve) { setTimeout(resolve, ms); });
   }
 
+  // --- Gestión de token --------------------------------------------------
+  function getToken() {
+    try { return localStorage.getItem(TOKEN_STORAGE_KEY); } catch (_) { return null; }
+  }
+  function setToken(token) {
+    try {
+      if (token) localStorage.setItem(TOKEN_STORAGE_KEY, token);
+      else localStorage.removeItem(TOKEN_STORAGE_KEY);
+    } catch (_) { /* localStorage bloqueado, no se persiste */ }
+  }
+  function getUser() {
+    try {
+      const raw = localStorage.getItem(USER_STORAGE_KEY);
+      return raw ? JSON.parse(raw) : null;
+    } catch (_) { return null; }
+  }
+  function setUser(user) {
+    try {
+      if (user) localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(user));
+      else localStorage.removeItem(USER_STORAGE_KEY);
+    } catch (_) { /* localStorage bloqueado */ }
+  }
+
+  function emitUnauthorized() {
+    try {
+      window.dispatchEvent(new CustomEvent('wifix:unauthorized'));
+    } catch (_) { /* ignore */ }
+  }
+
   async function fetchJson(method, path, body) {
     const init = { method, headers: { 'Content-Type': 'application/json' } };
+    const token = getToken();
+    if (token) init.headers['Authorization'] = 'Bearer ' + token;
     if (body !== undefined) init.body = JSON.stringify(body);
     const res = await fetch(API_BASE_URL + path, init);
     const data = await res.json().catch(function () { return null; });
     if (!res.ok) {
       const code = data && data.code ? data.code : 'HTTP_' + res.status;
       const msg = data && data.message ? data.message : 'Error de red.';
+      if (res.status === 401) {
+        setToken(null);
+        setUser(null);
+        emitUnauthorized();
+      }
       const err = new Error(msg);
       err.code = code;
       err.details = data && data.details;
@@ -109,11 +144,140 @@
   }
 
   // ---------------------------------------------------------------------------
+  // Catálogos mock fallback para client-profile (al usar mock antes del login).
+  // ---------------------------------------------------------------------------
+  function mockClientProfile(accountNumber) {
+    return {
+      accountNumber: accountNumber,
+      fullName: 'Cliente Mock Apellido Apellido',
+      address: 'Av. Amazonas N1234, Quito',
+      phones: ['0991234567', '022345678'],
+      planName: 'Wifix Hogar 200',
+      contractedDownloadMbps: 200,
+      contractedUploadMbps: 100,
+    };
+  }
+  function mockContractStatus(accountNumber) {
+    return {
+      clientName: 'Cliente Mock Apellido Apellido',
+      accounts: [
+        { accountNumber: accountNumber, contractId: 'CTR-' + accountNumber, status: 'ACTIVA' },
+      ],
+    };
+  }
+  function mockNearbyNaps() {
+    return [
+      { napCode: 'NAP-12-04-3', distanceMeters: 58.2, occupiedPorts: 11, totalPorts: 16 },
+      { napCode: 'NAP-12-05-1', distanceMeters: 142.7, occupiedPorts: 6, totalPorts: 8 },
+    ];
+  }
+  function mockNapPorts(napCode) {
+    return {
+      napCode: napCode,
+      ports: Array.from({ length: 16 }, (_, i) => ({
+        portNumber: i + 1,
+        occupied: i % 3 !== 0,
+        ...(i % 3 !== 0 ? { clientAccountNumber: 'WX-' + (100000 + i), clientStatus: i % 7 === 0 ? 'S' : 'A' } : {}),
+      })),
+    };
+  }
+  function mockNetworkMetrics(accountNumber) {
+    return {
+      accountNumber: accountNumber,
+      technology: 'GPON',
+      signalLevels: { rxDbm: -18.4, txDbm: 2.1 },
+      outagesLast24h: 1,
+      trafficMbpsIn: 87.3,
+      trafficMbpsOut: 12.5,
+      measuredAt: nowIso(),
+    };
+  }
+  function mockNodeEvents() {
+    return [
+      { type: 'Mantenimiento de nodo', description: 'Reset general y validación.', status: 'RESUELTO', occurredAt: nowIso() },
+    ];
+  }
+  function mockLanDevices() {
+    return [
+      { hostname: 'iPhone-Cliente', ipAddress: '192.168.1.45', macAddress: 'A4:B8:7E:11:22:33', leaseExpiresAt: nowIso() },
+      { hostname: 'TV-Samsung', ipAddress: '192.168.1.102', macAddress: '00:1A:2B:CC:DD:EE', leaseExpiresAt: nowIso() },
+    ];
+  }
+  function mockWifiDevices() {
+    return [
+      { hostname: 'iPhone-Cliente', macAddress: 'A4:B8:7E:11:22:33', band: '5GHz', signalDbm: -52 },
+      { hostname: 'Laptop-HP',     macAddress: '3C:5A:B4:DE:AD:BE', band: '2.4GHz', signalDbm: -68 },
+    ];
+  }
+  function mockWifiConfig(accountNumber) {
+    return {
+      accountNumber: accountNumber,
+      bands: [
+        { band: '2.4GHz', ssid: 'WIFIX_Cliente' },
+        { band: '5GHz', ssid: 'WIFIX_Cliente_5G' },
+      ],
+    };
+  }
+  function mockClosedTask(seed) {
+    return {
+      taskId: 'TASK/' + (100000 + seed) + '/2026',
+      occurredAt: nowIso(),
+      reason: 'WiFi débil en habitaciones',
+      closingNotes: 'Se cambió canal a 5GHz y mejoró cobertura.',
+      technician: 'Andrés Cevallos',
+      result: seed % 2 === 0 ? 'SATISFACTORIA' : 'INSATISFACTORIA',
+    };
+  }
+
+  // ---------------------------------------------------------------------------
   // API pública
   // ---------------------------------------------------------------------------
   const WifixAPI = {
     useRealApi: false,
     baseUrl: API_BASE_URL,
+
+    // ---- Sesión ------------------------------------------------------------
+    isAuthenticated() {
+      return Boolean(getToken());
+    },
+    getCurrentUser: getUser,
+    getToken: getToken,
+    logout() {
+      setToken(null);
+      setUser(null);
+    },
+
+    async login(email, password) {
+      if (this.useRealApi) {
+        const data = await fetchJson('POST', '/auth/login', { email: email, password: password });
+        setToken(data.token);
+        setUser(data.user);
+        return data;
+      }
+      await delay(120);
+      if (!email || !password) {
+        const err = new Error('Correo y contraseña son obligatorios.');
+        err.code = 'VALIDATION_ERROR';
+        throw err;
+      }
+      // Mock: credenciales de demostración.
+      if (email !== 'franco@tulpasolutions.com' || password !== 'wifix-dev-2026') {
+        const err = new Error('Correo o contraseña inválidos.');
+        err.code = 'UNAUTHORIZED';
+        throw err;
+      }
+      const fakeUser = { id: 'mock-user-1', email: email, name: 'Franco Ceruso', active: true };
+      const fakeToken = 'mock.' + btoa(email) + '.token';
+      setToken(fakeToken);
+      setUser(fakeUser);
+      return { token: fakeToken, user: fakeUser };
+    },
+
+    async getMe() {
+      if (this.useRealApi) return fetchJson('GET', '/auth/me');
+      await delay(40);
+      return getUser();
+    },
 
     // ---- Catálogos ---------------------------------------------------------
     async listEquipmentModels() {
@@ -144,28 +308,24 @@
       await delay(80);
       return Object.assign({ id: uuidMock(), createdAt: nowIso() }, body);
     },
-
     async createSpeedtest(accountNumber, payload) {
       const body = withContext(accountNumber, Object.assign({ measuredAt: nowIso() }, payload));
       if (this.useRealApi) return fetchJson('POST', '/speedtests', body);
       await delay(80);
       return Object.assign({ id: uuidMock(), createdAt: nowIso() }, body);
     },
-
     async createWifiHeatmap(accountNumber, payload) {
       const body = withContext(accountNumber, payload);
       if (this.useRealApi) return fetchJson('POST', '/wifi-heatmaps', body);
       await delay(80);
       return Object.assign({ id: uuidMock(), createdAt: nowIso() }, body);
     },
-
     async createPingTest(accountNumber, payload) {
       const body = withContext(accountNumber, Object.assign({ measuredAt: nowIso() }, payload));
       if (this.useRealApi) return fetchJson('POST', '/ping-tests', body);
       await delay(80);
       return Object.assign({ id: uuidMock(), createdAt: nowIso() }, body);
     },
-
     async createTracerouteTest(accountNumber, payload) {
       const body = withContext(accountNumber, Object.assign({ measuredAt: nowIso() }, payload));
       if (this.useRealApi) return fetchJson('POST', '/traceroute-tests', body);
@@ -186,9 +346,13 @@
       if (this.useRealApi) {
         const form = new FormData();
         form.append('file', file);
-        const res = await fetch(API_BASE_URL + '/media', { method: 'POST', body: form });
+        const token = getToken();
+        const headers = {};
+        if (token) headers['Authorization'] = 'Bearer ' + token;
+        const res = await fetch(API_BASE_URL + '/media', { method: 'POST', body: form, headers: headers });
         const data = await res.json().catch(function () { return null; });
         if (!res.ok) {
+          if (res.status === 401) { setToken(null); setUser(null); emitUnauthorized(); }
           const err = new Error((data && data.message) || 'Error al subir archivo.');
           err.code = (data && data.code) || 'HTTP_' + res.status;
           throw err;
@@ -220,6 +384,108 @@
         tracerouteTests: [],
         retiredEquipment: [],
       };
+    },
+
+    // ---- Datos del Cliente (campos 1-5, 7) ---------------------------------
+    async getClientProfile(accountNumber) {
+      if (this.useRealApi) {
+        return fetchJson('GET', '/accounts/' + encodeURIComponent(accountNumber) + '/client-profile');
+      }
+      await delay(80);
+      return mockClientProfile(accountNumber);
+    },
+    async updateClientProfile(accountNumber, input) {
+      if (this.useRealApi) {
+        return fetchJson('PUT', '/accounts/' + encodeURIComponent(accountNumber) + '/client-profile', input);
+      }
+      await delay(120);
+      return Object.assign(mockClientProfile(accountNumber), input);
+    },
+    async getContractStatus(accountNumber) {
+      if (this.useRealApi) {
+        return fetchJson('GET', '/accounts/' + encodeURIComponent(accountNumber) + '/contract-status');
+      }
+      await delay(80);
+      return mockContractStatus(accountNumber);
+    },
+
+    // ---- Diagnóstico de Red (campos 6, 8-14, 19-21) ------------------------
+    async getNearbyNaps(accountNumber) {
+      if (this.useRealApi) {
+        return fetchJson('GET', '/accounts/' + encodeURIComponent(accountNumber) + '/nearby-naps');
+      }
+      await delay(80);
+      return mockNearbyNaps();
+    },
+    async getNapPorts(napCode) {
+      if (this.useRealApi) {
+        return fetchJson('GET', '/naps/' + encodeURIComponent(napCode) + '/ports');
+      }
+      await delay(80);
+      return mockNapPorts(napCode);
+    },
+    async getNetworkMetrics(accountNumber) {
+      if (this.useRealApi) {
+        return fetchJson('GET', '/accounts/' + encodeURIComponent(accountNumber) + '/network-metrics');
+      }
+      await delay(80);
+      return mockNetworkMetrics(accountNumber);
+    },
+    async getNodeEvents(accountNumber) {
+      if (this.useRealApi) {
+        return fetchJson('GET', '/accounts/' + encodeURIComponent(accountNumber) + '/node-events');
+      }
+      await delay(80);
+      return mockNodeEvents();
+    },
+    async getLanDevices(accountNumber) {
+      if (this.useRealApi) {
+        return fetchJson('GET', '/accounts/' + encodeURIComponent(accountNumber) + '/lan-devices');
+      }
+      await delay(80);
+      return mockLanDevices();
+    },
+    async getWifiDevices(accountNumber) {
+      if (this.useRealApi) {
+        return fetchJson('GET', '/accounts/' + encodeURIComponent(accountNumber) + '/wifi-devices');
+      }
+      await delay(80);
+      return mockWifiDevices();
+    },
+    async getWifiConfig(accountNumber) {
+      if (this.useRealApi) {
+        return fetchJson('GET', '/accounts/' + encodeURIComponent(accountNumber) + '/wifi-config');
+      }
+      await delay(80);
+      return mockWifiConfig(accountNumber);
+    },
+    async updateWifiConfig(accountNumber, input) {
+      if (this.useRealApi) {
+        return fetchJson('PUT', '/accounts/' + encodeURIComponent(accountNumber) + '/wifi-config', input);
+      }
+      await delay(120);
+      const base = mockWifiConfig(accountNumber);
+      base.bands = input.bands.map(function (b) { return { band: b.band, ssid: b.ssid }; });
+      return base;
+    },
+
+    // ---- Tareas y Visitas (campos 15-16) -----------------------------------
+    async getUnsatisfactoryTasks(accountNumber) {
+      if (this.useRealApi) {
+        return fetchJson('GET', '/accounts/' + encodeURIComponent(accountNumber) + '/unsatisfactory-tasks');
+      }
+      await delay(80);
+      return [mockClosedTask(1), mockClosedTask(3)].map(function (t) {
+        t.result = 'INSATISFACTORIA';
+        return t;
+      });
+    },
+    async getPreviousVisits(accountNumber) {
+      if (this.useRealApi) {
+        return fetchJson('GET', '/accounts/' + encodeURIComponent(accountNumber) + '/previous-visits');
+      }
+      await delay(80);
+      return [mockClosedTask(2), mockClosedTask(4), mockClosedTask(6)];
     },
   };
 

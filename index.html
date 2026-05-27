@@ -12,6 +12,51 @@
 <body>
   <div class="phone-frame">
     <div class="app">
+      <!-- Login screen (cierra al autenticar; se reabre si el token expira) -->
+      <section class="loginscreen open" id="loginScreen" aria-hidden="false">
+        <div class="status-bar"></div>
+        <div class="bg">
+          <div class="bg-image"></div>
+          <div class="bg-overlay"></div>
+          <div class="bg-grid"></div>
+          <div class="bg-glow glow-1"></div>
+          <div class="bg-glow glow-2"></div>
+        </div>
+        <div class="login-card">
+          <div class="logo">
+            <div class="logo-mark">
+              <span class="signal-bar b1"></span>
+              <span class="signal-bar b2"></span>
+              <span class="signal-bar b3"></span>
+              <span class="signal-bar b4"></span>
+            </div>
+            <div class="logo-text">
+              <h1>WIFIX</h1>
+              <span class="logo-sub">Fiber Network Solutions</span>
+            </div>
+          </div>
+          <h2 class="login-title">Inicia sesión</h2>
+          <p class="login-subtitle">Acceso restringido a técnicos de campo.</p>
+
+          <form class="login-form" id="loginForm" autocomplete="on" novalidate>
+            <label class="form-row">
+              <span class="form-label">Correo</span>
+              <input type="email" id="loginEmail" placeholder="franco@tulpasolutions.com"
+                autocomplete="username" required>
+            </label>
+            <label class="form-row">
+              <span class="form-label">Contraseña</span>
+              <input type="password" id="loginPassword" placeholder="••••••••"
+                autocomplete="current-password" required>
+            </label>
+            <div class="login-error" id="loginError" role="alert" aria-live="polite"></div>
+            <button class="save-btn login-submit" type="submit" id="loginSubmit">
+              Ingresar
+            </button>
+          </form>
+        </div>
+      </section>
+
       <!-- Fiber optics background -->
       <div class="bg">
         <div class="bg-image"></div>
@@ -38,8 +83,12 @@
             <span class="logo-sub">Fiber Network Solutions</span>
           </div>
         </div>
-        <button class="icon-btn" aria-label="Perfil">
-          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4.4 3.6-8 8-8s8 3.6 8 8"/></svg>
+        <button class="icon-btn" id="logoutBtn" aria-label="Cerrar sesión" title="Cerrar sesión">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+            <path d="M16 17l5-5-5-5"/>
+            <path d="M21 12H9"/>
+          </svg>
         </button>
       </header>
 
@@ -308,6 +357,39 @@
         </p>
 
         <main class="servicio-list" id="herramientasList">
+          <!-- populated by JS -->
+        </main>
+
+        <footer class="footer">
+          <div class="status-dot"></div>
+          <span>Conectado · Red estable</span>
+        </footer>
+      </section>
+
+      <!-- Detail screen: Red Interna (campos 19-21) -->
+      <section class="detailscreen" id="detailRed" aria-hidden="true">
+        <div class="status-bar"></div>
+        <header class="sub-header">
+          <button class="icon-btn back-btn" id="backFromRed" aria-label="Volver">
+            <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg>
+          </button>
+          <div class="sub-title">
+            <span class="sub-eyebrow">Diagnóstico</span>
+            <h2>RED INTERNA</h2>
+          </div>
+          <div class="sub-spacer"></div>
+        </header>
+
+        <div class="account-chip">
+          <span class="chip-label">Cuenta</span>
+          <span class="chip-value" id="redChip">—</span>
+          <span class="chip-status">
+            <span class="status-dot"></span>
+            Activa
+          </span>
+        </div>
+
+        <main class="servicio-list" id="redList">
           <!-- populated by JS -->
         </main>
 

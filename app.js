@@ -1,3 +1,20 @@
+// ===========================================================================
+// app.js — Wifix webapp (Fase 2). Maneja el flujo de la app: login, menú,
+// pantallas de Datos Personales, Datos del Servicio, Red Interna,
+// Herramientas y Equipos Retirados. Toda la entrada/salida pasa por
+// WifixAPI (api.js): por defecto mock, alternable a backend real
+// (WifixAPI.useRealApi = true).
+// ===========================================================================
+
+// === Referencias del DOM ====================================================
+const loginScreen = document.getElementById('loginScreen');
+const loginForm = document.getElementById('loginForm');
+const loginEmail = document.getElementById('loginEmail');
+const loginPassword = document.getElementById('loginPassword');
+const loginError = document.getElementById('loginError');
+const loginSubmit = document.getElementById('loginSubmit');
+const logoutBtn = document.getElementById('logoutBtn');
+
 const cards = document.querySelectorAll('.category-card');
 const subscreen = document.getElementById('subscreen');
 const subHeading = document.getElementById('subHeading');
@@ -16,6 +33,11 @@ const servicioChip = document.getElementById('servicioChip');
 const servicioList = document.getElementById('servicioList');
 const backFromServicio = document.getElementById('backFromServicio');
 
+const detailRed = document.getElementById('detailRed');
+const redChip = document.getElementById('redChip');
+const redList = document.getElementById('redList');
+const backFromRed = document.getElementById('backFromRed');
+
 const labels = {
   instalaciones: { eyebrow: 'Categoría', title: 'Instalaciones' },
   visitas:       { eyebrow: 'Categoría', title: 'Visitas Técnicas' },
@@ -23,6 +45,65 @@ const labels = {
 
 let currentCategory = 'instalaciones';
 
+// === Login y sesión =========================================================
+function showLogin() {
+  loginScreen.classList.add('open');
+  loginScreen.setAttribute('aria-hidden', 'false');
+  loginError.textContent = '';
+  loginPassword.value = '';
+}
+
+function hideLogin() {
+  loginScreen.classList.remove('open');
+  loginScreen.setAttribute('aria-hidden', 'true');
+}
+
+if (WifixAPI.isAuthenticated()) {
+  hideLogin();
+} else {
+  showLogin();
+}
+
+loginForm.addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  loginError.textContent = '';
+  loginSubmit.disabled = true;
+  loginSubmit.textContent = 'Ingresando…';
+  try {
+    await WifixAPI.login(loginEmail.value.trim(), loginPassword.value);
+    hideLogin();
+    loginEmail.value = '';
+    loginPassword.value = '';
+  } catch (err) {
+    console.error('[Wifix] login error:', err);
+    loginError.textContent = err.message || 'No se pudo iniciar sesión.';
+  } finally {
+    loginSubmit.disabled = false;
+    loginSubmit.textContent = 'Ingresar';
+  }
+});
+
+logoutBtn.addEventListener('click', () => {
+  WifixAPI.logout();
+  // Cerrar todas las detail screens y el subscreen al cerrar sesión.
+  document.querySelectorAll('.detailscreen, .subscreen').forEach((el) => {
+    el.classList.remove('open');
+    el.setAttribute('aria-hidden', 'true');
+  });
+  showLogin();
+});
+
+window.addEventListener('wifix:unauthorized', () => {
+  console.warn('[Wifix] sesión expirada, volviendo a login.');
+  document.querySelectorAll('.detailscreen, .subscreen').forEach((el) => {
+    el.classList.remove('open');
+    el.setAttribute('aria-hidden', 'true');
+  });
+  showLogin();
+  loginError.textContent = 'Tu sesión expiró. Vuelve a ingresar.';
+});
+
+// === Categorías =============================================================
 cards.forEach(card => {
   card.addEventListener('click', () => {
     const type = card.dataset.type;
@@ -34,7 +115,6 @@ cards.forEach(card => {
     }
     subscreen.classList.add('open');
     subscreen.setAttribute('aria-hidden', 'false');
-    console.log(`[Wifix] Categoría seleccionada: ${type}`);
   });
 });
 
@@ -43,7 +123,7 @@ backBtn.addEventListener('click', () => {
   subscreen.setAttribute('aria-hidden', 'true');
 });
 
-// === Account input ===
+// === Account input ==========================================================
 const accountInput = document.getElementById('accountInput');
 const clearAccount = document.getElementById('clearAccount');
 const inputWrap = accountInput.closest('.input-wrap');
@@ -57,13 +137,13 @@ clearAccount.addEventListener('click', () => {
   accountInput.focus();
 });
 
-// === Sub categories ===
+// === Sub categorías =========================================================
 subCards.forEach(card => {
   card.addEventListener('click', () => {
     const sub = card.dataset.sub;
-    console.log(`[Wifix] Subcategoría seleccionada: ${sub}`);
     if (sub === 'personales') openDatosPersonales();
-    if (sub === 'servicio' && currentCategory === 'instalaciones') openDatosServicio();
+    if (sub === 'servicio') openDatosServicio();
+    if (sub === 'red') openRedInterna();
     if (sub === 'herramientas') openHerramientas();
     if (sub === 'retirados') openRetirados();
   });
@@ -73,13 +153,16 @@ backFromPersonales.addEventListener('click', () => {
   detailPersonales.classList.remove('open');
   detailPersonales.setAttribute('aria-hidden', 'true');
 });
-
 backFromServicio.addEventListener('click', () => {
   detailServicio.classList.remove('open');
   detailServicio.setAttribute('aria-hidden', 'true');
 });
+backFromRed.addEventListener('click', () => {
+  detailRed.classList.remove('open');
+  detailRed.setAttribute('aria-hidden', 'true');
+});
 
-// === Herramientas + Equipos Retirados ===
+// === Herramientas + Equipos Retirados (Fase 1, sin cambios) =================
 const detailHerramientas = document.getElementById('detailHerramientas');
 const herramientasChip = document.getElementById('herramientasChip');
 const herramientasList = document.getElementById('herramientasList');
@@ -99,6 +182,7 @@ backFromRetirados.addEventListener('click', () => {
   detailRetirados.setAttribute('aria-hidden', 'true');
 });
 
+// === Helpers compartidos ====================================================
 function currentAccount() {
   return (accountInput.value || '').trim();
 }
@@ -127,6 +211,44 @@ function nonEmpty(value) {
   return String(value).trim() || undefined;
 }
 
+function escapeHtml(s) {
+  return String(s ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
+
+// Mock data generation (sin cambios — usado donde la API no aplica)
+const pick = arr => arr[Math.floor(Math.random() * arr.length)];
+const randInt = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
+
+function pad(n, len = 2) { return String(n).padStart(len, '0'); }
+function formatDate(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear().toString().slice(-2)} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+// ============================================================================
+// ICONOS
+// ============================================================================
+const SERVICIO_ICONS = {
+  nap:   '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s7-7.5 7-13a7 7 0 1 0-14 0c0 5.5 7 13 7 13z"/><circle cx="12" cy="9" r="2"/></svg>',
+  user:  '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="3.5"/><path d="M4.5 20a7.5 7.5 0 0 1 15 0"/></svg>',
+  ports: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 10h.01M11 10h.01M15 10h.01M19 10h.01M7 14h.01M11 14h.01M15 14h.01M19 14h.01"/></svg>',
+  alert: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.7L2 18a2 2 0 0 0 1.7 3h16.6A2 2 0 0 0 22 18L13.7 3.7a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg>',
+  note:  '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M9 13h6M9 17h4"/></svg>',
+  history:'<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/><path d="M12 8v5l3 2"/></svg>',
+  metrics:'<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M7 14l3-3 4 4 5-6"/></svg>',
+  wifi:  '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12a10 10 0 0 1 14 0"/><path d="M8.5 15.5a5 5 0 0 1 7 0"/><circle cx="12" cy="19" r="1.2" fill="currentColor"/></svg>',
+  lan:   '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="9" width="18" height="10" rx="2"/><path d="M7 9V5h10v4M9 13h.01M13 13h.01"/></svg>',
+  key:   '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="15" r="3"/><path d="M10.5 13l8.5-8.5M16 7l3 3"/></svg>',
+  chev:  '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>',
+};
+
 const TOOL_ICONS = {
   distance: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h18"/><path d="M3 8l-2 4 2 4M21 8l2 4-2 4"/></svg>',
   speed:    '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 18 0"/><path d="M12 12l4-3"/><circle cx="12" cy="12" r="1.2" fill="currentColor"/></svg>',
@@ -136,7 +258,469 @@ const TOOL_ICONS = {
   chev:     SERVICIO_ICONS.chev,
 };
 
-// --- Renderers de formularios de cada herramienta ---
+const ICONS = {
+  user: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4.4 3.6-8 8-8s8 3.6 8 8"/></svg>',
+  pin:  '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s7-7.5 7-13a7 7 0 1 0-14 0c0 5.5 7 13 7 13z"/><circle cx="12" cy="9" r="2.5"/></svg>',
+  phone:'<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1.9.3 1.8.6 2.6a2 2 0 0 1-.5 2.1L7.9 9.7a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.5c.8.3 1.7.5 2.6.6a2 2 0 0 1 1.7 2z"/></svg>',
+  plan: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7H4a1 1 0 0 0-1 1v9a1 1 0 0 0 1 1h16a1 1 0 0 0 1-1V8a1 1 0 0 0-1-1z"/><path d="M16 7V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v2"/></svg>',
+  speed:'<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 18 0"/><path d="M12 12l4-3"/><circle cx="12" cy="12" r="1.2" fill="currentColor"/></svg>',
+  edit: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>',
+};
+
+// ============================================================================
+// Datos Personales (campos 1-5 + PUT) — usa WifixAPI.getClientProfile
+// ============================================================================
+function renderDetailRow(icon, label, value, opts = {}) {
+  const cls = opts.mono ? 'detail-value mono' : 'detail-value';
+  const hl  = opts.highlight ? ' highlight' : '';
+  return `
+    <div class="detail-row">
+      <div class="detail-icon">${icon}</div>
+      <div class="detail-body">
+        <span class="detail-label">${label}</span>
+        <span class="${cls}${hl}">${value}</span>
+      </div>
+    </div>`;
+}
+
+async function openDatosPersonales() {
+  const cuenta = currentAccount();
+  if (!cuenta) {
+    alert('Ingresa primero el número de cuenta.');
+    return;
+  }
+  accountChip.textContent = cuenta;
+  detailEyebrow.textContent = labels[currentCategory].title;
+
+  detailList.innerHTML = `<div class="detail-loading">Cargando datos del cliente…</div>`;
+  detailPersonales.classList.add('open');
+  detailPersonales.setAttribute('aria-hidden', 'false');
+
+  let profile;
+  try {
+    profile = await WifixAPI.getClientProfile(cuenta);
+  } catch (err) {
+    console.error('[Wifix] client-profile:', err);
+    detailList.innerHTML = `<div class="detail-error">No se pudo cargar el perfil: ${escapeHtml(err.message || 'Error')}</div>`;
+    return;
+  }
+
+  renderClientProfile(profile, cuenta);
+}
+
+function renderClientProfile(profile, cuenta) {
+  const phonesHtml = (profile.phones && profile.phones.length)
+    ? profile.phones.map(escapeHtml).join('<br/>')
+    : '—';
+  const speedTxt = `${profile.contractedDownloadMbps ?? '—'} ↓ / ${profile.contractedUploadMbps ?? '—'} ↑ Mbps`;
+
+  detailList.innerHTML = [
+    renderDetailRow(ICONS.user,  'Nombres y Apellidos', escapeHtml(profile.fullName || '—')),
+    renderDetailRow(ICONS.pin,   'Dirección', escapeHtml(profile.address || '—')),
+    renderDetailRow(ICONS.phone, 'Teléfonos', phonesHtml),
+    renderDetailRow(ICONS.plan,  'Plan Contratado', escapeHtml(profile.planName || '—'), { highlight: true }),
+    renderDetailRow(ICONS.speed, 'Velocidad Contratada', speedTxt, { highlight: true }),
+    `<button class="save-btn outline" id="editProfileBtn">${ICONS.edit}<span style="margin-left:6px">Actualizar datos</span></button>`,
+    `<div id="editProfileForm" class="profile-edit-form" hidden></div>`,
+  ].join('');
+
+  const editBtn = document.getElementById('editProfileBtn');
+  const editFormSlot = document.getElementById('editProfileForm');
+  editBtn.addEventListener('click', () => {
+    if (editFormSlot.hasAttribute('hidden')) {
+      editFormSlot.removeAttribute('hidden');
+      renderEditProfileForm(profile, cuenta, editFormSlot);
+    } else {
+      editFormSlot.setAttribute('hidden', '');
+      editFormSlot.innerHTML = '';
+    }
+  });
+}
+
+function renderEditProfileForm(profile, cuenta, slot) {
+  slot.innerHTML = `
+    <div class="tool-form" data-form="profile-edit">
+      <label class="form-row"><span class="form-label">Nombres y Apellidos</span>
+        <input type="text" data-field="fullName" value="${escapeHtml(profile.fullName || '')}"></label>
+      <label class="form-row"><span class="form-label">Dirección</span>
+        <textarea data-field="address" rows="2">${escapeHtml(profile.address || '')}</textarea></label>
+      <label class="form-row"><span class="form-label">Teléfonos (uno por línea)</span>
+        <textarea data-field="phones" rows="3">${escapeHtml((profile.phones || []).join('\n'))}</textarea></label>
+      <button class="save-btn" data-action="save-profile">Guardar cambios</button>
+    </div>`;
+
+  const formEl = slot.querySelector('[data-form="profile-edit"]');
+  const saveBtn = formEl.querySelector('[data-action="save-profile"]');
+  saveBtn.addEventListener('click', async () => {
+    const fullName = nonEmpty(formEl.querySelector('[data-field="fullName"]').value);
+    const address = nonEmpty(formEl.querySelector('[data-field="address"]').value);
+    const phonesRaw = formEl.querySelector('[data-field="phones"]').value || '';
+    const phones = phonesRaw.split('\n').map(s => s.trim()).filter(Boolean);
+    const update = {};
+    if (fullName !== undefined && fullName !== profile.fullName) update.fullName = fullName;
+    if (address !== undefined && address !== profile.address) update.address = address;
+    if (JSON.stringify(phones) !== JSON.stringify(profile.phones || [])) update.phones = phones;
+
+    if (Object.keys(update).length === 0) {
+      showSaveFeedback(saveBtn, 'Sin cambios', false);
+      return;
+    }
+    try {
+      const updated = await WifixAPI.updateClientProfile(cuenta, update);
+      showSaveFeedback(saveBtn, '✓ Actualizado', true);
+      renderClientProfile(updated, cuenta);
+    } catch (err) {
+      console.error('[Wifix] update client-profile:', err);
+      showSaveFeedback(saveBtn, '✗ ' + (err.message || 'Error'), false);
+    }
+  });
+}
+
+// ============================================================================
+// Datos del Servicio (campos 6-18) — usa varios endpoints
+// ============================================================================
+function renderStatusFromContract(contract, account) {
+  const own = contract.accounts.find(a => a.accountNumber === account) || contract.accounts[0];
+  const status = own ? own.status : '—';
+  const statusClass = status === 'ACTIVA' ? 'ok' : status === 'SUSPENDIDA' ? 'warn' : 'fail';
+  return `
+    <div class="status-grid">
+      <div class="status-tile ${statusClass}">
+        <span class="st-label">Estado</span>
+        <span class="st-value">${escapeHtml(status)}</span>
+      </div>
+      <div class="status-tile">
+        <span class="st-label">Cliente</span>
+        <span class="st-value">${escapeHtml(contract.clientName || '—')}</span>
+      </div>
+    </div>
+    ${contract.accounts.map(a => `
+      <div class="mini-row">
+        <span class="mr-label">${escapeHtml(a.accountNumber)}</span>
+        <span class="mr-value">${escapeHtml(a.contractId)} · ${escapeHtml(a.status)}</span>
+      </div>`).join('')}`;
+}
+
+function renderNapsList(naps) {
+  if (!naps || naps.length === 0) return `<div class="detail-empty">No hay NAPs cercanas.</div>`;
+  return naps.map(n => `
+    <div class="nap-card" data-nap="${escapeHtml(n.napCode)}">
+      <div class="nap-head">
+        <span class="nap-name">${escapeHtml(n.napCode)}</span>
+        <span class="nap-distance">${n.distanceMeters.toFixed(1)} m · ${n.occupiedPorts}/${n.totalPorts} puertos</span>
+      </div>
+      <button class="add-row-btn" data-action="view-ports" data-nap="${escapeHtml(n.napCode)}">Ver puertos</button>
+      <div class="nap-ports-slot" data-slot="ports-${escapeHtml(n.napCode)}"></div>
+    </div>`).join('');
+}
+
+function renderPortsTable(napPorts) {
+  return `
+    <div class="port-grid">
+      ${napPorts.ports.map(p => `
+        <div class="port-cell ${p.occupied ? 'busy' : 'free'}" title="${p.clientAccountNumber ? escapeHtml(p.clientAccountNumber) + ' (' + (p.clientStatus || '—') + ')' : 'Libre'}">
+          ${pad(p.portNumber)}${p.clientStatus ? '<small>' + p.clientStatus + '</small>' : ''}
+        </div>`).join('')}
+    </div>
+    <div class="port-legend">
+      <span><span class="dot free"></span>Libre</span>
+      <span><span class="dot busy"></span>Ocupado</span>
+    </div>`;
+}
+
+function renderMetrics(m) {
+  const tech = m.technology;
+  const rxTx = m.signalLevels
+    ? `<div class="mini-row"><span class="mr-label">RX / TX</span><span class="mr-value">${m.signalLevels.rxDbm} dBm / ${m.signalLevels.txDbm} dBm</span></div>`
+    : '';
+  const snr = m.signalToNoiseDb !== undefined
+    ? `<div class="mini-row"><span class="mr-label">SNR (HFC)</span><span class="mr-value">${m.signalToNoiseDb} dB</span></div>` : '';
+  const fec = m.fecCorrectedPercent !== undefined
+    ? `<div class="mini-row"><span class="mr-label">FEC corregidos</span><span class="mr-value">${m.fecCorrectedPercent}%</span></div>
+       <div class="mini-row"><span class="mr-label">FEC sin corregir</span><span class="mr-value">${m.fecUncorrectedPercent}%</span></div>` : '';
+  return `
+    <div class="mini-row"><span class="mr-label">Tecnología</span><span class="mr-value">${escapeHtml(tech)}</span></div>
+    ${rxTx}
+    ${snr}
+    ${fec}
+    <div class="mini-row"><span class="mr-label">Caídas 24h</span><span class="mr-value">${m.outagesLast24h}</span></div>
+    <div class="mini-row"><span class="mr-label">Tráfico in / out</span><span class="mr-value">${m.trafficMbpsIn} / ${m.trafficMbpsOut} Mbps</span></div>`;
+}
+
+function renderEventsList(events) {
+  if (!events || events.length === 0) return `<div class="detail-empty">Sin eventos registrados.</div>`;
+  const badgeClass = s => s === 'RESUELTO' ? 'badge-resolved' : s === 'PENDIENTE' ? 'badge-pending' : 'badge-fail';
+  return events.map(e => `
+    <div class="event-item">
+      <span class="event-date">${formatDate(e.occurredAt)}</span>
+      <div class="event-body">
+        <span class="event-badge ${badgeClass(e.status)}">${escapeHtml(e.status)}</span>
+        <span class="event-title">${escapeHtml(e.type)}</span>
+        <span class="event-desc">${escapeHtml(e.description || '')}</span>
+      </div>
+    </div>`).join('');
+}
+
+function renderTasksList(tasks) {
+  if (!tasks || tasks.length === 0) return `<div class="detail-empty">Sin tareas registradas.</div>`;
+  const badgeClass = r => r === 'SATISFACTORIA' ? 'badge-resolved' : r === 'PENDIENTE' ? 'badge-pending' : 'badge-fail';
+  return tasks.map(t => `
+    <div class="event-item">
+      <span class="event-date">${formatDate(t.occurredAt)}</span>
+      <div class="event-body">
+        <span class="event-badge ${badgeClass(t.result)}">${escapeHtml(t.result)}</span>
+        <span class="event-title">${escapeHtml(t.taskId)} · ${escapeHtml(t.technician || '—')}</span>
+        <span class="event-desc"><strong>${escapeHtml(t.reason)}</strong> — ${escapeHtml(t.closingNotes || '')}</span>
+      </div>
+    </div>`).join('');
+}
+
+function renderHistorySummary(history) {
+  const lines = [
+    ['Distance', history.distanceMeasurements.length],
+    ['Speedtest', history.speedtests.length],
+    ['Heatmap', history.wifiHeatmaps.length],
+    ['Ping', history.pingTests.length],
+    ['Traceroute', history.tracerouteTests.length],
+    ['Equipos retirados', history.retiredEquipment.length],
+  ];
+  return lines.map(([label, n]) => `
+    <div class="mini-row"><span class="mr-label">${label}</span><span class="mr-value">${n}</span></div>`).join('');
+}
+
+const SERVICIO_ITEMS = [
+  { id: 'naps',    icon: SERVICIO_ICONS.nap,     title: 'NAPs cercanas (distancia y puertos)',
+    load: (cuenta) => WifixAPI.getNearbyNaps(cuenta).then(renderNapsList) },
+  { id: 'status',  icon: SERVICIO_ICONS.user,    title: 'Status del cliente por contrato/cuenta',
+    load: (cuenta) => WifixAPI.getContractStatus(cuenta).then(c => renderStatusFromContract(c, cuenta)) },
+  { id: 'metrics', icon: SERVICIO_ICONS.metrics, title: 'Métricas de red (RX/TX, SNR, tráfico)',
+    load: (cuenta) => WifixAPI.getNetworkMetrics(cuenta).then(renderMetrics) },
+  { id: 'events',  icon: SERVICIO_ICONS.alert,   title: 'Daños (eventos) en el nodo',
+    load: (cuenta) => WifixAPI.getNodeEvents(cuenta).then(renderEventsList) },
+  { id: 'unsat',   icon: SERVICIO_ICONS.note,    title: 'Tareas insatisfactorias (cierre)',
+    load: (cuenta) => WifixAPI.getUnsatisfactoryTasks(cuenta).then(renderTasksList) },
+  { id: 'visits',  icon: SERVICIO_ICONS.history, title: 'Visitas anteriores',
+    load: (cuenta) => WifixAPI.getPreviousVisits(cuenta).then(renderTasksList) },
+  { id: 'history', icon: SERVICIO_ICONS.history, title: 'Historial de la app (registros guardados)',
+    load: (cuenta) => WifixAPI.getAccountToolHistory(cuenta).then(renderHistorySummary) },
+];
+
+function openDatosServicio() {
+  const cuenta = currentAccount();
+  if (!cuenta) {
+    alert('Ingresa primero el número de cuenta.');
+    return;
+  }
+  servicioChip.textContent = cuenta;
+
+  servicioList.innerHTML = SERVICIO_ITEMS.map(item => `
+    <div class="servicio-item" data-id="${item.id}">
+      <button class="servicio-head" type="button">
+        <div class="servicio-icon">${item.icon}</div>
+        <div class="servicio-title">${escapeHtml(item.title)}</div>
+        <div class="servicio-chev">${SERVICIO_ICONS.chev}</div>
+      </button>
+      <div class="servicio-body">
+        <div class="servicio-body-inner" data-slot="body"><div class="detail-loading">Toca para cargar…</div></div>
+      </div>
+    </div>`).join('');
+
+  servicioList.querySelectorAll('.servicio-item').forEach(node => {
+    const id = node.dataset.id;
+    const item = SERVICIO_ITEMS.find(x => x.id === id);
+    const head = node.querySelector('.servicio-head');
+    const body = node.querySelector('[data-slot="body"]');
+
+    head.addEventListener('click', async () => {
+      const wasOpen = node.classList.contains('open');
+      node.classList.toggle('open');
+      if (!wasOpen && !body.dataset.loaded) {
+        body.innerHTML = `<div class="detail-loading">Cargando…</div>`;
+        try {
+          body.innerHTML = await item.load(cuenta);
+          body.dataset.loaded = '1';
+          wireNapPortsButtons(body);
+        } catch (err) {
+          console.error('[Wifix] servicio', id, err);
+          body.innerHTML = `<div class="detail-error">${escapeHtml(err.message || 'Error al cargar')}</div>`;
+        }
+      }
+    });
+  });
+
+  detailServicio.classList.add('open');
+  detailServicio.setAttribute('aria-hidden', 'false');
+}
+
+function wireNapPortsButtons(scope) {
+  scope.querySelectorAll('[data-action="view-ports"]').forEach((btn) => {
+    btn.addEventListener('click', async (ev) => {
+      ev.stopPropagation();
+      const napCode = btn.dataset.nap;
+      const slot = scope.querySelector(`[data-slot="ports-${CSS.escape(napCode)}"]`);
+      if (!slot) return;
+      if (slot.dataset.loaded === '1') {
+        slot.classList.toggle('hidden');
+        return;
+      }
+      slot.innerHTML = `<div class="detail-loading">Cargando puertos…</div>`;
+      try {
+        const data = await WifixAPI.getNapPorts(napCode);
+        slot.innerHTML = renderPortsTable(data);
+        slot.dataset.loaded = '1';
+      } catch (err) {
+        slot.innerHTML = `<div class="detail-error">${escapeHtml(err.message || 'Error')}</div>`;
+      }
+    });
+  });
+}
+
+// ============================================================================
+// Red Interna (campos 19-21) — LAN, WiFi devices y cambio de SSID/contraseña
+// ============================================================================
+function renderLanDevices(devices) {
+  if (!devices || devices.length === 0) return `<div class="detail-empty">No hay dispositivos en la red local.</div>`;
+  return devices.map(d => `
+    <div class="mini-row">
+      <span class="mr-label">${escapeHtml(d.hostname || '—')}</span>
+      <span class="mr-value mono">${escapeHtml(d.ipAddress)} · ${escapeHtml(d.macAddress)}</span>
+    </div>`).join('');
+}
+
+function renderWifiDevices(devices) {
+  if (!devices || devices.length === 0) return `<div class="detail-empty">No hay dispositivos WiFi conectados.</div>`;
+  const byBand = { '2.4GHz': [], '5GHz': [] };
+  devices.forEach(d => { if (byBand[d.band]) byBand[d.band].push(d); });
+  return Object.keys(byBand).map(band => `
+    <div class="band-section">
+      <h4 class="band-title">${band}</h4>
+      ${byBand[band].length === 0 ? '<div class="detail-empty">Sin dispositivos.</div>' :
+        byBand[band].map(d => `
+          <div class="mini-row">
+            <span class="mr-label">${escapeHtml(d.hostname || '—')}</span>
+            <span class="mr-value mono">${escapeHtml(d.macAddress)} · ${d.signalDbm} dBm</span>
+          </div>`).join('')}
+    </div>`).join('');
+}
+
+function renderWifiConfigForm(config, cuenta) {
+  const get = (band) => (config.bands.find(b => b.band === band) || { ssid: '' });
+  const b24 = get('2.4GHz');
+  const b5 = get('5GHz');
+  return `
+    <div class="tool-form" data-form="wifi-config">
+      <div class="band-section">
+        <h4 class="band-title">2.4GHz</h4>
+        <label class="form-row"><span class="form-label">SSID</span>
+          <input type="text" data-band="2.4GHz" data-field="ssid" value="${escapeHtml(b24.ssid)}" maxlength="32"></label>
+        <label class="form-row"><span class="form-label">Nueva contraseña (opcional, ≥ 8)</span>
+          <input type="password" data-band="2.4GHz" data-field="password" placeholder="••••••••" minlength="8" maxlength="63"></label>
+      </div>
+      <div class="band-section">
+        <h4 class="band-title">5GHz</h4>
+        <label class="form-row"><span class="form-label">SSID</span>
+          <input type="text" data-band="5GHz" data-field="ssid" value="${escapeHtml(b5.ssid)}" maxlength="32"></label>
+        <label class="form-row"><span class="form-label">Nueva contraseña (opcional, ≥ 8)</span>
+          <input type="password" data-band="5GHz" data-field="password" placeholder="••••••••" minlength="8" maxlength="63"></label>
+      </div>
+      <button class="save-btn" data-action="save-wifi">Aplicar cambios WiFi</button>
+    </div>`;
+}
+
+function readWifiBand(formEl, band) {
+  const ssid = nonEmpty(formEl.querySelector(`[data-band="${band}"][data-field="ssid"]`).value);
+  const password = nonEmpty(formEl.querySelector(`[data-band="${band}"][data-field="password"]`).value);
+  if (!ssid) return null;
+  const out = { band, ssid };
+  if (password) out.password = password;
+  return out;
+}
+
+const RED_ITEMS = [
+  { id: 'lan',  icon: SERVICIO_ICONS.lan,  title: 'Equipos en la red local (DHCP)',
+    load: (cuenta) => WifixAPI.getLanDevices(cuenta).then(renderLanDevices) },
+  { id: 'wifi', icon: SERVICIO_ICONS.wifi, title: 'Dispositivos WiFi por banda',
+    load: (cuenta) => WifixAPI.getWifiDevices(cuenta).then(renderWifiDevices) },
+  { id: 'config', icon: SERVICIO_ICONS.key, title: 'Cambiar SSID y contraseña',
+    load: async (cuenta) => {
+      const cfg = await WifixAPI.getWifiConfig(cuenta);
+      return renderWifiConfigForm(cfg, cuenta);
+    },
+    onMount: (body, cuenta) => {
+      const formEl = body.querySelector('[data-form="wifi-config"]');
+      if (!formEl) return;
+      const saveBtn = formEl.querySelector('[data-action="save-wifi"]');
+      saveBtn.addEventListener('click', async () => {
+        const b24 = readWifiBand(formEl, '2.4GHz');
+        const b5 = readWifiBand(formEl, '5GHz');
+        const bands = [b24, b5].filter(Boolean);
+        if (bands.length === 0) {
+          showSaveFeedback(saveBtn, 'Indica al menos un SSID', false);
+          return;
+        }
+        try {
+          const updated = await WifixAPI.updateWifiConfig(cuenta, { bands });
+          console.log('[Wifix] wifi-config actualizado:', updated);
+          showSaveFeedback(saveBtn, '✓ Aplicado', true);
+        } catch (err) {
+          console.error('[Wifix] wifi-config:', err);
+          showSaveFeedback(saveBtn, '✗ ' + (err.message || 'Error'), false);
+        }
+      });
+    },
+  },
+];
+
+function openRedInterna() {
+  const cuenta = currentAccount();
+  if (!cuenta) {
+    alert('Ingresa primero el número de cuenta.');
+    return;
+  }
+  redChip.textContent = cuenta;
+
+  redList.innerHTML = RED_ITEMS.map(item => `
+    <div class="servicio-item" data-id="${item.id}">
+      <button class="servicio-head" type="button">
+        <div class="servicio-icon">${item.icon}</div>
+        <div class="servicio-title">${escapeHtml(item.title)}</div>
+        <div class="servicio-chev">${SERVICIO_ICONS.chev}</div>
+      </button>
+      <div class="servicio-body">
+        <div class="servicio-body-inner" data-slot="body"><div class="detail-loading">Toca para cargar…</div></div>
+      </div>
+    </div>`).join('');
+
+  redList.querySelectorAll('.servicio-item').forEach(node => {
+    const id = node.dataset.id;
+    const item = RED_ITEMS.find(x => x.id === id);
+    const head = node.querySelector('.servicio-head');
+    const body = node.querySelector('[data-slot="body"]');
+
+    head.addEventListener('click', async () => {
+      const wasOpen = node.classList.contains('open');
+      node.classList.toggle('open');
+      if (!wasOpen && !body.dataset.loaded) {
+        body.innerHTML = `<div class="detail-loading">Cargando…</div>`;
+        try {
+          body.innerHTML = await item.load(cuenta);
+          body.dataset.loaded = '1';
+          if (item.onMount) item.onMount(body, cuenta);
+        } catch (err) {
+          console.error('[Wifix] red-interna', id, err);
+          body.innerHTML = `<div class="detail-error">${escapeHtml(err.message || 'Error al cargar')}</div>`;
+        }
+      }
+    });
+  });
+
+  detailRed.classList.add('open');
+  detailRed.setAttribute('aria-hidden', 'false');
+}
+
+// ============================================================================
+// Herramientas (Fase 1, sin cambios funcionales)
+// ============================================================================
 function distanceFormHtml() {
   return `
     <div class="tool-form" data-tool="distance">
@@ -272,7 +856,6 @@ function hopRowHtml(index) {
     </div>`;
 }
 
-// --- Recolectores: leen el DOM del formulario y devuelven el payload ---
 function collectFields(formEl) {
   const out = {};
   formEl.querySelectorAll(':scope > .form-row [data-field], :scope > .form-grid-2 [data-field], :scope > .form-grid-3 [data-field]').forEach(el => {
@@ -350,24 +933,19 @@ function collectTraceroute(formEl) {
 
 const HERRAMIENTAS_ITEMS = [
   { id: 'distance', title: 'Medición de Distancia', icon: TOOL_ICONS.distance,
-    render: distanceFormHtml,
-    collect: collectDistance,
+    render: distanceFormHtml, collect: collectDistance,
     save: (acct, payload) => WifixAPI.createDistanceMeasurement(acct, payload) },
   { id: 'speedtest', title: 'Test de Velocidad', icon: TOOL_ICONS.speed,
-    render: speedtestFormHtml,
-    collect: collectSpeedtest,
+    render: speedtestFormHtml, collect: collectSpeedtest,
     save: (acct, payload) => WifixAPI.createSpeedtest(acct, payload) },
   { id: 'heatmap', title: 'Mapa de Calor WiFi', icon: TOOL_ICONS.heatmap,
-    render: heatmapFormHtml,
-    collect: collectHeatmap,
+    render: heatmapFormHtml, collect: collectHeatmap,
     save: (acct, payload) => WifixAPI.createWifiHeatmap(acct, payload) },
   { id: 'ping', title: 'Ping', icon: TOOL_ICONS.ping,
-    render: pingFormHtml,
-    collect: collectPing,
+    render: pingFormHtml, collect: collectPing,
     save: (acct, payload) => WifixAPI.createPingTest(acct, payload) },
   { id: 'traceroute', title: 'Traceroute', icon: TOOL_ICONS.trace,
-    render: tracerouteFormHtml,
-    collect: collectTraceroute,
+    render: tracerouteFormHtml, collect: collectTraceroute,
     save: (acct, payload) => WifixAPI.createTracerouteTest(acct, payload) },
 ];
 
@@ -412,15 +990,11 @@ function wireToolForm(bodyEl, item) {
   const formEl = bodyEl.querySelector('.tool-form');
   if (!formEl) return;
 
-  // habitaciones (heatmap) y saltos (traceroute) dinámicos
   const roomsSlot = formEl.querySelector('[data-slot="rooms"]');
   const hopsSlot = formEl.querySelector('[data-slot="hops"]');
   if (roomsSlot) {
     let idx = 0;
-    const addRoom = () => {
-      roomsSlot.insertAdjacentHTML('beforeend', roomRowHtml(idx));
-      idx++;
-    };
+    const addRoom = () => { roomsSlot.insertAdjacentHTML('beforeend', roomRowHtml(idx)); idx++; };
     addRoom();
     formEl.querySelector('[data-action="add-room"]').addEventListener('click', addRoom);
     roomsSlot.addEventListener('click', (ev) => {
@@ -432,10 +1006,7 @@ function wireToolForm(bodyEl, item) {
   }
   if (hopsSlot) {
     let idx = 0;
-    const addHop = () => {
-      hopsSlot.insertAdjacentHTML('beforeend', hopRowHtml(idx));
-      idx++;
-    };
+    const addHop = () => { hopsSlot.insertAdjacentHTML('beforeend', hopRowHtml(idx)); idx++; };
     addHop();
     formEl.querySelector('[data-action="add-hop"]').addEventListener('click', addHop);
     hopsSlot.addEventListener('click', (ev) => {
@@ -462,8 +1033,7 @@ function wireToolForm(bodyEl, item) {
       return;
     }
     try {
-      const saved = await item.save(cuenta, payload);
-      console.log(`[Wifix] ${item.id} guardado:`, saved);
+      await item.save(cuenta, payload);
       showSaveFeedback(saveBtn, '✓ Guardado', true);
     } catch (err) {
       console.error('[Wifix] error al guardar:', err);
@@ -472,7 +1042,9 @@ function wireToolForm(bodyEl, item) {
   });
 }
 
-// === Equipos Retirados ===
+// ============================================================================
+// Equipos Retirados (Fase 1, sin cambios funcionales)
+// ============================================================================
 async function openRetirados() {
   const cuenta = currentAccount() || `WX-${randInt(100000, 999999)}`;
   retiradosChip.textContent = cuenta;
@@ -507,10 +1079,10 @@ async function openRetirados() {
     ]);
     modelSel.innerHTML = `<option value="">Selecciona un modelo</option>` +
       models.filter(m => m.active).map(m =>
-        `<option value="${m.id}">${m.name} (${m.serialFieldType})</option>`).join('');
+        `<option value="${escapeHtml(m.id)}">${escapeHtml(m.name)} (${escapeHtml(m.serialFieldType)})</option>`).join('');
     reasonSel.innerHTML = `<option value="">Selecciona un motivo</option>` +
       reasons.filter(r => r.active).map(r =>
-        `<option value="${r.code}">${r.label}</option>`).join('');
+        `<option value="${escapeHtml(r.code)}">${escapeHtml(r.label)}</option>`).join('');
   } catch (err) {
     console.error('[Wifix] catálogos:', err);
     modelSel.innerHTML = `<option value="">No se pudo cargar</option>`;
@@ -562,8 +1134,7 @@ async function openRetirados() {
     if (uploadedPhotoId) payload.barcodePhotoId = uploadedPhotoId;
 
     try {
-      const saved = await WifixAPI.createRetiredEquipment(acct, payload);
-      console.log('[Wifix] retiro guardado:', saved);
+      await WifixAPI.createRetiredEquipment(acct, payload);
       showSaveFeedback(saveBtn, '✓ Guardado', true);
     } catch (err) {
       console.error('[Wifix] retiro error:', err);
@@ -573,325 +1144,4 @@ async function openRetirados() {
 
   detailRetirados.classList.add('open');
   detailRetirados.setAttribute('aria-hidden', 'false');
-}
-
-// === Mock data generation ===
-const NOMBRES = ['Carlos','María','Luis','Andrea','José','Patricia','Daniel','Lucía','Ricardo','Camila','Andrés','Sofía','Diego','Valentina'];
-const APELLIDOS = ['González','Rodríguez','Pérez','Martínez','Hernández','López','García','Sánchez','Ramírez','Torres','Vargas','Castillo','Mendoza'];
-const CALLES = ['Av. Bolívar','Calle Sucre','Av. Libertador','Calle Las Flores','Av. Universidad','Calle Comercio','Av. Principal','Calle Real'];
-const SECTORES = ['Sector El Carmen','Urb. La Trinidad','Sector Centro','Urb. Los Pinos','Sector Las Acacias','Urb. El Mirador'];
-const PLANES = [
-  { nombre: 'Plan Fibra Hogar', velocidad: '100 Mbps' },
-  { nombre: 'Plan Fibra Plus',  velocidad: '200 Mbps' },
-  { nombre: 'Plan Fibra Pro',   velocidad: '300 Mbps' },
-  { nombre: 'Plan Fibra Ultra', velocidad: '500 Mbps' },
-  { nombre: 'Plan Fibra Max',   velocidad: '1 Gbps'   },
-];
-
-const pick = arr => arr[Math.floor(Math.random() * arr.length)];
-const randInt = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
-const randCoord = (base, spread) => (base + (Math.random() - 0.5) * spread).toFixed(6);
-
-function generateClientData(accountNumber) {
-  const plan = pick(PLANES);
-  return {
-    nombre: `${pick(NOMBRES)} ${pick(NOMBRES)} ${pick(APELLIDOS)} ${pick(APELLIDOS)}`,
-    direccion: `${pick(CALLES)} #${randInt(10, 999)}, ${pick(SECTORES)}, Caracas`,
-    telefonos: [
-      `+58 ${randInt(412, 426)}-${randInt(100, 999)}.${randInt(1000, 9999)}`,
-      `+58 ${randInt(212, 245)}-${randInt(100, 999)}.${randInt(1000, 9999)}`,
-    ],
-    coordenadas: `${randCoord(10.4806, 0.3)}, ${randCoord(-66.9036, 0.3)}`,
-    plan: plan.nombre,
-    velocidad: plan.velocidad,
-    cuenta: accountNumber || `WX-${randInt(100000, 999999)}`,
-  };
-}
-
-const ICONS = {
-  user: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4.4 3.6-8 8-8s8 3.6 8 8"/></svg>',
-  pin:  '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s7-7.5 7-13a7 7 0 1 0-14 0c0 5.5 7 13 7 13z"/><circle cx="12" cy="9" r="2.5"/></svg>',
-  phone:'<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1.9.3 1.8.6 2.6a2 2 0 0 1-.5 2.1L7.9 9.7a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.5c.8.3 1.7.5 2.6.6a2 2 0 0 1 1.7 2z"/></svg>',
-  coord:'<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a13 13 0 0 1 0 18M12 3a13 13 0 0 0 0 18"/></svg>',
-  plan: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7H4a1 1 0 0 0-1 1v9a1 1 0 0 0 1 1h16a1 1 0 0 0 1-1V8a1 1 0 0 0-1-1z"/><path d="M16 7V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v2"/></svg>',
-  speed:'<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 18 0"/><path d="M12 12l4-3"/><circle cx="12" cy="12" r="1.2" fill="currentColor"/></svg>',
-};
-
-function renderRow(icon, label, value, opts = {}) {
-  const cls = opts.mono ? 'detail-value mono' : 'detail-value';
-  const hl  = opts.highlight ? ' highlight' : '';
-  return `
-    <div class="detail-row">
-      <div class="detail-icon">${icon}</div>
-      <div class="detail-body">
-        <span class="detail-label">${label}</span>
-        <span class="${cls}${hl}">${value}</span>
-      </div>
-    </div>`;
-}
-
-function openDatosPersonales() {
-  const data = generateClientData(accountInput.value.trim());
-  accountChip.textContent = data.cuenta;
-  detailEyebrow.textContent = labels[currentCategory].title;
-
-  detailList.innerHTML = [
-    renderRow(ICONS.user,  'Nombres y Apellidos', data.nombre),
-    renderRow(ICONS.pin,   'Dirección', data.direccion),
-    renderRow(ICONS.phone, 'Teléfonos', data.telefonos.join('<br/>')),
-    renderRow(ICONS.coord, 'Coordenadas', data.coordenadas, { mono: true }),
-    renderRow(ICONS.plan,  'Plan Contratado', data.plan, { highlight: true }),
-    renderRow(ICONS.speed, 'Velocidad de Internet', data.velocidad, { highlight: true }),
-  ].join('');
-
-  detailPersonales.classList.add('open');
-  detailPersonales.setAttribute('aria-hidden', 'false');
-}
-
-// === Datos del Servicio (Instalaciones) ===
-
-const SERVICIO_ICONS = {
-  nap:   '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s7-7.5 7-13a7 7 0 1 0-14 0c0 5.5 7 13 7 13z"/><circle cx="12" cy="9" r="2"/></svg>',
-  user:  '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="3.5"/><path d="M4.5 20a7.5 7.5 0 0 1 15 0"/></svg>',
-  ports: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 10h.01M11 10h.01M15 10h.01M19 10h.01M7 14h.01M11 14h.01M15 14h.01M19 14h.01"/></svg>',
-  alert: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.7L2 18a2 2 0 0 0 1.7 3h16.6A2 2 0 0 0 22 18L13.7 3.7a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg>',
-  note:  '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M9 13h6M9 17h4"/></svg>',
-  history:'<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/><path d="M12 8v5l3 2"/></svg>',
-  camera:'<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8h3l2-3h8l2 3h3a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1z"/><circle cx="12" cy="13" r="4"/></svg>',
-  chev:  '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>',
-};
-
-const NAP_PREFIX = ['NAP-CCS','NAP-EST','NAP-LIB','NAP-CTR','NAP-ACA','NAP-MIR'];
-const TECNICOS = ['J. Pérez','M. Rodríguez','C. Hernández','L. García','D. Sánchez','A. Torres'];
-const MOTIVOS = [
-  'Cliente no se encontraba en domicilio',
-  'Falla en equipo CPE del cliente',
-  'Sin señal en NAP - requiere fusión',
-  'Caja de empalme con humedad',
-  'Cable drop cortado por terceros',
-  'ONT con fallo de sincronización',
-  'Cliente solicitó reagendar visita',
-];
-const OBSERVACIONES_CIERRE = [
-  'Se realizó limpieza de conectores SC/APC',
-  'Reemplazo de patch cord en cliente',
-  'Configuración de WiFi 2.4/5GHz reiniciada',
-  'Drop tensado y asegurado con grapas',
-  'ONT reseteada a valores de fábrica',
-  'Cliente educado sobre uso del router',
-];
-const EVENTOS_NODO = [
-  { tipo:'Corte general', desc:'Mantenimiento programado en OLT' },
-  { tipo:'Fluctuación de potencia', desc:'Caída de batería en gabinete' },
-  { tipo:'Fibra dañada', desc:'Corte por obra civil cercana' },
-  { tipo:'Splitter saturado', desc:'NAP requiere balance de carga' },
-];
-const FOTO_LABELS = ['ONT','NAP','Drop','Roseta','Caja','Speedtest','Acta','Frontal'];
-
-function pad(n, len = 2) { return String(n).padStart(len, '0'); }
-function randomDate(daysBack) {
-  const d = new Date(Date.now() - Math.random() * daysBack * 86400000);
-  return `${pad(d.getDate())}/${pad(d.getMonth()+1)}/${d.getFullYear().toString().slice(-2)}`;
-}
-
-function buildNapsMock() {
-  return Array.from({ length: 3 }, () => {
-    const total = 16;
-    const ocupados = randInt(4, 14);
-    return {
-      nombre: `${pick(NAP_PREFIX)}-${randInt(100,999)}`,
-      distancia: `${randInt(35, 280)} m`,
-      ocupados,
-      total,
-    };
-  }).sort((a,b) => parseInt(a.distancia) - parseInt(b.distancia));
-}
-function buildPortsMock() {
-  const total = 16;
-  const occ = new Set();
-  while (occ.size < randInt(6, 13)) occ.add(randInt(1, total));
-  return Array.from({ length: total }, (_, i) => ({
-    n: i + 1,
-    busy: occ.has(i + 1),
-  }));
-}
-function buildEventosMock() {
-  return Array.from({ length: 3 }, () => {
-    const e = pick(EVENTOS_NODO);
-    const states = ['resolved','pending','fail'];
-    return { ...e, fecha: randomDate(90), estado: pick(states) };
-  });
-}
-function buildVisitasMock() {
-  return Array.from({ length: 3 }, () => ({
-    fecha: randomDate(180),
-    tecnico: pick(TECNICOS),
-    motivo: pick(MOTIVOS),
-    observacion: pick(OBSERVACIONES_CIERRE),
-    estado: pick(['fail','resolved','pending']),
-  }));
-}
-function buildFotosMock() {
-  const seeds = ['fiber','tech','cable','router','optic','tools','network','tower'];
-  return Array.from({ length: 6 }, (_, i) => ({
-    label: pick(FOTO_LABELS),
-    url: `https://picsum.photos/seed/${pick(seeds)}${randInt(1,9999)}/200/200`,
-  }));
-}
-
-function renderNaps(naps) {
-  return naps.map(n => `
-    <div class="nap-card">
-      <div class="nap-head">
-        <span class="nap-name">${n.nombre}</span>
-        <span class="nap-distance">${n.distancia} · ${n.ocupados}/${n.total} puertos</span>
-      </div>
-    </div>
-  `).join('');
-}
-function renderStatus() {
-  const saldo = randInt(0, 80);
-  const saldoOk = saldo < 30;
-  return `
-    <div class="status-grid">
-      <div class="status-tile ok">
-        <span class="st-label">Estado</span>
-        <span class="st-value">ACTIVO</span>
-      </div>
-      <div class="status-tile">
-        <span class="st-label">Tipo Cliente</span>
-        <span class="st-value">${pick(['HOGAR','PYME','VIP'])}</span>
-      </div>
-      <div class="status-tile ${saldoOk ? 'ok' : 'warn'}">
-        <span class="st-label">Saldo</span>
-        <span class="st-value">$${saldo}.00</span>
-      </div>
-      <div class="status-tile">
-        <span class="st-label">Últ. pago</span>
-        <span class="st-value">${randomDate(60)}</span>
-      </div>
-    </div>
-    <div class="mini-row" style="margin-top:10px">
-      <span class="mr-label">Contrato</span>
-      <span class="mr-value">CTR-${randInt(10000,99999)}</span>
-    </div>
-    <div class="mini-row">
-      <span class="mr-label">Inicio servicio</span>
-      <span class="mr-value">${randomDate(900)}</span>
-    </div>`;
-}
-function renderPorts(ports) {
-  const nap = `${pick(NAP_PREFIX)}-${randInt(100,999)}`;
-  const ocupados = ports.filter(p => p.busy).length;
-  return `
-    <div class="mini-row">
-      <span class="mr-label">NAP seleccionado</span>
-      <span class="mr-value">${nap}</span>
-    </div>
-    <div class="mini-row">
-      <span class="mr-label">Ocupación</span>
-      <span class="mr-value">${ocupados}/${ports.length}</span>
-    </div>
-    <div class="port-grid">
-      ${ports.map(p => `<div class="port-cell ${p.busy ? 'busy' : 'free'}">${pad(p.n)}</div>`).join('')}
-    </div>
-    <div class="port-legend">
-      <span><span class="dot free"></span>Libre</span>
-      <span><span class="dot busy"></span>Ocupado</span>
-    </div>`;
-}
-function renderEventos(evts) {
-  const badge = e => e === 'resolved' ? 'badge-resolved'
-                  : e === 'pending'  ? 'badge-pending'
-                  : 'badge-fail';
-  const label = e => e === 'resolved' ? 'Resuelto'
-                  : e === 'pending'  ? 'Pendiente'
-                  : 'Falla';
-  return evts.map(ev => `
-    <div class="event-item">
-      <span class="event-date">${ev.fecha}</span>
-      <div class="event-body">
-        <span class="event-badge ${badge(ev.estado)}">${label(ev.estado)}</span>
-        <span class="event-title">${ev.tipo}</span>
-        <span class="event-desc">${ev.desc}</span>
-      </div>
-    </div>`).join('');
-}
-function renderVisitas(visitas, useObservacion) {
-  const badge = e => e === 'resolved' ? 'badge-resolved'
-                  : e === 'pending'  ? 'badge-pending'
-                  : 'badge-fail';
-  const label = e => e === 'resolved' ? 'Cerrada OK'
-                  : e === 'pending'  ? 'Pendiente'
-                  : 'Insatisfactoria';
-  return visitas.map(v => `
-    <div class="event-item">
-      <span class="event-date">${v.fecha}</span>
-      <div class="event-body">
-        <span class="event-badge ${badge(v.estado)}">${label(v.estado)}</span>
-        <span class="event-title">${v.tecnico} · ${v.motivo}</span>
-        <span class="event-desc">${useObservacion ? v.observacion : v.motivo}</span>
-      </div>
-    </div>`).join('');
-}
-function renderFotos(fotos) {
-  return `
-    <div class="mini-row">
-      <span class="mr-label">Fotos registradas</span>
-      <span class="mr-value">${fotos.length}</span>
-    </div>
-    <div class="photo-grid">
-      ${fotos.map(f => `<div class="photo-thumb" style="background-image:url('${f.url}')" data-label="${f.label}"></div>`).join('')}
-    </div>`;
-}
-
-const SERVICIO_ITEMS = [
-  { id:'naps',     icon: SERVICIO_ICONS.nap,    title:'NAPs cercanas, distancia y puertos ocupados',
-    render: () => renderNaps(buildNapsMock()) },
-  { id:'status',   icon: SERVICIO_ICONS.user,   title:'Status del cliente por contrato/cuenta',
-    render: () => renderStatus() },
-  { id:'puertos',  icon: SERVICIO_ICONS.ports,  title:'Puertos ocupados por NAP',
-    render: () => renderPorts(buildPortsMock()) },
-  { id:'danos',    icon: SERVICIO_ICONS.alert,  title:'Daños (eventos) en el nodo',
-    render: () => renderEventos(buildEventosMock()) },
-  { id:'insat',    icon: SERVICIO_ICONS.note,   title:'Observación de cierre en tareas insatisfactorias',
-    render: () => renderVisitas(buildVisitasMock().map(v => ({...v, estado:'fail'})), true) },
-  { id:'visitas',  icon: SERVICIO_ICONS.history,title:'Motivos y observaciones de visitas anteriores',
-    render: () => renderVisitas(buildVisitasMock(), true) },
-  { id:'fotos',    icon: SERVICIO_ICONS.camera, title:'Registro de fotos en contrato/cuenta',
-    render: () => renderFotos(buildFotosMock()) },
-];
-
-function openDatosServicio() {
-  const cuenta = accountInput.value.trim() || `WX-${randInt(100000, 999999)}`;
-  servicioChip.textContent = cuenta;
-
-  servicioList.innerHTML = SERVICIO_ITEMS.map(item => `
-    <div class="servicio-item" data-id="${item.id}">
-      <button class="servicio-head" type="button">
-        <div class="servicio-icon">${item.icon}</div>
-        <div class="servicio-title">${item.title}</div>
-        <div class="servicio-chev">${SERVICIO_ICONS.chev}</div>
-      </button>
-      <div class="servicio-body">
-        <div class="servicio-body-inner" data-slot="body"></div>
-      </div>
-    </div>
-  `).join('');
-
-  servicioList.querySelectorAll('.servicio-item').forEach(node => {
-    const id = node.dataset.id;
-    const item = SERVICIO_ITEMS.find(x => x.id === id);
-    const head = node.querySelector('.servicio-head');
-    const body = node.querySelector('[data-slot="body"]');
-
-    head.addEventListener('click', () => {
-      const wasOpen = node.classList.contains('open');
-      if (!wasOpen) body.innerHTML = item.render();
-      node.classList.toggle('open');
-    });
-  });
-
-  detailServicio.classList.add('open');
-  detailServicio.setAttribute('aria-hidden', 'false');
 }

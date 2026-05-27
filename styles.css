@@ -1195,3 +1195,162 @@ body {
 .barcode-status.ok { color: #00ff9d; }
 .barcode-status.fail { color: #ff7a7a; }
 
+
+/* ===========================================================================
+ * Fase 2 — login, edición de perfil, red interna, helpers.
+ * Reutilizan tokens existentes (cyan #00e0ff, status, .servicio-item, etc.).
+ * Sin afectar pantallas previas (Fase 1).
+ * ========================================================================*/
+
+/* ---- Login screen --------------------------------------------------------*/
+.loginscreen {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: #0b1419;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.25s ease;
+}
+.loginscreen.open {
+  opacity: 1;
+  pointer-events: auto;
+}
+.loginscreen .bg {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+}
+.login-card {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  max-width: 320px;
+  padding: 24px 22px 22px;
+  background: rgba(8, 18, 22, 0.78);
+  border: 1px solid rgba(0, 224, 255, 0.18);
+  border-radius: 18px;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(8px);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.login-card .logo {
+  align-self: center;
+  margin-bottom: 2px;
+}
+.login-title {
+  font-family: 'Orbitron', sans-serif;
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  color: #00e0ff;
+  margin: 0;
+  text-align: center;
+}
+.login-subtitle {
+  margin: 0;
+  text-align: center;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.6);
+}
+.login-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.login-form .form-row input {
+  width: 100%;
+  padding: 10px 12px;
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid rgba(0, 224, 255, 0.18);
+  border-radius: 8px;
+  color: #e6f3f5;
+  font-family: inherit;
+  font-size: 13px;
+}
+.login-form .form-row input:focus {
+  outline: none;
+  border-color: #00e0ff;
+  box-shadow: 0 0 0 2px rgba(0, 224, 255, 0.15);
+}
+.login-error {
+  min-height: 14px;
+  color: #ff7a7a;
+  font-size: 11px;
+  text-align: center;
+}
+.login-submit {
+  margin-top: 2px;
+}
+
+/* ---- Edición de perfil (Datos Personales) -------------------------------*/
+.save-btn.outline {
+  background: transparent;
+  color: #00e0ff;
+  border: 1px solid rgba(0, 224, 255, 0.4);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  margin-top: 12px;
+}
+.save-btn.outline:hover { background: rgba(0, 224, 255, 0.08); filter: none; }
+.profile-edit-form { margin-top: 10px; }
+
+/* ---- Estados de carga genéricos -----------------------------------------*/
+.detail-loading,
+.detail-empty,
+.detail-error {
+  padding: 14px 12px;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.65);
+  text-align: center;
+  border: 1px dashed rgba(0, 224, 255, 0.18);
+  border-radius: 10px;
+  margin: 6px 0;
+}
+.detail-error { color: #ff7a7a; border-color: rgba(255, 90, 90, 0.4); }
+.detail-empty { color: rgba(255, 255, 255, 0.5); }
+
+/* ---- Red Interna: secciones por banda WiFi ------------------------------*/
+.band-section {
+  padding: 8px 0;
+  border-top: 1px solid rgba(0, 224, 255, 0.08);
+}
+.band-section:first-child { border-top: none; padding-top: 0; }
+.band-title {
+  margin: 0 0 6px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #00e0ff;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+}
+
+/* ---- NAP card con botón "ver puertos" -----------------------------------*/
+.nap-card .add-row-btn {
+  margin-top: 6px;
+  font-size: 10px;
+}
+.nap-ports-slot { margin-top: 8px; }
+.nap-ports-slot.hidden { display: none; }
+.nap-ports-slot .port-grid { margin-top: 4px; }
+
+/* ---- Port-cell con sub-marca de status A/S ------------------------------*/
+.port-cell small {
+  display: block;
+  font-size: 8px;
+  font-weight: 700;
+  margin-top: 2px;
+  letter-spacing: 1px;
+}
+
+/* ---- Botón logout en header ---------------------------------------------*/
+#logoutBtn { color: rgba(255, 255, 255, 0.7); }
+#logoutBtn:hover { color: #00e0ff; }
