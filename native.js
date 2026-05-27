@@ -63,21 +63,167 @@
       return plugin.getWifiInfo();
     },
 
+    async startOdometer(onUpdate) {
+      const Geo = global.Capacitor && global.Capacitor.Plugins && global.Capacitor.Plugins.Geolocation;
+      if (!Geo) throw new Error('Plugin de Geolocation no disponible.');
+      const perms = await Geo.checkPermissions();
+      if (perms.location !== 'granted') {
+        const req = await Geo.requestPermissions({ permissions: ['location'] });
+        if (req.location !== 'granted') throw new Error('Permiso de ubicación denegado.');
+      }
+      const state = {
+        totalMeters: 0,
+        points: [],
+        startedAt: Date.now(),
+        watchId: null
+      };
+      const MIN_STEP_M = 3;
+      const MAX_JUMP_M = 200;
+      const MAX_ACCURACY_M = 40;
+      state.watchId = await Geo.watchPosition(
+        { enableHighAccuracy: true, timeout: 10000 },
+        (pos, err) => {
+          if (err) { console.error('[odometer]', err); return; }
+          if (!pos || !pos.coords) return;
+          const c = pos.coords;
+          if (typeof c.accuracy === 'number' && c.accuracy > MAX_ACCURACY_M) return;
+          const last = state.points[state.points.length - 1];
+          const pt = { lat: c.latitude, lng: c.longitude, ts: pos.timestamp || Date.now(), accuracy: c.accuracy };
+          if (last) {
+            const d = haversineMeters(last.lat, last.lng, pt.lat, pt.lng);
+            if (d < MIN_STEP_M) return;
+            if (d > MAX_JUMP_M) return;
+            state.totalMeters += d;
+          }
+          state.points.push(pt);
+          if (typeof onUpdate === 'function') onUpdate({
+            totalMeters: state.totalMeters,
+            pointCount: state.points.length,
+            currentAccuracy: c.accuracy,
+            elapsedMs: Date.now() - state.startedAt,
+            startPoint: state.points[0],
+            endPoint: pt
+          });
+        }
+      );
+      return state;
+    },
+
+    async stopOdometer(state) {
+      const Geo = global.Capacitor && global.Capacitor.Plugins && global.Capacitor.Plugins.Geolocation;
+      if (Geo && state && state.watchId) await Geo.clearWatch({ id: state.watchId });
+    },
+
+    async scanAccessPoints() {
+      const plugin = nativePlugin();
+      if (!plugin) throw new Error('Plugin nativo no disponible.');
+      return plugin.scanAccessPoints();
+    },
+
+    async getCurrentPosition() {
+      const Geo = global.Capacitor && global.Capacitor.Plugins && global.Capacitor.Plugins.Geolocation;
+      if (!Geo) throw new Error('Plugin de Geolocation no disponible.');
+      const perms = await Geo.checkPermissions();
+      if (perms.location !== 'granted') {
+        const req = await Geo.requestPermissions({ permissions: ['location'] });
+        if (req.location !== 'granted') throw new Error('Permiso de ubicación denegado.');
+      }
+      const pos = await Geo.getCurrentPosition({ enableHighAccuracy: true, timeout: 10000 });
+      return { lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: pos.coords.accuracy, ts: pos.timestamp };
+    },
+
     async speedtest(opts) {
-      // No requiere plugin nativo — basta con descargar un blob conocido del
-      // backend y medir tiempo. En nativo se evita CORS y el WebView no
-      // limita la conexión como en un browser ajeno.
-      const { sizeBytes = 5 * 1024 * 1024, url } = opts || {};
-      const target = url || `${global.WifixAPI.baseUrl.replace(/\/[^/]+$/, '')}/health`;
-      const t0 = performance.now();
-      const res = await fetch(target, { cache: 'no-store' });
-      const buf = await res.arrayBuffer();
-      const elapsedMs = performance.now() - t0;
-      const bytes = buf.byteLength;
-      const mbps = (bytes * 8) / (elapsedMs / 1000) / 1e6;
-      return { bytes, elapsedMs, downloadMbps: Number(mbps.toFixed(2)) };
+      // Speedtest real contra speed.cloudflare.com (público, Anycast — la red
+      // de Cloudflare entrega desde el PoP más cercano automáticamente).
+      // Devuelve { downloadMbps, uploadMbps, latencyMs, jitterMs, packetLossPercent, serverName }.
+      // TODO ISP Monitor: cuando esté la API, comparar estos resultados con
+      // las mediciones del lado del ISP para validar QoS y degradación.
+      const CF = 'https://speed.cloudflare.com';
+      const onProgress = (opts && opts.onProgress) || (() => {});
+
+      // 1) Server info (PoP de Cloudflare más cercano vía Anycast).
+      onProgress({ phase: 'server' });
+      let serverName = 'Cloudflare';
+      try {
+        const meta = await fetch(`${CF}/meta`, { cache: 'no-store' }).then(r => r.json());
+        const parts = [meta.colo, meta.city, meta.country].filter(Boolean);
+        if (parts.length) serverName = `Cloudflare · ${parts.join(', ')}`;
+      } catch (_) { /* sin server info, seguimos */ }
+
+      // 2) Latencia + jitter — 6 GET pequeños, descartamos el primero (warm-up).
+      onProgress({ phase: 'latency' });
+      const latencies = [];
+      let lost = 0;
+      for (let i = 0; i < 7; i++) {
+        const t0 = performance.now();
+        try {
+          await fetch(`${CF}/__down?bytes=1&t=${Date.now()}_${i}`, { cache: 'no-store' });
+          if (i > 0) latencies.push(performance.now() - t0);
+        } catch (_) { if (i > 0) lost++; }
+      }
+      const latencyMs = latencies.length ? Math.min(...latencies) : NaN;
+      const avgLat = latencies.reduce((a, b) => a + b, 0) / Math.max(1, latencies.length);
+      const jitterMs = latencies.length > 1
+        ? Math.sqrt(latencies.reduce((s, x) => s + (x - avgLat) ** 2, 0) / latencies.length)
+        : 0;
+      const packetLossPercent = (lost / 6) * 100;
+
+      // 3) Download — 25 MB. Medimos bytes recibidos mientras streamea.
+      onProgress({ phase: 'download', progress: 0 });
+      const dlBytes = 25 * 1024 * 1024;
+      const tDl = performance.now();
+      const dlRes = await fetch(`${CF}/__down?bytes=${dlBytes}&t=${Date.now()}`, { cache: 'no-store' });
+      let dlReceived = 0;
+      if (dlRes.body && dlRes.body.getReader) {
+        const reader = dlRes.body.getReader();
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          dlReceived += value.length;
+          onProgress({ phase: 'download', progress: dlReceived / dlBytes });
+        }
+      } else {
+        const buf = await dlRes.arrayBuffer();
+        dlReceived = buf.byteLength;
+      }
+      const dlElapsedMs = performance.now() - tDl;
+      const downloadMbps = (dlReceived * 8) / (dlElapsedMs / 1000) / 1e6;
+
+      // 4) Upload — POST 8 MB hacia /__up.
+      onProgress({ phase: 'upload', progress: 0 });
+      const ulBytes = 8 * 1024 * 1024;
+      const payload = new Uint8Array(ulBytes);
+      const tUl = performance.now();
+      await fetch(`${CF}/__up`, { method: 'POST', body: payload, cache: 'no-store' });
+      const ulElapsedMs = performance.now() - tUl;
+      const uploadMbps = (ulBytes * 8) / (ulElapsedMs / 1000) / 1e6;
+
+      onProgress({ phase: 'done' });
+      return {
+        serverName,
+        downloadMbps: Number(downloadMbps.toFixed(2)),
+        uploadMbps: Number(uploadMbps.toFixed(2)),
+        latencyMs: Number(latencyMs.toFixed(1)),
+        jitterMs: Number(jitterMs.toFixed(1)),
+        packetLossPercent: Number(packetLossPercent.toFixed(1)),
+        downloadBytes: dlReceived,
+        uploadBytes: ulBytes,
+        downloadElapsedMs: dlElapsedMs,
+        uploadElapsedMs: ulElapsedMs
+      };
     }
   };
+
+  function haversineMeters(lat1, lon1, lat2, lon2) {
+    const R = 6371000;
+    const toRad = (d) => d * Math.PI / 180;
+    const dLat = toRad(lat2 - lat1);
+    const dLon = toRad(lon2 - lon1);
+    const a = Math.sin(dLat / 2) ** 2 +
+              Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+              Math.sin(dLon / 2) ** 2;
+    return 2 * R * Math.asin(Math.sqrt(a));
+  }
 
   global.WifixNative = WifixNative;
 
@@ -205,27 +351,880 @@
     });
   }
 
-  // --- Heatmap (usa RSSI actual para llenar la fila visible) ---
+  // --- Mapa de Calor WiFi (medidor + odómetro por habitación) ---
+  function rssiQualityLabel(dbm) {
+    if (dbm == null || isNaN(dbm)) return '—';
+    if (dbm >= -50) return 'Excelente';
+    if (dbm >= -60) return 'Muy buena';
+    if (dbm >= -70) return 'Buena';
+    if (dbm >= -80) return 'Regular';
+    return 'Mala';
+  }
+
+  function buildGaugeSvg(pct) {
+    const safe = Math.max(0, Math.min(100, Number(pct) || 0));
+    const R = 80;
+    const CIRC = 2 * Math.PI * R;          // 502.65
+    const ARC_PCT = 0.75;                  // 3/4 de vuelta (270°)
+    const ARC = CIRC * ARC_PCT;            // 376.99
+    const fill = ARC * (safe / 100);
+    const ROT = 135;                       // empieza en 7:30
+    return `
+      <svg viewBox="0 0 200 200" class="wifi-gauge-svg" aria-hidden="true">
+        <circle cx="100" cy="100" r="${R}" fill="none"
+                stroke="rgba(255,255,255,0.10)" stroke-width="14"
+                stroke-dasharray="${ARC.toFixed(2)} ${CIRC.toFixed(2)}"
+                transform="rotate(${ROT} 100 100)" />
+        <circle cx="100" cy="100" r="${R}" fill="none"
+                stroke="url(#wifi-gauge-grad)" stroke-width="14" stroke-linecap="round"
+                stroke-dasharray="${fill.toFixed(2)} ${CIRC.toFixed(2)}"
+                transform="rotate(${ROT} 100 100)" />
+        <defs>
+          <linearGradient id="wifi-gauge-grad" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0%" stop-color="#ffb347"/>
+            <stop offset="100%" stop-color="#ff6a3d"/>
+          </linearGradient>
+        </defs>
+      </svg>`;
+  }
+
+  // --- Mapa de Calor WiFi multi-AP (Flujos A + B del refactor) -------------
+  // Flujo A: descubrimiento + etiquetado de APs (al abrir, scan + pre-carga
+  // de APs ya registrados de esta cuenta).
+  // Flujo B: por cada habitación, scan continuo (1.5 s) mostrando RSSI por
+  // cada AP etiquetado; el técnico tocá "Capturar habitación" para snapshotear.
+  // Persistencia local en localStorage para no perder mediciones si falla la red.
+
+  function classifyRssi(dbm) {
+    if (dbm == null || isNaN(dbm)) return { label: '—', cls: 'rssi-na' };
+    if (dbm >= -55) return { label: 'Excelente', cls: 'rssi-excelente' };
+    if (dbm >= -65) return { label: 'Buena',     cls: 'rssi-buena' };
+    if (dbm >= -75) return { label: 'Aceptable', cls: 'rssi-aceptable' };
+    if (dbm >= -85) return { label: 'Pobre',     cls: 'rssi-pobre' };
+    return { label: 'Zona muerta', cls: 'rssi-muerta' };
+  }
+  function rssiPercent(dbm) {
+    if (dbm == null || isNaN(dbm)) return 0;
+    return Math.max(0, Math.min(100, 2 * (dbm + 100)));
+  }
+  function safeText(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+  function draftKey(acct) { return `wifix:heatmap-draft:${acct || 'unknown'}`; }
+  function loadDraft(acct) {
+    try { return JSON.parse(localStorage.getItem(draftKey(acct)) || 'null'); }
+    catch (_) { return null; }
+  }
+  function saveDraft(acct, draft) {
+    try { localStorage.setItem(draftKey(acct), JSON.stringify(draft)); } catch (_) {}
+  }
+  function clearDraft(acct) {
+    try { localStorage.removeItem(draftKey(acct)); } catch (_) {}
+  }
+
+  // --- Medición de Señal WiFi -----------------------------------------------
+  // Modelo simplificado:
+  //  - Medidor del AP CONECTADO al teléfono, en vivo (gauge + RSSI + datos).
+  //  - Un único router anclado por GPS → distancia continua a ese punto.
+  //  - Lista desplegable solo-lectura con los demás APs detectados de la MISMA
+  //    red conectada (mismo SSID). Sólo info, no edición.
+  //  - Por habitación: snapshot del medidor + distancia al router + measurements
+  //    multi-AP (para el backend), sin pedirle al técnico que etiquete nada.
+
   function wireHeatmapForm(formEl) {
-    ensureRunButton(formEl, 'Leer dBm del WiFi actual', async () => {
-      const w = await WifixNative.getWifiInfo();
-      const rows = formEl.querySelectorAll('.room-row');
-      const lastRow = rows[rows.length - 1];
-      if (lastRow) {
-        const el = lastRow.querySelector('[data-field="signalDbm"]');
-        if (el) el.value = String(w.rssiDbm);
+    if (formEl.dataset.nativeWired === '1') return;
+    formEl.dataset.nativeWired = '1';
+
+    formEl.innerHTML = `
+      <label class="form-row">
+        <span class="form-label">Etiqueta del relevamiento</span>
+        <input type="text" data-field="label" placeholder="Casa Pérez · piso 1">
+      </label>
+
+      <div class="heatmap-section heatmap-previous-section" data-slot="previous-section" hidden>
+        <button type="button" class="previous-head" data-action="toggle-previous">
+          <span class="form-label">Mediciones anteriores</span>
+          <span class="previous-count" data-slot="previous-count">0</span>
+          <span class="previous-caret">▾</span>
+        </button>
+        <div class="previous-body" data-slot="previous-body" hidden>
+          <div class="previous-list" data-slot="previous-list">
+            <div class="heatmap-empty">Cargando…</div>
+          </div>
+          <div class="previous-detail" data-slot="previous-detail" hidden>
+            <div class="previous-detail-head">
+              <span data-slot="previous-detail-title">Detalle</span>
+              <button type="button" class="previous-close" data-action="close-previous">✕</button>
+            </div>
+            <div class="heatmap-legacy-banner" data-slot="previous-legacy-banner" hidden>
+              ⚠️ Relevamiento en formato anterior — sin desglose por equipo.
+            </div>
+            <div class="analysis-tabs previous-tabs" role="tablist">
+              <button type="button" class="analysis-tab active" data-tab="by-room" role="tab">Por habitación</button>
+              <button type="button" class="analysis-tab" data-tab="by-ap" role="tab">Por equipo</button>
+              <button type="button" class="analysis-tab" data-tab="summary" role="tab">Resumen</button>
+            </div>
+            <div class="analysis-panel" data-slot="previous-analysis-panel"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="wifi-meter-card">
+        <div class="wifi-meter-head">
+          <span class="form-label">Medidor en vivo</span>
+          <span class="wifi-live-dot" title="Medición en vivo"></span>
+        </div>
+        <div class="wifi-gauge" data-slot="gauge">
+          <div class="wifi-gauge-center">
+            <span class="wifi-gauge-label">Señal WiFi</span>
+            <span class="wifi-gauge-value" data-slot="pct">—</span>
+            <span class="wifi-gauge-unit">%</span>
+          </div>
+        </div>
+        <dl class="wifi-data">
+          <div><dt>Red conectada</dt><dd data-slot="ssid">—</dd></div>
+          <div><dt>RSSI</dt><dd data-slot="rssi">—</dd></div>
+          <div><dt>Intensidad</dt><dd data-slot="quality">—</dd></div>
+          <div><dt>Velocidad de enlace</dt><dd data-slot="linkspeed">—</dd></div>
+          <div><dt>Dirección IP</dt><dd data-slot="ip">—</dd></div>
+          <div><dt>BSSID (MAC)</dt><dd data-slot="mac">—</dd></div>
+          <div><dt>Estándar</dt><dd data-slot="standard">—</dd></div>
+          <div><dt>Frecuencia</dt><dd data-slot="freq">—</dd></div>
+          <div><dt>Distancia estimada</dt><dd data-slot="distance">— m</dd></div>
+        </dl>
+      </div>
+
+      <div class="heatmap-section heatmap-detected-section">
+        <button type="button" class="previous-head" data-action="toggle-detected">
+          <span class="form-label">Routers y amplificadores de esta red</span>
+          <span class="previous-count" data-slot="detected-count">0</span>
+          <span class="previous-caret" data-slot="detected-caret">▾</span>
+        </button>
+        <div class="detected-body" data-slot="detected-body" hidden>
+          <div class="detected-list" data-slot="detected-list">
+            <div class="heatmap-empty">Sin conexión a una red WiFi.</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="heatmap-section">
+        <div class="heatmap-section-head">
+          <span class="form-label">Habitación actual</span>
+        </div>
+        <div class="form-grid-2">
+          <label class="form-row"><span class="form-label">Nombre</span>
+            <input type="text" data-field="roomName" placeholder="Dormitorio principal"></label>
+          <label class="form-row"><span class="form-label">Piso</span>
+            <input type="number" data-field="roomFloor" value="1" min="1"></label>
+        </div>
+        <button type="button" class="save-btn heatmap-capture-btn" data-action="capture-room" disabled>📍 Capturar habitación</button>
+      </div>
+
+      <div class="heatmap-section">
+        <div class="heatmap-rooms-head">
+          <span class="form-label">Habitaciones registradas</span>
+          <span class="heatmap-rooms-count" data-slot="rooms-count">0</span>
+        </div>
+        <div class="heatmap-rooms-list" data-slot="rooms-list">
+          <div class="heatmap-empty">Aún no hay habitaciones capturadas.</div>
+        </div>
+      </div>
+
+      <div class="heatmap-section heatmap-analysis-section" data-slot="analysis-section" hidden>
+        <div class="heatmap-section-head">
+          <span class="form-label">Análisis</span>
+        </div>
+        <div class="heatmap-legacy-banner" data-slot="legacy-banner" hidden>
+          ⚠️ Este relevamiento está en formato anterior — sin desglose por equipo.
+        </div>
+        <div class="analysis-tabs" role="tablist">
+          <button type="button" class="analysis-tab active" data-tab="by-room" role="tab">Por habitación</button>
+          <button type="button" class="analysis-tab" data-tab="by-ap" role="tab">Por equipo</button>
+          <button type="button" class="analysis-tab" data-tab="summary" role="tab">Resumen</button>
+        </div>
+        <div class="analysis-panel" data-slot="analysis-panel"></div>
+      </div>
+
+      <label class="form-row"><span class="form-label">Notas generales</span>
+        <textarea data-field="notes" rows="2" placeholder="Detalles del relevamiento"></textarea></label>
+      <button type="button" class="save-btn heatmap-save-btn" data-action="save-heatmap" disabled>💾 Guardar medición</button>
+      <div class="heatmap-status" data-slot="save-status"></div>`;
+
+    // Estimación de distancia desde RSSI usando log-distance path loss model.
+    // d = 10 ^ ((P0 - rssi) / (10 * n))
+    //   P0  = -50 dBm (RSSI típico a 1 m de un router doméstico)
+    //   n   = 3.0     (factor de propagación en interior con paredes)
+    // Es una aproximación; varía bastante por obstáculos (muebles, paredes
+    // de concreto). Sirve como orden de magnitud, no como medida exacta.
+    const RSSI_REF_DBM = -50;
+    const PATH_LOSS_EXP = 3.0;
+    function estimateDistanceFromRssi(rssi) {
+      if (rssi == null || isNaN(rssi)) return null;
+      const d = Math.pow(10, (RSSI_REF_DBM - rssi) / (10 * PATH_LOSS_EXP));
+      return d > 0 ? d : null;
+    }
+
+    const state = {
+      account: null,
+      latestWifi: null,        // getWifiInfo más reciente (AP conectado)
+      latestScan: [],          // accessPoints del último scan (filtrado por SSID)
+      rooms: [],
+      timer: null,
+      sensing: false,
+      isLegacy: false,
+      // Análisis del relevamiento actual
+      analysisTab: 'by-room',
+      analysisApIdx: 0,
+      // Historial
+      previousList: [],
+      previousData: {},
+      previousOpenId: null,
+      previousAnalysisTab: 'by-room',
+      previousAnalysisApIdx: 0,
+    };
+
+    const $ = (s) => formEl.querySelector(`[data-slot="${s}"]`);
+    const setStatus = (slot, msg, color) => {
+      const el = $(slot);
+      if (!el) return;
+      el.textContent = msg || '';
+      el.style.color = color || 'rgba(180,210,255,0.7)';
+    };
+    const captureBtn = formEl.querySelector('[data-action="capture-room"]');
+    const saveBtn = formEl.querySelector('[data-action="save-heatmap"]');
+
+    // ---------- Persistencia ----------
+    function persistDraft() {
+      saveDraft(state.account, {
+        label: formEl.querySelector('[data-field="label"]').value,
+        notes: formEl.querySelector('[data-field="notes"]').value,
+        rooms: state.rooms,
+      });
+    }
+    function restoreDraft(d) {
+      if (!d) return;
+      formEl.querySelector('[data-field="label"]').value = d.label || '';
+      formEl.querySelector('[data-field="notes"]').value = d.notes || '';
+      state.rooms = Array.isArray(d.rooms) ? d.rooms : [];
+    }
+
+    // ---------- Render del medidor en vivo ----------
+    function paintMeter() {
+      const w = state.latestWifi;
+      const pct = w
+        ? (typeof w.signalPercent === 'number' ? w.signalPercent
+            : Math.max(0, Math.min(100, 2 * ((w.rssiDbm || -100) + 100))))
+        : 0;
+      const gaugeEl = $('gauge');
+      const center = gaugeEl.querySelector('.wifi-gauge-center');
+      gaugeEl.innerHTML = buildGaugeSvg(pct);
+      gaugeEl.appendChild(center);
+      $('pct').textContent = w ? pct : '—';
+      $('ssid').textContent = (w && w.ssid) || '—';
+      $('rssi').textContent = w ? `${w.rssiDbm} dBm` : '—';
+      $('quality').textContent = w ? rssiQualityLabel(w.rssiDbm) : '—';
+      $('linkspeed').textContent = w && w.linkSpeedMbps != null ? `${w.linkSpeedMbps} Mbps` : '—';
+      $('ip').textContent = (w && w.ipAddress) || '—';
+      $('mac').textContent = (w && w.bssid) || '—';
+      $('standard').textContent = (w && w.wifiStandardName) || (w && w.band) || '—';
+      $('freq').textContent = w && w.frequencyMhz ? `${w.frequencyMhz} MHz${w.band ? ' · ' + w.band : ''}` : '—';
+
+      const dist = w ? estimateDistanceFromRssi(w.rssiDbm) : null;
+      $('distance').textContent = dist != null
+        ? `~ ${dist.toFixed(1)} m (estimado por señal)`
+        : '—';
+
+      // Habilita capturar habitación cuando hay al menos lectura WiFi.
+      captureBtn.disabled = !w;
+    }
+
+    function rssiQualityLabel(dbm) {
+      if (dbm == null || isNaN(dbm)) return '—';
+      if (dbm >= -55) return 'Excelente';
+      if (dbm >= -65) return 'Buena';
+      if (dbm >= -75) return 'Aceptable';
+      if (dbm >= -85) return 'Pobre';
+      return 'Zona muerta';
+    }
+
+    // ---------- Lista de equipos en la red conectada ----------
+    function renderDetectedList() {
+      const list = $('detected-list');
+      const count = $('detected-count');
+      const aps = state.latestScan;
+      count.textContent = String(aps.length);
+      if (aps.length === 0) {
+        list.innerHTML = '<div class="heatmap-empty">Sin conexión a una red WiFi.</div>';
+        return;
       }
-      return `${w.ssid ?? 'WiFi'} · ${w.rssiDbm} dBm · ${w.linkSpeedMbps} Mbps`;
+      list.innerHTML = aps.map((ap) => {
+        const cls = classifyRssi(ap.signalDbm);
+        return `
+          <div class="ap-row">
+            <div class="ap-row-head">
+              <span class="ap-ssid">${safeText(ap.ssid || '(oculto)')}</span>
+              <span class="ap-meta">${ap.band || '—'} · ch ${ap.channel ?? '—'}</span>
+              <span class="ap-rssi ${cls.cls}">${ap.signalDbm} dBm</span>
+              ${ap.isConnected ? '<span class="ap-connected">conectado</span>' : ''}
+            </div>
+            <div class="ap-meta-mono">${safeText(ap.bssid)}</div>
+          </div>`;
+      }).join('');
+    }
+
+    // ---------- Polling ----------
+    async function pollWifi() {
+      try {
+        state.latestWifi = await WifixNative.getWifiInfo();
+      } catch (_) { state.latestWifi = null; }
+      paintMeter();
+    }
+
+    async function pollScan() {
+      try {
+        const res = await WifixNative.scanAccessPoints();
+        const aps = res.accessPoints || [];
+        const connSsid = res.connectedSsid;
+        // Sólo APs de la red conectada al teléfono.
+        const filtered = connSsid ? aps.filter((a) => a.ssid === connSsid) : [];
+        // Dedupe por BSSID — algunos OEMs reportan la misma MAC más de una vez
+        // en getScanResults(). Nos quedamos con la lectura más fuerte.
+        const byBssid = new Map();
+        for (const ap of filtered) {
+          const k = (ap.bssid || '').toLowerCase();
+          if (!k) continue;
+          const prev = byBssid.get(k);
+          if (!prev || ap.signalDbm > prev.signalDbm) byBssid.set(k, ap);
+        }
+        const deduped = Array.from(byBssid.values()).sort((a, b) => b.signalDbm - a.signalDbm);
+        state.latestScan = deduped;
+        renderDetectedList();
+      } catch (_) { /* sin red, no rompemos UI */ }
+    }
+
+    // ---------- Toggle equipos detectados ----------
+    formEl.querySelector('[data-action="toggle-detected"]').addEventListener('click', () => {
+      const body = $('detected-body');
+      body.hidden = !body.hidden;
+      $('detected-caret').textContent = body.hidden ? '▾' : '▴';
+    });
+
+    // ---------- Capturar habitación ----------
+    captureBtn.addEventListener('click', () => {
+      const roomName = formEl.querySelector('[data-field="roomName"]').value.trim();
+      const floor = parseInt(formEl.querySelector('[data-field="roomFloor"]').value, 10) || 1;
+      if (!roomName) { setStatus('save-status', 'Ingresá el nombre de la habitación.', '#f85149'); return; }
+      if (!state.latestWifi) { setStatus('save-status', 'Sin lectura WiFi aún — esperá un par de segundos.', '#f85149'); return; }
+      const w = state.latestWifi;
+      const dist = estimateDistanceFromRssi(w.rssiDbm);
+
+      // Measurements multi-AP (todos los APs de la red conectada).
+      // El AP conectado va con isConnected=true; el resto con su lectura.
+      const measurements = [];
+      for (const ap of state.latestScan) {
+        measurements.push({
+          bssid: ap.bssid,
+          apLabelSnapshot: ap.isConnected ? (w.ssid || ap.ssid || ap.bssid) : ap.ssid || ap.bssid,
+          signalDbm: ap.signalDbm,
+          band: ap.band || 'unknown',
+          channel: ap.channel,
+          isConnected: !!ap.isConnected,
+        });
+      }
+      // Fallback si el scan vino vacío: usamos sólo la lectura del AP conectado.
+      if (measurements.length === 0) {
+        measurements.push({
+          bssid: w.bssid || 'connected-unknown',
+          apLabelSnapshot: w.ssid || 'Red conectada',
+          signalDbm: w.rssiDbm,
+          band: w.band || 'unknown',
+          isConnected: true,
+        });
+      }
+
+      state.rooms.push({
+        roomName, floor,
+        measuredAt: new Date().toISOString(),
+        measurements,
+        extras: {
+          ssid: w.ssid || null,
+          connectedBssid: w.bssid || null,
+          estimatedDistanceMeters: dist != null ? Number(dist.toFixed(2)) : null,
+          distanceMethod: 'rssi-path-loss',
+          rssiRefDbm: RSSI_REF_DBM,
+          pathLossExp: PATH_LOSS_EXP,
+          linkSpeedMbps: w.linkSpeedMbps,
+          frequencyMhz: w.frequencyMhz,
+          wifiStandardName: w.wifiStandardName || null,
+          ipAddress: w.ipAddress || null,
+        },
+      });
+      formEl.querySelector('[data-field="roomName"]').value = '';
+      renderRoomsList();
+      saveBtn.disabled = state.rooms.length === 0;
+      persistDraft();
+      setStatus('save-status',
+        `Habitación "${roomName}" capturada (${w.rssiDbm} dBm${dist != null ? `, ~${dist.toFixed(1)} m est.` : ''}).`,
+        '#3fb950');
+    });
+
+    function renderRoomsList() {
+      const slot = $('rooms-list');
+      const count = $('rooms-count');
+      count.textContent = String(state.rooms.length);
+      if (state.rooms.length === 0) {
+        slot.innerHTML = '<div class="heatmap-empty">Aún no hay habitaciones capturadas.</div>';
+        renderAnalysis();
+        return;
+      }
+      slot.innerHTML = state.rooms.map((r, i) => {
+        const best = r.measurements.reduce((a, b) => (b.signalDbm > a.signalDbm ? b : a));
+        const cls = classifyRssi(best.signalDbm);
+        const distMeters = r.extras && (r.extras.estimatedDistanceMeters ?? r.extras.distanceFromRouterMeters);
+        const distTxt = distMeters != null ? ` · ~${distMeters.toFixed(1)} m est.` : '';
+        return `
+          <div class="heatmap-room-row ${cls.cls}">
+            <div class="heatmap-room-main">
+              <strong>${safeText(r.roomName)}</strong>
+              <span class="heatmap-room-sub">Piso ${r.floor} · ${best.signalDbm} dBm · ${cls.label}${distTxt}</span>
+            </div>
+            <button type="button" class="heatmap-room-remove" data-remove-room="${i}" aria-label="Quitar">×</button>
+          </div>`;
+      }).join('');
+      renderAnalysis();
+    }
+    formEl.querySelector('[data-slot="rooms-list"]').addEventListener('click', (ev) => {
+      const btn = ev.target.closest('[data-remove-room]');
+      if (!btn) return;
+      const idx = parseInt(btn.dataset.removeRoom, 10);
+      state.rooms.splice(idx, 1);
+      renderRoomsList();
+      saveBtn.disabled = state.rooms.length === 0;
+      persistDraft();
+    });
+
+    // ---------- Análisis ----------
+    const DEAD_ZONE_THRESHOLD = -75;
+    const STRONG_SIGNAL_THRESHOLD = -55;
+    function bestApInRoom(room) {
+      return room.measurements.reduce((a, b) => (b.signalDbm > a.signalDbm ? b : a));
+    }
+    function uniqueApsFromRooms(rooms) {
+      const map = new Map();
+      for (const r of rooms) {
+        for (const m of r.measurements) {
+          const k = (m.bssid || '').toLowerCase();
+          if (!k) continue;
+          if (!map.has(k)) map.set(k, { bssid: m.bssid, label: m.apLabelSnapshot || m.bssid });
+        }
+      }
+      return Array.from(map.values());
+    }
+    function renderAnalysis() {
+      const section = $('analysis-section');
+      if (state.rooms.length === 0) { section.hidden = true; return; }
+      section.hidden = false;
+      renderAnalysisInto({
+        tabsEl: formEl.querySelector('.heatmap-analysis-section .analysis-tabs'),
+        panelEl: $('analysis-panel'),
+        bannerEl: $('legacy-banner'),
+        rooms: state.rooms,
+        isLegacy: state.isLegacy,
+        tabState: state, tabKey: 'analysisTab', apIdxKey: 'analysisApIdx',
+      });
+    }
+    function renderAnalysisInto(opts) {
+      const { tabsEl, panelEl, bannerEl, rooms, isLegacy, tabState, tabKey, apIdxKey } = opts;
+      if (bannerEl) bannerEl.hidden = !isLegacy;
+      const byApTab = tabsEl.querySelector('.analysis-tab[data-tab="by-ap"]');
+      if (byApTab) byApTab.disabled = isLegacy;
+      if (isLegacy && tabState[tabKey] === 'by-ap') tabState[tabKey] = 'by-room';
+      tabsEl.querySelectorAll('.analysis-tab').forEach((b) => {
+        b.classList.toggle('active', b.dataset.tab === tabState[tabKey]);
+      });
+      if (tabState[tabKey] === 'by-room') panelEl.innerHTML = renderByRoom(rooms);
+      else if (tabState[tabKey] === 'by-ap') panelEl.innerHTML = renderByAp(rooms, tabState[apIdxKey] || 0);
+      else panelEl.innerHTML = renderSummary(rooms);
+    }
+    function renderByRoom(rooms) {
+      const rows = rooms.map((r) => {
+        const best = bestApInRoom(r);
+        const cls = classifyRssi(best.signalDbm);
+        const isDead = best.signalDbm < DEAD_ZONE_THRESHOLD;
+        return `
+          <div class="analysis-room-row ${isDead ? 'rssi-muerta' : cls.cls}">
+            <div class="analysis-room-bullet">${isDead ? '🚨' : '✅'}</div>
+            <div class="analysis-room-main">
+              <strong>${safeText(r.roomName)}</strong>
+              <span class="analysis-room-sub">${best.signalDbm} dBm · ${cls.label}${(() => { const d = r.extras && (r.extras.estimatedDistanceMeters ?? r.extras.distanceFromRouterMeters); return d != null ? ` · ~${d.toFixed(1)} m est.` : ''; })()}</span>
+            </div>
+            ${isDead ? '<span class="analysis-badge bad">Zona muerta</span>' : ''}
+          </div>`;
+      }).join('');
+      return `<div class="analysis-rooms">${rows}</div>`;
+    }
+    function renderByAp(rooms, apIdx) {
+      const aps = uniqueApsFromRooms(rooms);
+      if (aps.length === 0) return '<div class="heatmap-empty">No hay datos.</div>';
+      const idx = apIdx >= aps.length ? 0 : apIdx;
+      const chips = aps.map((ap, i) => `
+        <button type="button" class="analysis-ap-chip ${i === idx ? 'active' : ''}" data-ap-idx="${i}">
+          ${safeText(ap.label)}
+        </button>`).join('');
+      const ap = aps[idx];
+      const apBssid = ap.bssid.toLowerCase();
+      const rows = rooms.map((r) => {
+        const m = r.measurements.find((x) => (x.bssid || '').toLowerCase() === apBssid);
+        if (!m) {
+          return `
+            <div class="analysis-room-row rssi-na">
+              <div class="analysis-room-bullet">⚪</div>
+              <div class="analysis-room-main">
+                <strong>${safeText(r.roomName)}</strong>
+                <span class="analysis-room-sub">Sin medición de este equipo en esta habitación</span>
+              </div>
+            </div>`;
+        }
+        const cls = classifyRssi(m.signalDbm);
+        return `
+          <div class="analysis-room-row ${cls.cls}">
+            <div class="analysis-room-bullet">${m.signalDbm >= DEAD_ZONE_THRESHOLD ? '✅' : '❗'}</div>
+            <div class="analysis-room-main">
+              <strong>${safeText(r.roomName)}</strong>
+              <span class="analysis-room-sub">${m.signalDbm} dBm · ${cls.label}${m.isConnected ? ' · conectado' : ''}</span>
+            </div>
+          </div>`;
+      }).join('');
+      return `<div class="analysis-ap-chips">${chips}</div><div class="analysis-rooms">${rows}</div>`;
+    }
+    function renderSummary(rooms) {
+      const dead = rooms.filter((r) => bestApInRoom(r).signalDbm < DEAD_ZONE_THRESHOLD);
+      const overlaps = rooms.filter((r) =>
+        r.measurements.filter((m) => m.signalDbm >= STRONG_SIGNAL_THRESHOLD).length >= 2);
+      const parts = [];
+      if (dead.length === 0 && overlaps.length === 0) {
+        parts.push(`
+          <div class="summary-card good">
+            <span class="summary-icon">✓</span>
+            <div>
+              <strong>Cobertura adecuada en todas las habitaciones medidas.</strong>
+              <span class="summary-detail">${rooms.length} habitaciones, sin zonas muertas ni solape problemático.</span>
+            </div>
+          </div>`);
+      }
+      if (dead.length > 0) {
+        const rows = dead.map((r) => {
+          const best = bestApInRoom(r);
+          return `<li><strong>${safeText(r.roomName)}</strong> — ${best.signalDbm} dBm</li>`;
+        }).join('');
+        parts.push(`
+          <div class="summary-card bad">
+            <span class="summary-icon">🚨</span>
+            <div>
+              <strong>Zonas muertas detectadas en ${dead.length} ${dead.length === 1 ? 'habitación' : 'habitaciones'}:</strong>
+              <ul class="summary-list">${rows}</ul>
+              <span class="summary-detail">Sugerencia: considerá reubicar el router o sumar un extensor / nodo mesh.</span>
+            </div>
+          </div>`);
+      }
+      if (overlaps.length > 0) {
+        const rows = overlaps.map((r) => {
+          const strong = r.measurements.filter((m) => m.signalDbm >= STRONG_SIGNAL_THRESHOLD)
+            .map((m) => `${safeText(m.apLabelSnapshot || m.bssid)} (${m.signalDbm} dBm)`).join(', ');
+          return `<li><strong>${safeText(r.roomName)}</strong>: ${strong}</li>`;
+        }).join('');
+        parts.push(`
+          <div class="summary-card warn">
+            <span class="summary-icon">⚠️</span>
+            <div>
+              <strong>Solape fuerte entre equipos en ${overlaps.length} ${overlaps.length === 1 ? 'habitación' : 'habitaciones'}:</strong>
+              <ul class="summary-list">${rows}</ul>
+              <span class="summary-detail">Puede generar saltos frecuentes entre equipos (roaming).</span>
+            </div>
+          </div>`);
+      }
+      return parts.join('');
+    }
+    formEl.querySelector('.heatmap-analysis-section .analysis-tabs').addEventListener('click', (ev) => {
+      const btn = ev.target.closest('.analysis-tab');
+      if (!btn || btn.disabled) return;
+      state.analysisTab = btn.dataset.tab;
+      renderAnalysis();
+    });
+    formEl.querySelector('[data-slot="analysis-panel"]').addEventListener('click', (ev) => {
+      const chip = ev.target.closest('.analysis-ap-chip');
+      if (!chip) return;
+      state.analysisApIdx = parseInt(chip.dataset.apIdx, 10) || 0;
+      renderAnalysis();
+    });
+
+    // ---------- Mediciones anteriores ----------
+    function renderPreviousList() {
+      const section = $('previous-section');
+      const list = $('previous-list');
+      const countEl = $('previous-count');
+      countEl.textContent = String(state.previousList.length);
+      section.hidden = state.previousList.length === 0;
+      if (state.previousList.length === 0) return;
+      list.innerHTML = state.previousList.map((h) => {
+        const date = new Date(h.createdAt).toLocaleString('es-EC', {
+          year: '2-digit', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+        });
+        const rooms = Array.isArray(h.rooms) ? h.rooms.length : 0;
+        const anyLegacy = Array.isArray(h.rooms) && h.rooms.some((r) => r.legacyFormat);
+        return `
+          <button type="button" class="previous-item" data-prev-id="${safeText(h.id)}">
+            <div class="previous-item-main">
+              <strong>${safeText(h.label || 'Sin etiqueta')}</strong>
+              <span class="previous-item-meta">${date} · ${rooms} habitaciones${anyLegacy ? ' · formato anterior' : ''}</span>
+            </div>
+            <span class="previous-item-chev">›</span>
+          </button>`;
+      }).join('');
+    }
+    async function openPreviousHeatmap(id) {
+      const detail = $('previous-detail');
+      const titleEl = $('previous-detail-title');
+      titleEl.textContent = 'Cargando…';
+      detail.hidden = false;
+      state.previousOpenId = id;
+      try {
+        let full = state.previousData[id];
+        if (!full) {
+          full = await global.WifixAPI.getWifiHeatmap(id);
+          state.previousData[id] = full;
+        }
+        const date = new Date(full.createdAt).toLocaleString('es-EC');
+        titleEl.textContent = `${full.label || 'Sin etiqueta'} · ${date}`;
+        const anyLegacy = Array.isArray(full.rooms) && full.rooms.some((r) => r.legacyFormat);
+        renderAnalysisInto({
+          tabsEl: formEl.querySelector('.previous-tabs'),
+          panelEl: $('previous-analysis-panel'),
+          bannerEl: $('previous-legacy-banner'),
+          rooms: full.rooms || [],
+          isLegacy: anyLegacy,
+          tabState: state, tabKey: 'previousAnalysisTab', apIdxKey: 'previousAnalysisApIdx',
+        });
+      } catch (err) {
+        titleEl.textContent = 'Error: ' + (err.message || err);
+      }
+    }
+    formEl.querySelector('[data-action="toggle-previous"]').addEventListener('click', () => {
+      const body = $('previous-body');
+      body.hidden = !body.hidden;
+      formEl.querySelector('.heatmap-previous-section .previous-caret').textContent = body.hidden ? '▾' : '▴';
+    });
+    formEl.querySelector('[data-slot="previous-list"]').addEventListener('click', (ev) => {
+      const btn = ev.target.closest('[data-prev-id]');
+      if (!btn) return;
+      openPreviousHeatmap(btn.dataset.prevId);
+    });
+    formEl.querySelector('[data-action="close-previous"]').addEventListener('click', () => {
+      $('previous-detail').hidden = true;
+      state.previousOpenId = null;
+    });
+    formEl.querySelector('.previous-tabs').addEventListener('click', (ev) => {
+      const btn = ev.target.closest('.analysis-tab');
+      if (!btn || btn.disabled || !state.previousOpenId) return;
+      state.previousAnalysisTab = btn.dataset.tab;
+      openPreviousHeatmap(state.previousOpenId);
+    });
+    formEl.querySelector('[data-slot="previous-analysis-panel"]').addEventListener('click', (ev) => {
+      const chip = ev.target.closest('.analysis-ap-chip');
+      if (!chip || !state.previousOpenId) return;
+      state.previousAnalysisApIdx = parseInt(chip.dataset.apIdx, 10) || 0;
+      openPreviousHeatmap(state.previousOpenId);
+    });
+
+    // ---------- Guardar mapa de calor ----------
+    saveBtn.addEventListener('click', async () => {
+      if (state.rooms.length === 0) return;
+      saveBtn.disabled = true;
+      const original = saveBtn.textContent;
+      saveBtn.textContent = 'Guardando…';
+      try {
+        const payload = {
+          label: formEl.querySelector('[data-field="label"]').value.trim() || undefined,
+          notes: formEl.querySelector('[data-field="notes"]').value.trim() || undefined,
+          rooms: state.rooms.map((r) => {
+            const out = {
+              roomName: r.roomName,
+              floor: r.floor,
+              measuredAt: r.measuredAt,
+              measurements: r.measurements,
+            };
+            if (r.extras) out.notes = JSON.stringify(r.extras);
+            return out;
+          }),
+        };
+        await global.WifixAPI.createWifiHeatmap(state.account, payload);
+        setStatus('save-status', `✓ Medición guardada (${state.rooms.length} habitaciones).`, '#3fb950');
+        state.rooms = [];
+        renderRoomsList();
+        clearDraft(state.account);
+      } catch (err) {
+        setStatus('save-status', 'Error: ' + (err.message || err), '#f85149');
+      } finally {
+        saveBtn.textContent = original;
+        saveBtn.disabled = state.rooms.length === 0;
+      }
+    });
+
+    ['label', 'notes'].forEach((field) => {
+      formEl.querySelector(`[data-field="${field}"]`).addEventListener('input', persistDraft);
+    });
+
+    // ---------- Sensing ----------
+    // Sin GPS: la "distancia" se infiere del RSSI del AP conectado en cada
+    // momento. Eso refleja naturalmente el roaming del teléfono — si se
+    // conecta a un equipo distinto, todo el medidor cambia.
+    async function startSensing() {
+      if (state.sensing) return;
+      state.sensing = true;
+      await pollWifi();
+      await pollScan();
+      state.timer = setInterval(async () => { await pollWifi(); await pollScan(); }, 1500);
+    }
+    function stopSensing() {
+      if (!state.sensing) return;
+      state.sensing = false;
+      if (state.timer) { clearInterval(state.timer); state.timer = null; }
+    }
+
+    // ---------- Boot ----------
+    (async function init() {
+      state.account = (global.currentAccount && global.currentAccount()) || null;
+      const draft = loadDraft(state.account);
+      if (draft) {
+        restoreDraft(draft);
+        setStatus('save-status', 'Borrador restaurado.', '#ffcf80');
+      }
+      if (state.account) {
+        try {
+          const resp = await global.WifixAPI.listWifiHeatmaps(state.account, { pageSize: '20' });
+          state.previousList = Array.isArray(resp) ? resp : (resp.items || []);
+          renderPreviousList();
+        } catch (_) {}
+      }
+      paintMeter();
+      renderRoomsList();
+      renderDetectedList();
+      saveBtn.disabled = state.rooms.length === 0;
+    })();
+
+    // Pausa cuando el form sale del viewport
+    const io = new IntersectionObserver((entries) => {
+      for (const e of entries) {
+        if (e.isIntersecting) startSensing();
+        else stopSensing();
+      }
+    }, { threshold: 0.05 });
+    io.observe(formEl);
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState !== 'visible') stopSensing();
+      else if (formEl.isConnected && formEl.getBoundingClientRect().width > 0) startSensing();
     });
   }
 
-  // --- Speedtest (descarga un blob conocido del backend) ---
+  // --- Speedtest contra Cloudflare (servidor Anycast → mejor PoP automático) ---
   function wireSpeedtestForm(formEl) {
-    ensureRunButton(formEl, 'Ejecutar speedtest', async () => {
-      const r = await WifixNative.speedtest();
-      setField(formEl, 'downloadMbps', r.downloadMbps);
-      setField(formEl, 'serverName', `LAN ${NATIVE_BACKEND.host}`);
-      return `${r.downloadMbps} Mbps · ${(r.bytes / 1024 / 1024).toFixed(1)} MB en ${r.elapsedMs.toFixed(0)} ms`;
+    if (formEl.dataset.nativeWired === '1') return;
+    formEl.dataset.nativeWired = '1';
+
+    const panel = document.createElement('div');
+    panel.className = 'speedtest-panel';
+    panel.innerHTML = `
+      <div class="speedtest-header">
+        <span class="speedtest-label">Speedtest</span>
+        <span class="speedtest-server" data-slot="server">— elegirá el mejor servidor —</span>
+      </div>
+      <div class="speedtest-gauges">
+        <div class="speedtest-gauge">
+          <span class="speedtest-gauge-icon">↓</span>
+          <span class="speedtest-gauge-value" data-slot="dl">—</span>
+          <span class="speedtest-gauge-unit">Mbps · descarga</span>
+        </div>
+        <div class="speedtest-gauge">
+          <span class="speedtest-gauge-icon">↑</span>
+          <span class="speedtest-gauge-value" data-slot="ul">—</span>
+          <span class="speedtest-gauge-unit">Mbps · subida</span>
+        </div>
+      </div>
+      <div class="speedtest-extras">
+        <span data-slot="latency">Latencia —</span>
+        <span data-slot="jitter">Jitter —</span>
+      </div>
+      <div class="speedtest-progress"><div class="speedtest-progress-bar" data-slot="bar"></div></div>
+      <button type="button" class="save-btn speedtest-run" data-action="run-speedtest">▶ Ejecutar speedtest</button>
+      <div class="speedtest-status" data-slot="status"></div>`;
+    formEl.insertBefore(panel, formEl.firstChild);
+
+    const serverSlot = panel.querySelector('[data-slot="server"]');
+    const dlSlot = panel.querySelector('[data-slot="dl"]');
+    const ulSlot = panel.querySelector('[data-slot="ul"]');
+    const latencySlot = panel.querySelector('[data-slot="latency"]');
+    const jitterSlot = panel.querySelector('[data-slot="jitter"]');
+    const barSlot = panel.querySelector('[data-slot="bar"]');
+    const statusSlot = panel.querySelector('[data-slot="status"]');
+    const runBtn = panel.querySelector('[data-action="run-speedtest"]');
+
+    function setProgress(pct, hue) {
+      barSlot.style.width = `${Math.max(0, Math.min(100, pct))}%`;
+      barSlot.style.background = hue || '#00e0ff';
+    }
+
+    runBtn.addEventListener('click', async () => {
+      runBtn.disabled = true;
+      runBtn.textContent = 'Midiendo…';
+      statusSlot.style.color = 'rgba(180,210,255,0.7)';
+      dlSlot.textContent = '—';
+      ulSlot.textContent = '—';
+      latencySlot.textContent = 'Latencia —';
+      jitterSlot.textContent = 'Jitter —';
+      setProgress(2);
+
+      try {
+        const r = await WifixNative.speedtest({
+          onProgress: (p) => {
+            if (p.phase === 'server')   { statusSlot.textContent = 'Eligiendo servidor…'; setProgress(8, '#6a5cff'); }
+            if (p.phase === 'latency')  { statusSlot.textContent = 'Midiendo latencia…'; setProgress(22, '#6a5cff'); }
+            if (p.phase === 'download') {
+              statusSlot.textContent = 'Descargando…';
+              setProgress(25 + (p.progress || 0) * 45, '#00e0ff');
+            }
+            if (p.phase === 'upload')   {
+              statusSlot.textContent = 'Subiendo…';
+              setProgress(70 + (p.progress || 0) * 28, '#00ff9d');
+            }
+            if (p.phase === 'done')     { statusSlot.textContent = 'Listo.'; setProgress(100, '#00ff9d'); }
+          }
+        });
+
+        serverSlot.textContent = r.serverName;
+        dlSlot.textContent = r.downloadMbps;
+        ulSlot.textContent = r.uploadMbps;
+        latencySlot.textContent = `Latencia ${r.latencyMs} ms`;
+        jitterSlot.textContent = `Jitter ${r.jitterMs} ms`;
+        statusSlot.style.color = '#3fb950';
+        statusSlot.textContent = `↓ ${r.downloadMbps} / ↑ ${r.uploadMbps} Mbps · ${r.latencyMs} ms`;
+
+        setField(formEl, 'downloadMbps', r.downloadMbps);
+        setField(formEl, 'uploadMbps', r.uploadMbps);
+        setField(formEl, 'latencyMs', r.latencyMs);
+        setField(formEl, 'jitterMs', r.jitterMs);
+        setField(formEl, 'packetLossPercent', r.packetLossPercent);
+        setField(formEl, 'serverName', r.serverName);
+      } catch (err) {
+        console.error('[Wifix] speedtest:', err);
+        statusSlot.style.color = '#f85149';
+        statusSlot.textContent = err.message || String(err);
+        setProgress(0);
+      } finally {
+        runBtn.disabled = false;
+        runBtn.textContent = '▶ Ejecutar speedtest';
+      }
     });
   }
 
@@ -237,6 +1236,8 @@
     traceroute: wireTracerouteForm,
     heatmap: wireHeatmapForm,
     speedtest: wireSpeedtestForm
+    // distance: removido — la medición de distancia ahora vive dentro del
+    // Mapa de Calor (haversine continuo entre router anclado y GPS actual).
   };
 
   function wireForm(el) {

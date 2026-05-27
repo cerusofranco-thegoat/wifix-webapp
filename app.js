@@ -231,6 +231,14 @@ function formatDate(iso) {
   if (Number.isNaN(d.getTime())) return iso;
   return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear().toString().slice(-2)} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
+function formatDatePill(iso) {
+  if (!iso) return '<span class="event-date-day">—</span>';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return `<span class="event-date-day">${escapeHtml(String(iso))}</span>`;
+  const day = `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear().toString().slice(-2)}`;
+  const time = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  return `<span class="event-date-day">${day}</span><span class="event-date-time">${time}</span>`;
+}
 
 // ============================================================================
 // ICONOS
@@ -452,7 +460,7 @@ function renderEventsList(events) {
   const badgeClass = s => s === 'RESUELTO' ? 'badge-resolved' : s === 'PENDIENTE' ? 'badge-pending' : 'badge-fail';
   return events.map(e => `
     <div class="event-item">
-      <span class="event-date">${formatDate(e.occurredAt)}</span>
+      <span class="event-date">${formatDatePill(e.occurredAt)}</span>
       <div class="event-body">
         <span class="event-badge ${badgeClass(e.status)}">${escapeHtml(e.status)}</span>
         <span class="event-title">${escapeHtml(e.type)}</span>
@@ -466,7 +474,7 @@ function renderTasksList(tasks) {
   const badgeClass = r => r === 'SATISFACTORIA' ? 'badge-resolved' : r === 'PENDIENTE' ? 'badge-pending' : 'badge-fail';
   return tasks.map(t => `
     <div class="event-item">
-      <span class="event-date">${formatDate(t.occurredAt)}</span>
+      <span class="event-date">${formatDatePill(t.occurredAt)}</span>
       <div class="event-body">
         <span class="event-badge ${badgeClass(t.result)}">${escapeHtml(t.result)}</span>
         <span class="event-title">${escapeHtml(t.taskId)} · ${escapeHtml(t.technician || '—')}</span>
@@ -778,7 +786,7 @@ function heatmapFormHtml() {
       <button class="add-row-btn" data-action="add-room">+ Agregar habitación</button>
       <label class="form-row"><span class="form-label">Notas generales</span>
         <textarea data-field="notes" rows="2"></textarea></label>
-      <button class="save-btn" data-action="save">Guardar mapa de calor</button>
+      <button class="save-btn" data-action="save">Guardar medición</button>
     </div>`;
 }
 
@@ -819,7 +827,7 @@ function pingFormHtml() {
       </div>
       <label class="form-row"><span class="form-label">Latencia máx (ms)</span>
         <input type="number" step="0.1" data-field="maxLatencyMs"></label>
-      <label class="form-row"><span class="form-label">Habitación (si asocias a mapa de calor)</span>
+      <label class="form-row"><span class="form-label">Habitación (si asocias a una medición)</span>
         <input type="text" data-field="roomName" placeholder="Sala"></label>
       <button class="save-btn" data-action="save">Guardar ping</button>
     </div>`;
@@ -932,13 +940,10 @@ function collectTraceroute(formEl) {
 }
 
 const HERRAMIENTAS_ITEMS = [
-  { id: 'distance', title: 'Medición de Distancia', icon: TOOL_ICONS.distance,
-    render: distanceFormHtml, collect: collectDistance,
-    save: (acct, payload) => WifixAPI.createDistanceMeasurement(acct, payload) },
   { id: 'speedtest', title: 'Test de Velocidad', icon: TOOL_ICONS.speed,
     render: speedtestFormHtml, collect: collectSpeedtest,
     save: (acct, payload) => WifixAPI.createSpeedtest(acct, payload) },
-  { id: 'heatmap', title: 'Mapa de Calor WiFi', icon: TOOL_ICONS.heatmap,
+  { id: 'heatmap', title: 'Medición de Señal WiFi', icon: TOOL_ICONS.heatmap,
     render: heatmapFormHtml, collect: collectHeatmap,
     save: (acct, payload) => WifixAPI.createWifiHeatmap(acct, payload) },
   { id: 'ping', title: 'Ping', icon: TOOL_ICONS.ping,

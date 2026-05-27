@@ -1,9 +1,16 @@
 package com.tulpa.wifix.plugins;
 
 import android.Manifest;
+import android.content.BroadcastReceiver;
 import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
+import android.net.wifi.ScanResult;
 import android.net.wifi.WifiInfo;
 import android.net.wifi.WifiManager;
+import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
 
 import com.getcapacitor.JSObject;
 import com.getcapacitor.PermissionState;
@@ -19,6 +26,7 @@ import org.json.JSONArray;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.net.InetAddress;
+import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -223,11 +231,185 @@ public class NetworkToolsPlugin extends Plugin {
             r.put("linkSpeedMbps", info.getLinkSpeed());
             r.put("frequencyMhz", info.getFrequency());
             r.put("ipAddress", intToIp(info.getIpAddress()));
-            // 0..4 (5 niveles)
             r.put("signalLevel", WifiManager.calculateSignalLevel(info.getRssi(), 5));
+            // % de señal con fórmula estándar (RSSI a porcentaje, 0..100)
+            int rssi = info.getRssi();
+            int pct = Math.max(0, Math.min(100, 2 * (rssi + 100)));
+            r.put("signalPercent", pct);
+
+            // Banda derivada de la frecuencia (24/5/6 GHz)
+            int freq = info.getFrequency();
+            String band = freq >= 2400 && freq < 2500 ? "2.4 GHz"
+                        : freq >= 5000 && freq < 5900 ? "5 GHz"
+                        : freq >= 5950 && freq <= 7125 ? "6 GHz"
+                        : null;
+            r.put("band", band);
+
+            // Estándar WiFi (n/ac/ax/be) — sólo en Android 11+ (API 30)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                int std = info.getWifiStandard();
+                r.put("wifiStandard", std);
+                r.put("wifiStandardName", standardName(std));
+            }
             call.resolve(r);
         } catch (Exception e) {
             call.reject("getWifiInfo falló: " + e.getMessage(), e);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // scanAccessPoints — escanea TODOS los APs visibles, no sólo el conectado.
+    // Maneja el throttling de Android 9+: si startScan() devuelve false (límite
+    // 4 scans / 2 min), devolvemos los resultados cacheados con fromCache=true.
+    // -----------------------------------------------------------------------
+    @PluginMethod
+    public void scanAccessPoints(PluginCall call) {
+        if (getPermissionState("location") != PermissionState.GRANTED) {
+            requestPermissionForAlias("location", call, "scanApPermissionCallback");
+            return;
+        }
+        performScan(call);
+    }
+
+    @PermissionCallback
+    private void scanApPermissionCallback(PluginCall call) {
+        if (getPermissionState("location") == PermissionState.GRANTED) {
+            performScan(call);
+        } else {
+            call.reject("Permiso de ubicación denegado (requerido para WiFi scan).");
+        }
+    }
+
+    private void performScan(final PluginCall call) {
+        final Context ctx = getContext().getApplicationContext();
+        final WifiManager wm = (WifiManager) ctx.getSystemService(Context.WIFI_SERVICE);
+        if (wm == null) { call.reject("WifiManager no disponible"); return; }
+        if (!wm.isWifiEnabled()) { call.reject("WiFi está desactivado en el dispositivo."); return; }
+
+        final boolean[] done = { false };
+        final BroadcastReceiver receiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                if (done[0]) return;
+                done[0] = true;
+                try { context.unregisterReceiver(this); } catch (Exception ignored) {}
+                boolean ok = intent.getBooleanExtra(WifiManager.EXTRA_RESULTS_UPDATED, true);
+                resolveScan(call, wm, !ok);
+            }
+        };
+
+        IntentFilter filter = new IntentFilter(WifiManager.SCAN_RESULTS_AVAILABLE_ACTION);
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                ctx.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED);
+            } else {
+                ctx.registerReceiver(receiver, filter);
+            }
+        } catch (Exception e) {
+            call.reject("registerReceiver falló: " + e.getMessage());
+            return;
+        }
+
+        boolean started;
+        try {
+            // startScan() está deprecado en API 28+ pero sigue siendo la forma
+            // soportada de forzar un re-scan en apps de campo.
+            started = wm.startScan();
+        } catch (SecurityException se) {
+            try { ctx.unregisterReceiver(receiver); } catch (Exception ignored) {}
+            call.reject("SecurityException en startScan: " + se.getMessage());
+            return;
+        }
+
+        if (!started) {
+            // Throttling — devolvemos cache inmediatamente.
+            done[0] = true;
+            try { ctx.unregisterReceiver(receiver); } catch (Exception ignored) {}
+            resolveScan(call, wm, true);
+            return;
+        }
+
+        // Fallback: si en 10 s no llegó el broadcast (algunos OEMs no lo
+        // disparan), devolvemos cache.
+        new Handler(Looper.getMainLooper()).postDelayed(() -> {
+            if (done[0]) return;
+            done[0] = true;
+            try { ctx.unregisterReceiver(receiver); } catch (Exception ignored) {}
+            resolveScan(call, wm, true);
+        }, 10000);
+    }
+
+    private void resolveScan(PluginCall call, WifiManager wm, boolean fromCache) {
+        String connectedBssid = null;
+        String connectedSsid = null;
+        try {
+            WifiInfo info = wm.getConnectionInfo();
+            if (info != null) {
+                connectedBssid = info.getBSSID();
+                String s = info.getSSID();
+                if (s != null && s.startsWith("\"") && s.endsWith("\"")) {
+                    s = s.substring(1, s.length() - 1);
+                }
+                connectedSsid = s;
+            }
+        } catch (Exception ignored) {}
+
+        List<ScanResult> results;
+        try {
+            results = wm.getScanResults();
+        } catch (Exception e) {
+            call.reject("getScanResults falló: " + e.getMessage());
+            return;
+        }
+
+        JSONArray arr = new JSONArray();
+        for (ScanResult r : results) {
+            JSObject ap = new JSObject();
+            ap.put("bssid", r.BSSID);
+            ap.put("ssid", r.SSID);
+            ap.put("signalDbm", r.level);
+            ap.put("frequencyMhz", r.frequency);
+            ap.put("band", bandFromFreq(r.frequency));
+            ap.put("channel", channelFromFreq(r.frequency));
+            ap.put("capabilities", r.capabilities);
+            ap.put("isConnected", r.BSSID != null && r.BSSID.equalsIgnoreCase(connectedBssid));
+            ap.put("timestampMs", r.timestamp);
+            arr.put(ap);
+        }
+
+        JSObject result = new JSObject();
+        result.put("accessPoints", arr);
+        result.put("fromCache", fromCache);
+        result.put("connectedBssid", connectedBssid);
+        result.put("connectedSsid", connectedSsid);
+        result.put("scannedAt", System.currentTimeMillis());
+        call.resolve(result);
+    }
+
+    private String bandFromFreq(int freq) {
+        if (freq >= 2400 && freq < 2500) return "2.4GHz";
+        if (freq >= 5000 && freq < 5900) return "5GHz";
+        if (freq >= 5950 && freq <= 7125) return "6GHz";
+        return "unknown";
+    }
+
+    private int channelFromFreq(int freq) {
+        if (freq >= 2412 && freq <= 2484) return (freq - 2407) / 5;
+        if (freq >= 5180 && freq <= 5825) return (freq - 5000) / 5;
+        if (freq >= 5955 && freq <= 7115) return (freq - 5955) / 5 + 1;
+        return -1;
+    }
+
+    private String standardName(int std) {
+        // Constantes de ScanResult.WIFI_STANDARD_* (API 30+)
+        switch (std) {
+            case 1: return "802.11 legacy";
+            case 4: return "802.11n (Wi-Fi 4)";
+            case 5: return "802.11ac (Wi-Fi 5)";
+            case 6: return "802.11ax (Wi-Fi 6)";
+            case 7: return "802.11ad";
+            case 8: return "802.11be (Wi-Fi 7)";
+            default: return "Desconocido";
         }
     }
 

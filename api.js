@@ -340,6 +340,32 @@
       await delay(80);
       return Object.assign({ id: uuidMock(), createdAt: nowIso() }, body);
     },
+    async listWifiHeatmaps(accountNumber, opts) {
+      const params = new URLSearchParams({ accountNumber, ...(opts || {}) });
+      if (this.useRealApi) return fetchJson('GET', `/wifi-heatmaps?${params.toString()}`);
+      await delay(40);
+      return { items: [], pagination: { page: 1, pageSize: 20, totalItems: 0, totalPages: 0 } };
+    },
+    async getWifiHeatmap(id) {
+      if (this.useRealApi) return fetchJson('GET', `/wifi-heatmaps/${encodeURIComponent(id)}`);
+      await delay(40);
+      return null;
+    },
+    async listWifiAccessPoints(accountNumber) {
+      if (this.useRealApi) return fetchJson('GET', `/accounts/${encodeURIComponent(accountNumber)}/wifi-access-points`);
+      await delay(40);
+      return [];
+    },
+    async upsertWifiAccessPoint(accountNumber, payload) {
+      if (this.useRealApi) return fetchJson('POST', `/accounts/${encodeURIComponent(accountNumber)}/wifi-access-points`, payload);
+      await delay(50);
+      return Object.assign({ id: uuidMock(), accountNumber, createdAt: nowIso(), updatedAt: nowIso() }, payload);
+    },
+    async updateWifiAccessPoint(id, patch) {
+      if (this.useRealApi) return fetchJson('PATCH', `/wifi-access-points/${encodeURIComponent(id)}`, patch);
+      await delay(50);
+      return Object.assign({ id, updatedAt: nowIso() }, patch);
+    },
     async createPingTest(accountNumber, payload) {
       const body = withContext(accountNumber, Object.assign({ measuredAt: nowIso() }, payload));
       if (this.useRealApi) return fetchJson('POST', '/ping-tests', body);
