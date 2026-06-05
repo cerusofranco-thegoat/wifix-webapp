@@ -128,13 +128,88 @@ const accountInput = document.getElementById('accountInput');
 const clearAccount = document.getElementById('clearAccount');
 const inputWrap = accountInput.closest('.input-wrap');
 
+// Cache del perfil validado. Se invalida al cambiar el número de cuenta.
+let validatedProfile = null;
+let validatedAccount = null;
+
+function invalidateAccountCache() {
+  validatedProfile = null;
+  validatedAccount = null;
+  const subGrid = document.querySelector('.sub-grid');
+  if (subGrid) {
+    subGrid.classList.remove('account-confirmed');
+    subGrid.querySelectorAll('.sub-card').forEach((c) => {
+      c.setAttribute('aria-disabled', 'true');
+      c.setAttribute('tabindex', '-1');
+    });
+  }
+  const feedback = document.getElementById('confirmAccountFeedback');
+  if (feedback) {
+    feedback.textContent = '';
+    feedback.className = 'confirm-account-feedback';
+  }
+}
+
+function enableSubCards() {
+  const subGrid = document.querySelector('.sub-grid');
+  if (!subGrid) return;
+  subGrid.querySelectorAll('.sub-card').forEach((c) => {
+    c.removeAttribute('aria-disabled');
+    c.removeAttribute('tabindex');
+  });
+}
+
 accountInput.addEventListener('input', () => {
   inputWrap.classList.toggle('has-value', accountInput.value.length > 0);
+  invalidateAccountCache();
 });
 clearAccount.addEventListener('click', () => {
   accountInput.value = '';
   inputWrap.classList.remove('has-value');
+  invalidateAccountCache();
   accountInput.focus();
+});
+
+// Las tarjetas arrancan deshabilitadas para a11y; se habilitan al confirmar cuenta.
+invalidateAccountCache();
+
+// === Confirmar cuenta ========================================================
+const confirmAccountBtn = document.getElementById('confirmAccount');
+const confirmAccountFeedback = document.getElementById('confirmAccountFeedback');
+
+confirmAccountBtn.addEventListener('click', async () => {
+  const cuenta = currentAccount();
+  if (!cuenta) {
+    confirmAccountFeedback.textContent = 'Ingresá el número de cuenta.';
+    confirmAccountFeedback.className = 'confirm-account-feedback error';
+    return;
+  }
+
+  confirmAccountBtn.disabled = true;
+  confirmAccountBtn.textContent = 'Validando…';
+  confirmAccountFeedback.textContent = '';
+  confirmAccountFeedback.className = 'confirm-account-feedback';
+
+  try {
+    const profile = await WifixAPI.getClientProfile(cuenta);
+    validatedProfile = profile;
+    validatedAccount = cuenta;
+
+    const subGrid = document.querySelector('.sub-grid');
+    if (subGrid) subGrid.classList.add('account-confirmed');
+    enableSubCards();
+
+    confirmAccountFeedback.textContent = `Cuenta confirmada — ${profile.fullName}`;
+    confirmAccountFeedback.className = 'confirm-account-feedback success';
+  } catch (err) {
+    console.error('[Wifix] confirm-account:', err);
+    invalidateAccountCache();
+    confirmAccountFeedback.textContent = err.message || 'No se pudo validar la cuenta.';
+    confirmAccountFeedback.className = 'confirm-account-feedback error';
+  } finally {
+    confirmAccountBtn.disabled = false;
+    confirmAccountBtn.textContent = 'Confirmar cuenta';
+  }
 });
 
 // === Sub categorías =========================================================
@@ -300,9 +375,16 @@ async function openDatosPersonales() {
   accountChip.textContent = cuenta;
   detailEyebrow.textContent = labels[currentCategory].title;
 
-  detailList.innerHTML = `<div class="detail-loading">Cargando datos del cliente…</div>`;
   detailPersonales.classList.add('open');
   detailPersonales.setAttribute('aria-hidden', 'false');
+
+  // Reutilizar el perfil ya validado por "Confirmar cuenta" si coincide.
+  if (validatedProfile && validatedAccount === cuenta) {
+    renderClientProfile(validatedProfile, cuenta);
+    return;
+  }
+
+  detailList.innerHTML = `<div class="detail-loading">Cargando datos del cliente…</div>`;
 
   let profile;
   try {
@@ -1048,40 +1130,179 @@ function wireToolForm(bodyEl, item) {
 }
 
 // ============================================================================
-// Equipos Retirados (Fase 1, sin cambios funcionales)
+// Equipos Retirados — detección automática de serial por cámara/OCR
 // ============================================================================
+
+/** Patrones de serial por nombre de modelo (key = nombre exacto de la API). */
+const SERIAL_PATTERNS = {
+  'Decodificadores':       { re: /^[A-Z0-9]{12}$/,        len: 12 },
+  'Decodificadores HD':    { re: /^[A-Z0-9]{12}$/,        len: 12 },
+  'MTA':                   { re: /^[A-Z0-9]{15}$/,        len: 15 },
+  'ONU B2000':             { re: /^XPON[A-Z0-9]{8}$/,     len: 12 },
+  'ONT Huawei OptiXstar':  { re: /^HWTC[0-9A-F]{8}$/i,    len: 12 },
+  'Router Huawei':         { re: /^[A-Z0-9]{16}$/,        len: 16 },
+  'ONU300G':               { re: /^STGU[A-Z0-9]{8}$/,     len: 12 },
+  'ONU HUR':               { re: /^STGU[A-Z0-9]{8}$/,     len: 12 },
+  'ONT ZTE (todas)':       { re: /^ZTEG[0-9A-F]{8}$/i,    len: 12 },
+  'Router ZTE':            { re: /^ZTEL[A-Z0-9]{12}$/,    len: 16 },
+};
+
+/** Patrón laxo cuando el modelo no tiene entrada en SERIAL_PATTERNS. */
+const SERIAL_PATTERN_FALLBACK = { re: /^[A-Z0-9]{6,20}$/, len: 10 };
+
+/** Rótulos a quitar del inicio de cada candidato (orden largo a corto). */
+const SERIAL_LABELS = ['HOST SN', 'GPON SN', 'PON SN', 'D-SN', 'S/N', 'SN'];
+const _LABEL_RE = new RegExp(
+  '^(' + SERIAL_LABELS.map(l => l.replace(/[/\\]/g, '\\$&')).join('|') + ')\\s*:?\\s*',
+  'i'
+);
+
+/**
+ * Convierte un dataURL (p.ej. "data:image/jpeg;base64,....") a un objeto File.
+ * Usado para subir la foto tomada con WifixNative.takePhoto() como evidencia.
+ *
+ * @param {string} dataUrl  - dataURL con prefijo "data:<mime>;base64,<datos>"
+ * @param {string} filename - nombre de archivo resultante (ej. "serial.jpg")
+ * @returns {File}
+ */
+function dataUrlToFile(dataUrl, filename) {
+  const [header, data] = dataUrl.split(',');
+  const mime = header.match(/:(.*?);/)[1];
+  const binary = atob(data);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return new File([bytes], filename, { type: mime });
+}
+
+/**
+ * Dado un array de strings crudos (barcode rawValues o líneas de OCR) y el
+ * nombre del modelo seleccionado, devuelve el mejor serial posible.
+ *
+ * Retorna: { serial: string, confidence: 'ok' | 'warn', candidates: string[] }
+ */
+function extractSerial(rawCandidates, modelName) {
+  const pattern = SERIAL_PATTERNS[modelName] || SERIAL_PATTERN_FALLBACK;
+
+  const cleaned = rawCandidates
+    .map(r => r.toUpperCase().trim())
+    .map(r => r.replace(_LABEL_RE, ''))
+    .map(r => r.replace(/\s+/g, ''));
+
+  const matches = [...new Set(cleaned.filter(c => pattern.re.test(c)))];
+
+  if (matches.length === 1) {
+    return { serial: matches[0], confidence: 'ok', candidates: matches };
+  }
+  if (matches.length > 1) {
+    return { serial: matches[0], confidence: 'ok', candidates: matches };
+  }
+
+  // Sin match exacto: mejor esfuerzo por longitud más cercana al patrón
+  const bestEffort = cleaned
+    .filter(c => c.length >= 4)
+    .sort((a, b) => Math.abs(a.length - pattern.len) - Math.abs(b.length - pattern.len));
+
+  const best = bestEffort[0] || '';
+  return { serial: best, confidence: 'warn', candidates: bestEffort.slice(0, 5) };
+}
+
+/** Devuelve true si el puente nativo de escaneo está disponible. */
+function serialScannerAvailable() {
+  return !!(
+    window.WifixNative &&
+    window.WifixNative.serialScanner &&
+    typeof window.WifixNative.serialScanner.available === 'function' &&
+    window.WifixNative.serialScanner.available()
+  );
+}
+
 async function openRetirados() {
   const cuenta = currentAccount() || `WX-${randInt(100000, 999999)}`;
   retiradosChip.textContent = cuenta;
 
+  const nativeAvailable = serialScannerAvailable();
+
   retiradosForm.innerHTML = `
     <div class="tool-form" data-form="retired">
-      <label class="form-row"><span class="form-label">Número de serie *</span>
-        <input type="text" data-field="serialValue" placeholder="48575443A1B2C3D4"></label>
+
       <label class="form-row"><span class="form-label">Modelo del equipo *</span>
         <select data-field="equipmentModelId"><option value="">Cargando...</option></select></label>
+
       <label class="form-row"><span class="form-label">Motivo de retiro *</span>
         <select data-field="removalReasonCode"><option value="">Cargando...</option></select></label>
+
+      <!-- Bloque de detección de serial -->
+      <div class="serial-detect-block" data-slot="serialBlock">
+
+        ${nativeAvailable ? `
+        <button type="button" class="scan-serial-btn" data-action="scanSerial" disabled
+          aria-label="Escanear serial con cámara">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3m0 4h4v-4m-7 4h3"/></svg>
+          Escanear serial
+        </button>
+        <p class="serial-browser-note" style="display:none"></p>
+        ` : `
+        <p class="serial-browser-note">Escaneo disponible solo en la app</p>
+        `}
+
+        <div class="serial-result-row" data-slot="serialResultRow" style="display:none">
+          <span class="serial-confidence-badge" data-slot="serialBadge"></span>
+          <select class="serial-candidates-select" data-slot="serialCandidatesSelect" style="display:none"
+            aria-label="Candidatos de serial detectados"></select>
+        </div>
+
+        <label class="form-row">
+          <span class="form-label" id="serialValueLabel">Número de serie *</span>
+          <input type="text" data-field="serialValue" placeholder="${nativeAvailable ? 'Escanear para detectar' : '48575443A1B2C3D4'}"
+            aria-labelledby="serialValueLabel" autocomplete="off" autocapitalize="characters" spellcheck="false">
+        </label>
+
+        <button type="button" class="ocr-fallback-btn" data-action="ocrFallback"
+          ${nativeAvailable ? '' : 'style="display:none"'}>
+          No se pudo leer — usar foto
+        </button>
+        <input type="file" accept="image/*" capture="environment"
+          data-slot="ocrFileInput" style="display:none" aria-hidden="true" tabindex="-1">
+
+      </div>
+      <!-- /Bloque de detección de serial -->
+
       <label class="form-row"><span class="form-label">Observaciones</span>
         <textarea data-field="observations" rows="3" placeholder="Detalles del retiro"></textarea></label>
-      <label class="form-row"><span class="form-label">Foto del código de barras (opcional)</span>
+
+      <label class="form-row"><span class="form-label">Foto de evidencia (opcional)</span>
         <input type="file" accept="image/jpeg,image/png" data-field="barcodePhoto"></label>
       <div class="barcode-status" data-slot="barcodeStatus"></div>
+
       <button class="save-btn" data-action="save">Guardar retiro</button>
     </div>`;
 
-  const formEl = retiradosForm.querySelector('[data-form="retired"]');
-  const modelSel = formEl.querySelector('[data-field="equipmentModelId"]');
-  const reasonSel = formEl.querySelector('[data-field="removalReasonCode"]');
-  const fileInput = formEl.querySelector('[data-field="barcodePhoto"]');
+  const formEl     = retiradosForm.querySelector('[data-form="retired"]');
+  const modelSel   = formEl.querySelector('[data-field="equipmentModelId"]');
+  const reasonSel  = formEl.querySelector('[data-field="removalReasonCode"]');
+  const serialInput  = formEl.querySelector('[data-field="serialValue"]');
+  const scanBtn      = formEl.querySelector('[data-action="scanSerial"]');
+  const ocrBtn       = formEl.querySelector('[data-action="ocrFallback"]');
+  const ocrFileInput = formEl.querySelector('[data-slot="ocrFileInput"]');
+  const serialResultRow      = formEl.querySelector('[data-slot="serialResultRow"]');
+  const serialBadge          = formEl.querySelector('[data-slot="serialBadge"]');
+  const serialCandidatesSel  = formEl.querySelector('[data-slot="serialCandidatesSelect"]');
+  const fileInput     = formEl.querySelector('[data-field="barcodePhoto"]');
   const barcodeStatus = formEl.querySelector('[data-slot="barcodeStatus"]');
-  const saveBtn = formEl.querySelector('[data-action="save"]');
+  const saveBtn       = formEl.querySelector('[data-action="save"]');
 
+  // Mapa id->nombre para el algoritmo de extracción
+  const modelNameById = {};
+
+  // ---- Carga de catálogos --------------------------------------------------
   try {
     const [models, reasons] = await Promise.all([
       WifixAPI.listEquipmentModels(),
       WifixAPI.listRemovalReasons(),
     ]);
+    models.filter(m => m.active).forEach(m => { modelNameById[m.id] = m.name; });
     modelSel.innerHTML = `<option value="">Selecciona un modelo</option>` +
       models.filter(m => m.active).map(m =>
         `<option value="${escapeHtml(m.id)}">${escapeHtml(m.name)} (${escapeHtml(m.serialFieldType)})</option>`).join('');
@@ -1094,6 +1315,197 @@ async function openRetirados() {
     reasonSel.innerHTML = `<option value="">No se pudo cargar</option>`;
   }
 
+  // ---- Habilitar botón de escanear cuando hay modelo elegido ---------------
+  if (scanBtn) {
+    modelSel.addEventListener('change', () => {
+      scanBtn.disabled = !modelSel.value;
+    });
+  }
+
+  // ---- Aplica resultado de extracción al formulario -----------------------
+  function applySerialResult(result) {
+    serialResultRow.style.display = '';
+
+    if (result.confidence === 'ok') {
+      serialBadge.textContent = '✓ Detectado';
+      serialBadge.className = 'serial-confidence-badge ok';
+    } else {
+      serialBadge.textContent = '⚠ Verificá el serial';
+      serialBadge.className = 'serial-confidence-badge warn';
+    }
+
+    if (result.candidates.length > 1) {
+      serialCandidatesSel.style.display = '';
+      serialCandidatesSel.innerHTML = result.candidates
+        .map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('');
+      serialCandidatesSel.value = result.serial;
+      serialInput.value = result.serial;
+      serialCandidatesSel.addEventListener('change', () => {
+        serialInput.value = serialCandidatesSel.value;
+      }, { once: false });
+    } else {
+      serialCandidatesSel.style.display = 'none';
+      serialInput.value = result.serial;
+    }
+
+    serialInput.focus();
+  }
+
+  // ---- Botón "Escanear serial" (nativo) ------------------------------------
+  if (scanBtn) {
+    scanBtn.addEventListener('click', async () => {
+      const modelName = modelNameById[modelSel.value] || '';
+      scanBtn.disabled = true;
+      scanBtn.textContent = 'Leyendo...';
+      try {
+        const rawValues = await window.WifixNative.serialScanner.scanBarcodes();
+        if (!rawValues || rawValues.length === 0) {
+          serialBadge.className = 'serial-confidence-badge warn';
+          serialBadge.textContent = '⚠ No se detectó código';
+          serialResultRow.style.display = '';
+        } else {
+          applySerialResult(extractSerial(rawValues, modelName));
+        }
+      } catch (err) {
+        console.error('[Wifix] scanBarcodes:', err);
+        serialBadge.className = 'serial-confidence-badge warn';
+        serialBadge.textContent = '⚠ Error al escanear';
+        serialResultRow.style.display = '';
+      } finally {
+        scanBtn.disabled = !modelSel.value;
+        scanBtn.innerHTML = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3m0 4h4v-4m-7 4h3"/></svg> Escanear serial`;
+      }
+    });
+  }
+
+  // ---- Fallback OCR: "No se pudo leer — usar foto" -------------------------
+  //
+  // APK + WifixNative.takePhoto disponible:
+  //   → llama takePhoto() para abrir la cámara nativa, pide permiso en el momento,
+  //     corre OCR sobre el dataURL devuelto y sube la misma foto como evidencia.
+  //
+  // Navegador (o APK sin takePhoto):
+  //   → comportamiento original con <input type="file" capture="environment">.
+  //
+  const useNativeCamera = nativeAvailable && typeof window.WifixNative?.takePhoto === 'function';
+
+  if (ocrBtn) {
+    if (useNativeCamera) {
+      // ----- Ruta APK: cámara nativa ----------------------------------------
+      ocrBtn.addEventListener('click', async () => {
+        const modelName = modelNameById[modelSel.value] || '';
+
+        ocrBtn.disabled = true;
+        ocrBtn.textContent = 'Abriendo cámara...';
+
+        let dataUrl = null;
+        try {
+          dataUrl = await window.WifixNative.takePhoto();
+        } catch (err) {
+          console.error('[Wifix] takePhoto:', err);
+          serialBadge.className = 'serial-confidence-badge warn';
+          serialBadge.textContent = '⚠ Error al acceder a la cámara';
+          serialResultRow.style.display = '';
+          ocrBtn.disabled = false;
+          ocrBtn.textContent = 'No se pudo leer — usar foto';
+          return;
+        }
+
+        if (!dataUrl) {
+          // Cancelado por el usuario o permiso denegado
+          serialBadge.className = 'serial-confidence-badge warn';
+          serialBadge.textContent = '⚠ No se tomó ninguna foto';
+          serialResultRow.style.display = '';
+          ocrBtn.disabled = false;
+          ocrBtn.textContent = 'No se pudo leer — usar foto';
+          return;
+        }
+
+        ocrBtn.textContent = 'Procesando foto...';
+
+        try {
+          // a) OCR: la API espera base64 sin prefijo de dataURL
+          const base64 = dataUrl.split(',').pop();
+          const lines = await window.WifixNative.serialScanner.ocrFromImageBase64(base64);
+          if (!lines || lines.length === 0) {
+            serialBadge.className = 'serial-confidence-badge warn';
+            serialBadge.textContent = '⚠ No se encontró texto en la foto';
+            serialResultRow.style.display = '';
+          } else {
+            applySerialResult(extractSerial(lines, modelName));
+          }
+
+          // b) Subir la misma foto como evidencia (barcodePhotoId)
+          ocrBtn.textContent = 'Subiendo foto...';
+          try {
+            const photoFile = dataUrlToFile(dataUrl, 'serial.jpg');
+            const media = await WifixAPI.uploadMedia(photoFile);
+            uploadedPhotoId = media.id;
+            barcodeStatus.textContent = '✓ Foto tomada y subida';
+            barcodeStatus.className = 'barcode-status ok';
+          } catch (uploadErr) {
+            console.error('[Wifix] upload takePhoto:', uploadErr);
+            barcodeStatus.textContent = '⚠ Foto procesada pero no se pudo subir';
+            barcodeStatus.className = 'barcode-status';
+          }
+        } catch (err) {
+          console.error('[Wifix] ocrFromImageBase64 (takePhoto):', err);
+          serialBadge.className = 'serial-confidence-badge warn';
+          serialBadge.textContent = '⚠ Error al procesar la foto';
+          serialResultRow.style.display = '';
+        } finally {
+          ocrBtn.disabled = false;
+          ocrBtn.textContent = 'No se pudo leer — usar foto';
+        }
+      });
+
+    } else if (ocrFileInput) {
+      // ----- Ruta navegador: <input type="file" capture="environment"> -------
+      ocrBtn.addEventListener('click', () => { ocrFileInput.click(); });
+
+      ocrFileInput.addEventListener('change', async () => {
+        const file = ocrFileInput.files && ocrFileInput.files[0];
+        if (!file) return;
+        const modelName = modelNameById[modelSel.value] || '';
+
+        ocrBtn.disabled = true;
+        ocrBtn.textContent = 'Procesando foto...';
+
+        try {
+          const base64 = await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => {
+              // Quitar prefijo "data:image/...;base64," si lo hay
+              const result = reader.result;
+              resolve(typeof result === 'string' ? result.split(',').pop() : '');
+            };
+            reader.onerror = reject;
+            reader.readAsDataURL(file);
+          });
+
+          const lines = await window.WifixNative.serialScanner.ocrFromImageBase64(base64);
+          if (!lines || lines.length === 0) {
+            serialBadge.className = 'serial-confidence-badge warn';
+            serialBadge.textContent = '⚠ No se encontró texto en la foto';
+            serialResultRow.style.display = '';
+          } else {
+            applySerialResult(extractSerial(lines, modelName));
+          }
+        } catch (err) {
+          console.error('[Wifix] ocrFromImageBase64:', err);
+          serialBadge.className = 'serial-confidence-badge warn';
+          serialBadge.textContent = '⚠ Error al procesar la foto';
+          serialResultRow.style.display = '';
+        } finally {
+          ocrBtn.disabled = false;
+          ocrBtn.textContent = 'No se pudo leer — usar foto';
+          ocrFileInput.value = '';
+        }
+      });
+    }
+  }
+
+  // ---- Foto de evidencia (upload al servidor) ------------------------------
   let uploadedPhotoId = null;
   fileInput.addEventListener('change', async () => {
     uploadedPhotoId = null;
@@ -1103,38 +1515,38 @@ async function openRetirados() {
       return;
     }
     barcodeStatus.textContent = 'Subiendo foto...';
+    barcodeStatus.className = 'barcode-status';
     try {
       const media = await WifixAPI.uploadMedia(file);
       uploadedPhotoId = media.id;
       barcodeStatus.textContent = `✓ Foto cargada (${Math.round((media.sizeBytes || file.size) / 1024)} KB)`;
       barcodeStatus.classList.add('ok');
-      barcodeStatus.classList.remove('fail');
     } catch (err) {
       console.error('[Wifix] upload media:', err);
       barcodeStatus.textContent = `✗ ${err.message || 'No se pudo subir la foto.'}`;
       barcodeStatus.classList.add('fail');
-      barcodeStatus.classList.remove('ok');
     }
   });
 
+  // ---- Guardar retiro ------------------------------------------------------
   saveBtn.addEventListener('click', async () => {
     const acct = currentAccount();
     if (!acct) {
       showSaveFeedback(saveBtn, 'Falta nº de cuenta', false);
       return;
     }
-    const serial = nonEmpty(formEl.querySelector('[data-field="serialValue"]').value);
-    const modelId = modelSel.value;
+    const serial   = nonEmpty(serialInput.value);
+    const modelId  = modelSel.value;
     const reasonCode = reasonSel.value;
     if (!serial || !modelId || !reasonCode) {
       showSaveFeedback(saveBtn, 'Completa serie, modelo y motivo', false);
       return;
     }
     const payload = {
-      serialValue: serial,
-      equipmentModelId: modelId,
-      removalReasonCode: reasonCode,
-      observations: nonEmpty(formEl.querySelector('[data-field="observations"]').value),
+      serialValue:        serial,
+      equipmentModelId:   modelId,
+      removalReasonCode:  reasonCode,
+      observations:       nonEmpty(formEl.querySelector('[data-field="observations"]').value),
     };
     if (uploadedPhotoId) payload.barcodePhotoId = uploadedPhotoId;
 

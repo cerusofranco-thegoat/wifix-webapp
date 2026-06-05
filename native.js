@@ -404,6 +404,185 @@
     return 2 * R * Math.asin(Math.sqrt(a));
   }
 
+  // --------------------------------------------------------------------------
+  // serialScanner — escaneo de serial vía ML Kit (barcode + OCR)
+  // La lógica de negocio (filtrado, validación de patrón) queda en el frontend;
+  // este wrapper sólo devuelve datos crudos.
+  // --------------------------------------------------------------------------
+  WifixNative.serialScanner = {
+    /**
+     * true sólo si corre dentro del APK con los plugins disponibles.
+     */
+    available() {
+      return isNative() &&
+        !!(global.Capacitor && global.Capacitor.Plugins &&
+           global.Capacitor.Plugins.BarcodeScanner &&
+           global.Capacitor.Plugins.CapacitorPluginMlKitTextRecognition);
+    },
+
+    /**
+     * Abre el escáner en vivo de ML Kit (barcode/QR) vía `BarcodeScanner.scan()`.
+     * Pide permiso de cámara si hace falta antes de abrir.
+     * Devuelve un array con los rawValue de todos los códigos detectados,
+     * deduplicados y en .trim().toUpperCase(). Si el usuario cancela o no hay
+     * códigos devuelve []. No lanza por cancelación.
+     *
+     * @returns {Promise<string[]>}
+     */
+    async scanBarcodes() {
+      if (!isNative()) return [];
+      const BS = global.Capacitor.Plugins.BarcodeScanner;
+      if (!BS) return [];
+
+      // Permisos de cámara
+      try {
+        const perms = await BS.checkPermissions();
+        if (perms.camera !== 'granted') {
+          const req = await BS.requestPermissions();
+          if (req.camera !== 'granted') {
+            console.warn('[serialScanner] Permiso de cámara denegado.');
+            return [];
+          }
+        }
+      } catch (permErr) {
+        console.error('[serialScanner] Error al pedir permiso de cámara:', permErr);
+        return [];
+      }
+
+      // scan() abre la UI nativa de ML Kit (Google Barcode Scanner bundled).
+      // Requiere Google Play Services; en su ausencia lanza una excepción.
+      try {
+        const result = await BS.scan();
+        const barcodes = (result && result.barcodes) || [];
+        if (barcodes.length === 0) return [];
+
+        // Deduplicar y normalizar
+        const seen = new Set();
+        const out = [];
+        for (const b of barcodes) {
+          const val = (b.rawValue || '').trim().toUpperCase();
+          if (val && !seen.has(val)) {
+            seen.add(val);
+            out.push(val);
+          }
+        }
+        return out;
+      } catch (err) {
+        // El usuario canceló o el módulo no está disponible — no propagamos.
+        const msg = (err && err.message) || String(err);
+        if (/cancel/i.test(msg) || /dismiss/i.test(msg)) return [];
+        console.error('[serialScanner] scanBarcodes error:', err);
+        return [];
+      }
+    },
+
+    /**
+     * Recibe una imagen en base64 (dataURL "data:image/...;base64,..." o base64 puro),
+     * corre el OCR on-device de ML Kit (pantrist) y devuelve las LÍNEAS de texto
+     * reconocidas como array de strings crudas.
+     * Si no reconoce nada devuelve [].
+     *
+     * Usa: CapacitorPluginMlKitTextRecognition.detectText({ base64Image })
+     * Shape de salida: { text: string, blocks: Block[] } donde cada Block tiene lines[].
+     *
+     * @param {string} base64 - dataURL o base64 puro
+     * @returns {Promise<string[]>}
+     */
+    async ocrFromImageBase64(base64) {
+      if (!isNative()) return [];
+      const OCR = global.Capacitor.Plugins.CapacitorPluginMlKitTextRecognition;
+      if (!OCR) return [];
+
+      // Normalizar: el plugin espera base64 puro (sin el prefijo dataURL).
+      const cleanBase64 = typeof base64 === 'string' && base64.indexOf(',') !== -1
+        ? base64.split(',')[1]
+        : base64;
+
+      try {
+        const result = await OCR.detectText({ base64Image: cleanBase64 });
+        if (!result || !result.blocks || result.blocks.length === 0) return [];
+
+        // Extraer líneas de texto de todos los bloques
+        const lines = [];
+        for (const block of result.blocks) {
+          if (!block.lines) continue;
+          for (const line of block.lines) {
+            if (line.text) lines.push(line.text);
+          }
+        }
+        return lines;
+      } catch (err) {
+        console.error('[serialScanner] ocrFromImageBase64 error:', err);
+        return [];
+      }
+    }
+  };
+
+  // --------------------------------------------------------------------------
+  // takePhoto — toma una foto con la cámara del dispositivo en el momento.
+  // Devuelve un dataURL "data:image/jpeg;base64,..." o null si el usuario
+  // cancela o si se deniega el permiso. No lanza por cancelación.
+  //
+  // Contrato:
+  //   WifixNative.takePhoto(): Promise<string|null>
+  //
+  // Usa @capacitor/camera 6.x (Capacitor.Plugins.Camera):
+  //   - checkPermissions / requestPermissions para el alias "camera".
+  //   - getPhoto({ source: 'CAMERA', resultType: 'dataUrl', quality: 70 })
+  //     → { dataUrl: "data:image/jpeg;base64,..." }
+  // --------------------------------------------------------------------------
+  WifixNative.takePhoto = async function takePhoto() {
+    if (!isNative()) return null;
+    const Cam = global.Capacitor && global.Capacitor.Plugins && global.Capacitor.Plugins.Camera;
+    if (!Cam) {
+      console.warn('[WifixNative.takePhoto] Plugin Camera no disponible.');
+      return null;
+    }
+
+    // Verificar / solicitar permiso de cámara en runtime.
+    try {
+      const perms = await Cam.checkPermissions();
+      if (perms.camera !== 'granted') {
+        const req = await Cam.requestPermissions({ permissions: ['camera'] });
+        if (req.camera !== 'granted') {
+          console.warn('[WifixNative.takePhoto] Permiso de cámara denegado.');
+          return null;
+        }
+      }
+    } catch (permErr) {
+      console.error('[WifixNative.takePhoto] Error al verificar permisos:', permErr);
+      return null;
+    }
+
+    // Abrir la cámara y tomar la foto.
+    // source: 'CAMERA' — abre la cámara nativa, no la galería.
+    // resultType: 'dataUrl' — devuelve { dataUrl: "data:image/jpeg;base64,..." }.
+    // quality: 70 — compresión JPEG razonable para uso en campo.
+    try {
+      const photo = await Cam.getPhoto({
+        source: 'CAMERA',
+        resultType: 'dataUrl',
+        quality: 70,
+        allowEditing: false,
+        saveToGallery: false,
+      });
+      return (photo && photo.dataUrl) ? photo.dataUrl : null;
+    } catch (err) {
+      // El usuario canceló la cámara — no propagamos el error.
+      const msg = (err && err.message) || String(err);
+      if (
+        /cancel/i.test(msg) ||
+        /dismiss/i.test(msg) ||
+        /user cancelled/i.test(msg) ||
+        /User cancelled/i.test(msg)
+      ) {
+        return null;
+      }
+      console.error('[WifixNative.takePhoto] Error al tomar foto:', err);
+      return null;
+    }
+  };
+
   global.WifixNative = WifixNative;
 
   // --------------------------------------------------------------------------
@@ -833,6 +1012,7 @@
       const list = $('detected-list');
       const count = $('detected-count');
       const aps = state.latestScan;
+      // count refleja routers físicos (grupos), no BSSID individuales.
       count.textContent = String(aps.length);
       if (aps.length === 0) {
         list.innerHTML = '<div class="heatmap-empty">Sin conexión a una red WiFi.</div>';
@@ -840,6 +1020,11 @@
       }
       list.innerHTML = aps.map((ap) => {
         const cls = classifyRssi(ap.signalDbm);
+        // Mostrar badge de bandas cuando hay más de una (dual-band).
+        const isDualBand = ap.bandsLabel && ap.bandsLabel.includes('+');
+        const bandBadge = isDualBand
+          ? `<span class="ap-band-badge">${safeText(ap.bandsLabel)}</span>`
+          : '';
         return `
           <div class="ap-row">
             <div class="ap-row-head">
@@ -848,7 +1033,10 @@
               <span class="ap-rssi ${cls.cls}">${ap.signalDbm} dBm</span>
               ${ap.isConnected ? '<span class="ap-connected">conectado</span>' : ''}
             </div>
-            <div class="ap-meta-mono">${safeText(ap.bssid)}</div>
+            <div class="ap-row-foot">
+              <span class="ap-meta-mono">${safeText(ap.bssid)}</span>
+              ${bandBadge}
+            </div>
           </div>`;
       }).join('');
     }
@@ -868,8 +1056,8 @@
         const connSsid = res.connectedSsid;
         // Sólo APs de la red conectada al teléfono.
         const filtered = connSsid ? aps.filter((a) => a.ssid === connSsid) : [];
-        // Dedupe por BSSID — algunos OEMs reportan la misma MAC más de una vez
-        // en getScanResults(). Nos quedamos con la lectura más fuerte.
+
+        // --- Paso 1: dedupe por BSSID exacto (mismo OEM duplicado en getScanResults).
         const byBssid = new Map();
         for (const ap of filtered) {
           const k = (ap.bssid || '').toLowerCase();
@@ -877,8 +1065,45 @@
           const prev = byBssid.get(k);
           if (!prev || ap.signalDbm > prev.signalDbm) byBssid.set(k, ap);
         }
-        const deduped = Array.from(byBssid.values()).sort((a, b) => b.signalDbm - a.signalDbm);
-        state.latestScan = deduped;
+
+        // --- Paso 2: agrupar por router físico (primeros 5 octetos de la MAC).
+        // Dos BSSID que difieran sólo en el último octeto son el mismo equipo
+        // emitiendo en bandas distintas (2.4 GHz + 5 GHz).
+        const byRouter = new Map();
+        for (const ap of byBssid.values()) {
+          const parts = ap.bssid.toLowerCase().split(':');
+          const routerKey = parts.slice(0, 5).join(':');
+          const group = byRouter.get(routerKey);
+          if (!group) {
+            byRouter.set(routerKey, { representative: ap, bands: [ap] });
+          } else {
+            group.bands.push(ap);
+            // El representante es la banda de señal más fuerte.
+            if (ap.signalDbm > group.representative.signalDbm) {
+              group.representative = ap;
+            }
+          }
+        }
+
+        // --- Paso 3: construir el array final (un objeto por router físico).
+        const grouped = [];
+        for (const { representative, bands } of byRouter.values()) {
+          // isConnected=true si cualquiera de las bandas es la conectada.
+          const anyConnected = bands.some((b) => !!b.isConnected);
+          // bandsLabel es SOLO para UI — nunca va al payload del backend.
+          const bandNames = bands
+            .map((b) => b.band || 'unknown')
+            .filter((v, i, arr) => arr.indexOf(v) === i) // unique
+            .sort();
+          const bandsLabel = bandNames.length > 1 ? bandNames.join(' + ') : (bandNames[0] || '—');
+          grouped.push(Object.assign({}, representative, {
+            isConnected: anyConnected,
+            bandsLabel,
+          }));
+        }
+
+        grouped.sort((a, b) => b.signalDbm - a.signalDbm);
+        state.latestScan = grouped;
         renderDetectedList();
       } catch (_) { /* sin red, no rompemos UI */ }
     }
