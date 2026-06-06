@@ -7,6 +7,9 @@ node_modules/
 # Capacitor build output (regenerable desde npm run build:web)
 www/
 
+# APK compilado (artefacto de build, se regenera con gradlew assembleDebug)
+wifix-debug.apk
+
 # Android Studio / Gradle
 android/.gradle/
 android/.idea/

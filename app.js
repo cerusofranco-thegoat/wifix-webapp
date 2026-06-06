@@ -1208,62 +1208,6 @@ function roomRowHtml(index) {
     </div>`;
 }
 
-function pingFormHtml() {
-  return `
-    <div class="tool-form" data-tool="ping">
-      <label class="form-row"><span class="form-label">Target (IP o URL) *</span>
-        <input type="text" data-field="target" placeholder="8.8.8.8"></label>
-      <div class="form-grid-2">
-        <label class="form-row"><span class="form-label">Paquetes enviados</span>
-          <input type="number" step="1" min="0" data-field="packetsSent" placeholder="10"></label>
-        <label class="form-row"><span class="form-label">Paquetes recibidos</span>
-          <input type="number" step="1" min="0" data-field="packetsReceived" placeholder="10"></label>
-      </div>
-      <div class="form-grid-2">
-        <label class="form-row"><span class="form-label">Latencia mín (ms)</span>
-          <input type="number" step="0.1" data-field="minLatencyMs"></label>
-        <label class="form-row"><span class="form-label">Latencia prom (ms)</span>
-          <input type="number" step="0.1" data-field="avgLatencyMs"></label>
-      </div>
-      <label class="form-row"><span class="form-label">Latencia máx (ms)</span>
-        <input type="number" step="0.1" data-field="maxLatencyMs"></label>
-      <label class="form-row"><span class="form-label">Habitación (si asocias a una medición)</span>
-        <input type="text" data-field="roomName" placeholder="Sala"></label>
-      <button class="save-btn" data-action="save">Guardar ping</button>
-    </div>`;
-}
-
-function tracerouteFormHtml() {
-  return `
-    <div class="tool-form" data-tool="traceroute">
-      <label class="form-row"><span class="form-label">Target *</span>
-        <input type="text" data-field="target" placeholder="www.example.com"></label>
-      <div class="hops-list" data-slot="hops"></div>
-      <button class="add-row-btn" data-action="add-hop">+ Agregar salto</button>
-      <label class="form-row"><span class="form-label">Notas</span>
-        <textarea data-field="notes" rows="2"></textarea></label>
-      <button class="save-btn" data-action="save">Guardar traceroute</button>
-    </div>`;
-}
-
-function hopRowHtml(index) {
-  return `
-    <div class="hop-row" data-hop-index="${index}">
-      <div class="hop-row-head">
-        <span class="form-label">Salto ${index + 1}</span>
-        <button class="row-remove" data-action="remove-hop">×</button>
-      </div>
-      <div class="form-grid-3">
-        <label class="form-row"><span class="form-label">#</span>
-          <input type="number" step="1" min="1" value="${index + 1}" data-field="hopNumber"></label>
-        <label class="form-row"><span class="form-label">Host / IP</span>
-          <input type="text" data-field="host" placeholder="10.0.0.1"></label>
-        <label class="form-row"><span class="form-label">Latencia (ms)</span>
-          <input type="number" step="0.1" data-field="latencyMs"></label>
-      </div>
-    </div>`;
-}
-
 // --- Ping en vivo (consola CMD) -----------------------------------------------
 function pingLiveHtml() {
   return `
@@ -1286,6 +1230,10 @@ function pingLiveHtml() {
         <button class="live-btn live-btn-clear" data-action="live-clear"
                 type="button" aria-label="Limpiar consola">
           Limpiar
+        </button>
+        <button class="live-btn live-btn-expand" data-action="live-fullscreen"
+                type="button" aria-label="Pantalla completa" aria-pressed="false">
+          Pantalla completa
         </button>
       </div>
       <div class="live-stats" data-slot="stats" aria-live="polite" aria-atomic="true"></div>
@@ -1323,6 +1271,10 @@ function tracerouteLiveHtml() {
         <button class="live-btn live-btn-clear" data-action="live-clear"
                 type="button" aria-label="Limpiar consola">
           Limpiar
+        </button>
+        <button class="live-btn live-btn-expand" data-action="live-fullscreen"
+                type="button" aria-label="Pantalla completa" aria-pressed="false">
+          Pantalla completa
         </button>
       </div>
       <div class="live-console" data-slot="console"
@@ -1380,30 +1332,6 @@ function collectHeatmap(formEl) {
   if (nonEmpty(f.notes)) payload.notes = nonEmpty(f.notes);
   return payload;
 }
-function collectPing(formEl) {
-  const f = collectFields(formEl);
-  const payload = { target: nonEmpty(f.target) };
-  ['packetsSent','packetsReceived','minLatencyMs','avgLatencyMs','maxLatencyMs'].forEach(k => {
-    if (num(f[k]) !== undefined) payload[k] = num(f[k]);
-  });
-  if (nonEmpty(f.roomName)) payload.roomName = nonEmpty(f.roomName);
-  return payload;
-}
-function collectTraceroute(formEl) {
-  const f = collectFields(formEl);
-  const hopsEl = formEl.querySelector('[data-slot="hops"]');
-  const hops = collectRows(hopsEl, (row) => {
-    const get = (k) => row.querySelector(`[data-field="${k}"]`).value;
-    return {
-      hopNumber: num(get('hopNumber')),
-      host: nonEmpty(get('host')) || null,
-      latencyMs: num(get('latencyMs')),
-    };
-  });
-  const payload = { target: nonEmpty(f.target), hops };
-  if (nonEmpty(f.notes)) payload.notes = nonEmpty(f.notes);
-  return payload;
-}
 
 const HERRAMIENTAS_ITEMS = [
   { id: 'speedtest', title: 'Test de Velocidad', icon: TOOL_ICONS.speed,
@@ -1412,12 +1340,6 @@ const HERRAMIENTAS_ITEMS = [
   { id: 'heatmap', title: 'Medición de Señal WiFi', icon: TOOL_ICONS.heatmap,
     render: heatmapFormHtml, collect: collectHeatmap,
     save: (acct, payload) => WifixAPI.createWifiHeatmap(acct, payload) },
-  { id: 'ping', title: 'Ping', icon: TOOL_ICONS.ping,
-    render: pingFormHtml, collect: collectPing,
-    save: (acct, payload) => WifixAPI.createPingTest(acct, payload) },
-  { id: 'traceroute', title: 'Traceroute', icon: TOOL_ICONS.trace,
-    render: tracerouteFormHtml, collect: collectTraceroute,
-    save: (acct, payload) => WifixAPI.createTracerouteTest(acct, payload) },
   // Herramientas de diagnóstico en vivo — solo pantalla, sin guardado en backend.
   { id: 'ping-live', title: 'Ping en Vivo (CMD)', icon: TOOL_ICONS.terminal,
     render: pingLiveHtml },
@@ -1467,7 +1389,6 @@ function wireToolForm(bodyEl, item) {
   if (!formEl) return;
 
   const roomsSlot = formEl.querySelector('[data-slot="rooms"]');
-  const hopsSlot = formEl.querySelector('[data-slot="hops"]');
   if (roomsSlot) {
     let idx = 0;
     const addRoom = () => { roomsSlot.insertAdjacentHTML('beforeend', roomRowHtml(idx)); idx++; };
@@ -1477,18 +1398,6 @@ function wireToolForm(bodyEl, item) {
       if (ev.target.matches('[data-action="remove-room"]')) {
         const row = ev.target.closest('.room-row');
         if (roomsSlot.children.length > 1) row.remove();
-      }
-    });
-  }
-  if (hopsSlot) {
-    let idx = 0;
-    const addHop = () => { hopsSlot.insertAdjacentHTML('beforeend', hopRowHtml(idx)); idx++; };
-    addHop();
-    formEl.querySelector('[data-action="add-hop"]').addEventListener('click', addHop);
-    hopsSlot.addEventListener('click', (ev) => {
-      if (ev.target.matches('[data-action="remove-hop"]')) {
-        const row = ev.target.closest('.hop-row');
-        if (hopsSlot.children.length > 1) row.remove();
       }
     });
   }

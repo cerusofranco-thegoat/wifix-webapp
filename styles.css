@@ -8,8 +8,9 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
+  /* overflow gestionado por .phone-frame; body solo centra el marco */
   min-height: 100vh;
-  overflow: hidden;
+  min-height: 100dvh;
 }
 
 /* === Phone frame for desktop preview === */
@@ -17,6 +18,7 @@ body {
   width: 100%;
   max-width: 420px;
   height: 100vh;
+  height: 100dvh;
   max-height: 900px;
   aspect-ratio: 9 / 19.5;
   position: relative;
@@ -33,6 +35,7 @@ body {
   .phone-frame {
     max-width: 100%;
     height: 100vh;
+    height: 100dvh;
     max-height: none;
     border-radius: 0;
     aspect-ratio: auto;
@@ -47,6 +50,10 @@ body {
   display: flex;
   flex-direction: column;
   color: #e8f1ff;
+  overflow: hidden;
+  /* safe areas para notch / barra de estado Android */
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: env(safe-area-inset-bottom);
 }
 
 /* === Background === */
@@ -675,11 +682,14 @@ body {
   position: relative;
   z-index: 1;
   flex: 1;
+  min-height: 0;
   padding: 0 22px;
   display: flex;
   flex-direction: column;
   gap: 16px;
   justify-content: flex-start;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
 }
 .category-card {
   position: relative;
@@ -832,6 +842,8 @@ body {
   pointer-events: none;
   transition: transform 0.4s cubic-bezier(0.65, 0, 0.35, 1),
               opacity 0.3s ease;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
 }
 .subscreen.open {
   transform: translateX(0);
@@ -1185,6 +1197,7 @@ body {
   transition: transform 0.4s cubic-bezier(0.65, 0, 0.35, 1),
               opacity 0.3s ease;
   overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
 }
 .detailscreen.open {
   transform: translateX(0);
@@ -1638,7 +1651,6 @@ body {
 
 .form-area {
   padding: 12px 16px 24px;
-  overflow-y: auto;
   flex: 1;
 }
 
@@ -1914,7 +1926,11 @@ body {
   align-items: center;
   justify-content: center;
   padding: 24px;
+  padding-top: max(24px, env(safe-area-inset-top));
+  padding-bottom: max(24px, env(safe-area-inset-bottom));
   background: #0b1419;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.25s ease;
@@ -2592,6 +2608,8 @@ body {
   min-height: 160px;
   max-height: 260px;
   overflow-y: auto;
+  overflow-x: auto;
+  overscroll-behavior: contain;
   font-family: 'Courier New', Courier, monospace;
   font-size: 11.5px;
   line-height: 1.55;
@@ -2600,19 +2618,71 @@ body {
   scroll-behavior: smooth;
 }
 
-/* Scrollbar fina y discreta */
+/* Scrollbar fina y discreta — vertical */
 .live-console::-webkit-scrollbar { width: 4px; }
 .live-console::-webkit-scrollbar-track { background: transparent; }
 .live-console::-webkit-scrollbar-thumb {
   background: rgba(0, 224, 255, 0.2);
   border-radius: 999px;
 }
+/* Scrollbar fina — horizontal */
+.live-console::-webkit-scrollbar:horizontal { height: 4px; }
+
+/* Modo pantalla completa */
+.live-console.is-fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  max-height: none;
+  height: 100dvh;
+  border-radius: 0;
+  overflow: auto;
+  padding: calc(10px + env(safe-area-inset-top))
+           calc(12px + env(safe-area-inset-right))
+           calc(10px + env(safe-area-inset-bottom))
+           calc(12px + env(safe-area-inset-left));
+}
+
+/* Bloquear scroll de fondo mientras la consola está en pantalla completa */
+body.console-fullscreen-open { overflow: hidden; }
+
+/* Botón cerrar flotante (inyectado por JS en fullscreen) */
+.live-console-close-btn {
+  position: sticky;
+  top: 0;
+  float: right;
+  margin-left: auto;
+  display: block;
+  padding: 4px 10px;
+  background: rgba(0, 224, 255, 0.15);
+  border: 1px solid rgba(0, 224, 255, 0.35);
+  border-radius: 6px;
+  color: #00e0ff;
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+  z-index: 1;
+}
+.live-console-close-btn:focus-visible {
+  outline: 2px solid #00e0ff;
+  outline-offset: 2px;
+}
+
+/* Botón pantalla completa */
+.live-btn-expand {
+  background: rgba(0, 224, 255, 0.1);
+  color: rgba(0, 224, 255, 0.85);
+  border: 1px solid rgba(0, 224, 255, 0.25);
+}
+.live-btn-expand:not(:disabled):hover {
+  background: rgba(0, 224, 255, 0.18);
+  color: #00e0ff;
+}
 
 /* Líneas individuales */
 .console-line {
   white-space: pre;
-  overflow-x: hidden;
-  text-overflow: ellipsis;
 }
 .console-line.console-ok   { color: #3fb950; }
 .console-line.console-warn { color: #d29922; }

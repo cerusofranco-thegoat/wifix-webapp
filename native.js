@@ -1791,6 +1791,41 @@
   }
 
   // --------------------------------------------------------------------------
+  // Helper compartido: toggle pantalla completa para cualquier consola en vivo
+  // --------------------------------------------------------------------------
+  function wireFullscreenToggle(formEl) {
+    const consoleEl = formEl.querySelector('[data-slot="console"]');
+    const fsBtn     = formEl.querySelector('[data-action="live-fullscreen"]');
+    if (!fsBtn || !consoleEl) return;
+
+    let closeBtn = null;
+
+    fsBtn.addEventListener('click', () => {
+      const on = consoleEl.classList.toggle('is-fullscreen');
+      fsBtn.setAttribute('aria-pressed', String(on));
+      fsBtn.textContent = on ? 'Cerrar' : 'Pantalla completa';
+      document.body.classList.toggle('console-fullscreen-open', on);
+
+      if (on) {
+        // Inyectar botón cerrar flotante dentro de la consola
+        closeBtn = document.createElement('button');
+        closeBtn.className = 'live-console-close-btn';
+        closeBtn.textContent = 'Cerrar';
+        closeBtn.setAttribute('aria-label', 'Cerrar pantalla completa');
+        closeBtn.addEventListener('click', () => fsBtn.click());
+        consoleEl.insertBefore(closeBtn, consoleEl.firstChild);
+        // Mantener scroll al fondo tras entrar en fullscreen
+        consoleEl.scrollTop = consoleEl.scrollHeight;
+      } else {
+        if (closeBtn && closeBtn.parentNode === consoleEl) {
+          consoleEl.removeChild(closeBtn);
+        }
+        closeBtn = null;
+      }
+    });
+  }
+
+  // --------------------------------------------------------------------------
   // Consola en vivo — Ping estilo CMD
   // --------------------------------------------------------------------------
   function wirePingLiveConsole(formEl) {
@@ -1906,6 +1941,8 @@
         statsEl.textContent = '';
       });
     }
+
+    wireFullscreenToggle(formEl);
   }
 
   // --------------------------------------------------------------------------
@@ -1991,6 +2028,8 @@
         output.innerHTML = '';
       });
     }
+
+    wireFullscreenToggle(formEl);
   }
 
   // --------------------------------------------------------------------------
