@@ -2521,3 +2521,299 @@ body {
   line-height: 1.5;
 }
 .summary-list li { margin-bottom: 2px; }
+
+/* === Consolas en vivo (Ping / Traceroute CMD) ================================ */
+
+/* Barra de controles */
+.live-console-toolbar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+
+/* Botones de la consola */
+.live-btn {
+  flex: 1;
+  min-width: 80px;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 8px;
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  cursor: pointer;
+  transition: opacity 0.15s ease, background 0.15s ease;
+}
+.live-btn:focus-visible {
+  outline: 2px solid #00e0ff;
+  outline-offset: 2px;
+}
+.live-btn:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+}
+.live-btn-start {
+  background: #1f6feb;
+  color: #f0f6ff;
+}
+.live-btn-start:not(:disabled):hover { background: #388bfd; }
+.live-btn-stop {
+  background: #f85149;
+  color: #fff;
+}
+.live-btn-stop:not(:disabled):hover { background: #ff6b6b; }
+.live-btn-clear {
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(180, 210, 255, 0.75);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+.live-btn-clear:not(:disabled):hover {
+  background: rgba(255, 255, 255, 0.14);
+  color: #e8f1ff;
+}
+
+/* Panel de estadísticas en vivo (solo ping) */
+.live-stats {
+  font-size: 11px;
+  color: rgba(180, 210, 255, 0.65);
+  letter-spacing: 0.3px;
+  min-height: 16px;
+  margin-bottom: 8px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Terminal / consola */
+.live-console {
+  background: #0d1117;
+  border: 1px solid rgba(0, 224, 255, 0.18);
+  border-radius: 10px;
+  padding: 10px 12px;
+  min-height: 160px;
+  max-height: 260px;
+  overflow-y: auto;
+  font-family: 'Courier New', Courier, monospace;
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: #c9d1d9;
+  /* scroll suave */
+  scroll-behavior: smooth;
+}
+
+/* Scrollbar fina y discreta */
+.live-console::-webkit-scrollbar { width: 4px; }
+.live-console::-webkit-scrollbar-track { background: transparent; }
+.live-console::-webkit-scrollbar-thumb {
+  background: rgba(0, 224, 255, 0.2);
+  border-radius: 999px;
+}
+
+/* Líneas individuales */
+.console-line {
+  white-space: pre;
+  overflow-x: hidden;
+  text-overflow: ellipsis;
+}
+.console-line.console-ok   { color: #3fb950; }
+.console-line.console-warn { color: #d29922; }
+.console-line.console-error { color: #f85149; }
+.console-line.console-info { color: #58a6ff; }
+
+/* === Panel NAP / GPON Xtreme (Datos del Servicio) ========================== */
+
+/* Foco visible para todos los botones interactivos del panel NAP */
+.nap-panel button:focus-visible,
+.nap-panel input:focus-visible {
+  outline: 2px solid #00e0ff;
+  outline-offset: 2px;
+}
+
+/* Ficha de tarea (cabecera) */
+.nap-task-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(0, 224, 255, 0.08);
+  border: 1px solid rgba(0, 224, 255, 0.25);
+  margin-bottom: 12px;
+}
+.nap-task-badge {
+  font-family: 'Orbitron', sans-serif;
+  font-size: 11px;
+  font-weight: 700;
+  color: #00e0ff;
+  letter-spacing: 1px;
+  white-space: nowrap;
+}
+.nap-task-date {
+  font-size: 11px;
+  color: rgba(180, 210, 255, 0.7);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* Sección GPS */
+.nap-gps-section {
+  padding: 10px 0 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.nap-gps-btn {
+  align-self: flex-start;
+}
+.nap-coords-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.nap-coord-label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 10.5px;
+  color: rgba(180, 210, 255, 0.75);
+  letter-spacing: 0.3px;
+}
+.nap-coord-input {
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(0, 224, 255, 0.2);
+  border-radius: 8px;
+  padding: 6px 10px;
+  color: #e8f1ff;
+  font-size: 12px;
+  font-family: 'Orbitron', sans-serif;
+  width: 100%;
+  outline: none;
+}
+.nap-coord-input:focus {
+  border-color: rgba(0, 224, 255, 0.55);
+  background: rgba(0, 224, 255, 0.06);
+}
+.nap-gps-status {
+  font-size: 10.5px;
+  color: rgba(180, 210, 255, 0.6);
+  min-height: 16px;
+  line-height: 1.4;
+  padding: 2px 0;
+}
+.nap-gps-status.ok    { color: #3fb950; }
+.nap-gps-status.error { color: #f85149; }
+
+/* Titulo sección lista */
+.nap-section-title {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: rgba(0, 224, 255, 0.6);
+  padding: 4px 0 6px;
+}
+
+/* Barra de ocupacion */
+.nap-occ-bar-wrap {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  height: 5px;
+  overflow: hidden;
+  margin: 6px 0 3px;
+}
+.nap-occ-bar {
+  height: 100%;
+  border-radius: 999px;
+  transition: width 0.3s ease;
+}
+.nap-occ-bar.low  { background: #3fb950; }
+.nap-occ-bar.mid  { background: #d29922; }
+.nap-occ-bar.high { background: #f85149; }
+.nap-occ-bar.full { background: #ff2d2d; }
+.nap-occ-label {
+  font-size: 10px;
+  color: rgba(180, 210, 255, 0.65);
+  letter-spacing: 0.3px;
+  margin-bottom: 6px;
+  display: block;
+}
+
+/* Acciones de la tarjeta NAP */
+.nap-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+.nap-gpon-btn {
+  background: rgba(106, 92, 255, 0.18);
+  border-color: rgba(106, 92, 255, 0.45);
+  color: #b3a5ff;
+}
+.nap-gpon-btn:hover {
+  background: rgba(106, 92, 255, 0.32);
+}
+
+/* Tarjeta NAP seleccionada para GPON */
+.nap-card.nap-selected {
+  border-color: rgba(106, 92, 255, 0.7);
+  background: rgba(106, 92, 255, 0.1);
+  box-shadow: 0 0 0 2px rgba(106, 92, 255, 0.25);
+}
+.nap-selected-badge {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  background: rgba(106, 92, 255, 0.3);
+  color: #b3a5ff;
+  border: 1px solid rgba(106, 92, 255, 0.55);
+  border-radius: 999px;
+  padding: 2px 8px;
+  white-space: nowrap;
+}
+
+/* Bloque resumen GPON Xtreme */
+.nap-gpon-summary {
+  margin-top: 12px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: rgba(106, 92, 255, 0.1);
+  border: 1px solid rgba(106, 92, 255, 0.45);
+}
+.nap-gpon-summary-title {
+  font-family: 'Orbitron', sans-serif;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: #b3a5ff;
+  margin-bottom: 10px;
+}
+.nap-gpon-summary-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 0;
+  border-bottom: 1px solid rgba(106, 92, 255, 0.12);
+}
+.nap-gpon-summary-row:last-child { border-bottom: 0; }
+.nap-gpon-key {
+  font-size: 10px;
+  color: rgba(180, 210, 255, 0.6);
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  flex-shrink: 0;
+}
+.nap-gpon-val {
+  font-size: 12px;
+  color: #f0f6ff;
+  text-align: right;
+}
+.nap-gpon-free-port {
+  color: #3fb950;
+  font-family: 'Orbitron', sans-serif;
+  font-size: 11px;
+  font-weight: 700;
+}

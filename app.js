@@ -338,6 +338,7 @@ const TOOL_ICONS = {
   heatmap:  '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8a4 4 0 0 1 8 0"/><path d="M3 14a4 4 0 0 1 8 0"/><path d="M13 11a4 4 0 0 1 8 0"/><circle cx="6" cy="20" r="1.2" fill="currentColor"/></svg>',
   ping:     '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="2"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="10"/></svg>',
   trace:    '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="6" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="18" r="2"/><path d="M7 6h3l2 4M14 12h3l2 4"/></svg>',
+  terminal: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>',
   chev:     SERVICIO_ICONS.chev,
 };
 
@@ -491,17 +492,324 @@ function renderStatusFromContract(contract, account) {
       </div>`).join('')}`;
 }
 
+// ---------------------------------------------------------------------------
+// Panel NAP / GPON Xtreme — estado de módulo por apertura
+// ---------------------------------------------------------------------------
+// El taskId se genera una vez por apertura del panel y se mantiene estable
+// mientras el panel esté abierto. Se resetea en null al cerrar.
+let _napPanelState = {
+  taskId: null,
+  openedAt: null,
+  coords: null,      // { latitude, longitude, accuracy } cuando hay GPS
+  selectedNap: null, // napCode seleccionado para GPON
+  naps: [],          // array de NAPs cargadas (se guarda al cargar el panel)
+};
+
+// Fórmula de Haversine: distancia en metros entre dos coordenadas.
+// Usada para calcular distancia NAP ↔ ubicación capturada.
+// R = 6 371 000 m (radio medio de la Tierra).
+function _napHaversineMeters(lat1, lon1, lat2, lon2) {
+  const R = 6371000;
+  const toRad = (d) => d * Math.PI / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat / 2) ** 2
+    + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+
+// Genera un taskId en formato TASK/<6 dígitos>/<año> igual que los existentes
+// en el sistema (ver mockClosedTask en api.js: 'TASK/' + (100000+seed) + '/2026').
+function _napGenTaskId() {
+  const year = new Date().getFullYear();
+  const num6 = 100000 + Math.floor(Math.random() * 900000);
+  return `TASK/${num6}/${year}`;
+}
+
+// Devuelve distancia en metros desde coords capturadas a la NAP,
+// o null si no hay coordenadas.
+function _napDistanceToNap(nap) {
+  const c = _napPanelState.coords;
+  if (!c) return null;
+  return _napHaversineMeters(c.latitude, c.longitude, nap.latitude, nap.longitude);
+}
+
+// Texto de distancia para mostrar en la tarjeta.
+function _napDistanceText(nap) {
+  const d = _napDistanceToNap(nap);
+  if (d === null) return '— (captura tu ubicación)';
+  return `${d.toFixed(1)} m`;
+}
+
+// Porcentaje de puertos ocupados (0-100).
+function _napOccupancyPct(nap) {
+  if (!nap.totalPorts) return 0;
+  return Math.round((nap.occupiedPorts / nap.totalPorts) * 100);
+}
+
+// Renderiza la barra visual de ocupación.
+function _napOccupancyBar(nap) {
+  const pct = _napOccupancyPct(nap);
+  const cls = pct >= 100 ? 'full' : pct >= 75 ? 'high' : pct >= 50 ? 'mid' : 'low';
+  return `
+    <div class="nap-occ-bar-wrap" role="progressbar" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100" aria-label="Ocupación ${pct}%">
+      <div class="nap-occ-bar ${cls}" style="width:${pct}%"></div>
+    </div>
+    <span class="nap-occ-label">${nap.occupiedPorts}/${nap.totalPorts} puertos · ${pct}%</span>`;
+}
+
+// Renderiza la lista de tarjetas NAP.
+function _renderNapCards(naps, scope) {
+  const hasCoords = !!_napPanelState.coords;
+
+  // Si hay coordenadas, ordenar por distancia ascendente.
+  const sorted = hasCoords
+    ? [...naps].sort((a, b) => _napHaversineMeters(
+        _napPanelState.coords.latitude, _napPanelState.coords.longitude, a.latitude, a.longitude
+      ) - _napHaversineMeters(
+        _napPanelState.coords.latitude, _napPanelState.coords.longitude, b.latitude, b.longitude
+      ))
+    : naps;
+
+  const slot = scope.querySelector('[data-slot="nap-cards"]');
+  if (!slot) return;
+  slot.innerHTML = sorted.map(n => {
+    const isSelected = _napPanelState.selectedNap === n.napCode;
+    return `
+      <div class="nap-card${isSelected ? ' nap-selected' : ''}" data-nap="${escapeHtml(n.napCode)}">
+        <div class="nap-head">
+          <span class="nap-name">${escapeHtml(n.napCode)}</span>
+          ${isSelected ? '<span class="nap-selected-badge">GPON seleccionada</span>' : ''}
+        </div>
+        <span class="nap-distance">${_napDistanceText(n)}</span>
+        ${_napOccupancyBar(n)}
+        <div class="nap-actions">
+          <button class="add-row-btn" data-action="view-ports" data-nap="${escapeHtml(n.napCode)}">Ver puertos</button>
+          <button class="add-row-btn nap-gpon-btn" data-action="select-gpon" data-nap="${escapeHtml(n.napCode)}"
+            aria-pressed="${isSelected}">
+            ${isSelected ? 'Seleccionada' : 'Seleccionar para GPON'}
+          </button>
+        </div>
+        <div class="nap-ports-slot" data-slot="ports-${escapeHtml(n.napCode)}"></div>
+      </div>`;
+  }).join('');
+}
+
+// Actualiza el bloque resumen de la NAP seleccionada para GPON.
+async function _renderGponSummary(scope) {
+  const summarySlot = scope.querySelector('[data-slot="gpon-summary"]');
+  if (!summarySlot) return;
+  const napCode = _napPanelState.selectedNap;
+  if (!napCode) {
+    summarySlot.innerHTML = '';
+    summarySlot.hidden = true;
+    return;
+  }
+  summarySlot.hidden = false;
+  summarySlot.innerHTML = `<div class="detail-loading">Obteniendo puerto sugerido…</div>`;
+
+  try {
+    const data = await WifixAPI.getNapPorts(napCode);
+    const naps = scope._napData || [];
+    const nap = naps.find(n => n.napCode === napCode);
+    const dist = nap ? _napDistanceToNap(nap) : null;
+    const distTxt = dist !== null ? `${dist.toFixed(1)} m` : '—';
+    const occ = nap ? `${nap.occupiedPorts}/${nap.totalPorts}` : '—';
+
+    // Puerto libre sugerido: primer puerto con occupied=false.
+    const freePort = data.ports ? data.ports.find(p => !p.occupied) : null;
+    const freeTxt = freePort
+      ? `Puerto ${pad(freePort.portNumber)} (libre)`
+      : 'Sin puertos libres disponibles';
+
+    // TODO: a futuro -> enviar selección a API GPON Xtreme (POST .../assign-nap)
+
+    summarySlot.innerHTML = `
+      <div class="nap-gpon-summary">
+        <div class="nap-gpon-summary-title">NAP seleccionada para GPON Xtreme</div>
+        <div class="nap-gpon-summary-row">
+          <span class="nap-gpon-key">NAP</span>
+          <span class="nap-gpon-val nap-name">${escapeHtml(napCode)}</span>
+        </div>
+        <div class="nap-gpon-summary-row">
+          <span class="nap-gpon-key">Distancia</span>
+          <span class="nap-gpon-val">${escapeHtml(distTxt)}</span>
+        </div>
+        <div class="nap-gpon-summary-row">
+          <span class="nap-gpon-key">Puertos</span>
+          <span class="nap-gpon-val">${escapeHtml(occ)}</span>
+        </div>
+        <div class="nap-gpon-summary-row">
+          <span class="nap-gpon-key">Puerto sugerido</span>
+          <span class="nap-gpon-val nap-gpon-free-port">${escapeHtml(freeTxt)}</span>
+        </div>
+      </div>`;
+  } catch (err) {
+    summarySlot.innerHTML = `<div class="detail-error">${escapeHtml(err.message || 'Error al cargar puertos')}</div>`;
+  }
+}
+
+// Conecta los botones del panel NAP: GPS, ver puertos, selección GPON.
+function _wireNapPanel(scope, naps) {
+  // Guardamos los datos para acceso en el bloque resumen.
+  scope._napData = naps;
+
+  // --- Botón "Usar mi ubicación" ---
+  const gpsBtn = scope.querySelector('[data-action="nap-gps"]');
+  const gpsStatus = scope.querySelector('[data-slot="nap-gps-status"]');
+  const latInput = scope.querySelector('[data-field="nap-lat"]');
+  const lngInput = scope.querySelector('[data-field="nap-lng"]');
+
+  function applyCoords(lat, lng, acc) {
+    _napPanelState.coords = { latitude: lat, longitude: lng, accuracy: acc };
+    latInput.value = lat;
+    lngInput.value = lng;
+    gpsStatus.textContent = `Ubicación capturada (precisión ±${acc != null ? acc.toFixed(0) : '?'}m)`;
+    gpsStatus.className = 'nap-gps-status ok';
+    // Redibujar tarjetas con distancias calculadas.
+    _renderNapCards(naps, scope);
+    _wireNapCardButtons(scope, naps);
+  }
+
+  gpsBtn.addEventListener('click', async () => {
+    gpsBtn.disabled = true;
+    gpsBtn.textContent = 'Obteniendo…';
+    gpsStatus.textContent = 'Solicitando GPS…';
+    gpsStatus.className = 'nap-gps-status';
+    try {
+      const pos = await WifixNative.getCurrentPosition({ timeoutMs: 10000 });
+      applyCoords(pos.latitude, pos.longitude, pos.accuracy);
+    } catch (err) {
+      gpsStatus.textContent = `Error: ${err.message || 'No se pudo obtener ubicación.'}`;
+      gpsStatus.className = 'nap-gps-status error';
+    } finally {
+      gpsBtn.disabled = false;
+      gpsBtn.textContent = 'Usar mi ubicación';
+    }
+  });
+
+  // Ingreso manual: recalcular al cambiar lat o lng.
+  function onManualCoords() {
+    const lat = parseFloat(latInput.value);
+    const lng = parseFloat(lngInput.value);
+    if (!isFinite(lat) || !isFinite(lng)) return;
+    _napPanelState.coords = { latitude: lat, longitude: lng, accuracy: null };
+    gpsStatus.textContent = 'Coordenadas ingresadas manualmente.';
+    gpsStatus.className = 'nap-gps-status ok';
+    _renderNapCards(naps, scope);
+    _wireNapCardButtons(scope, naps);
+  }
+  latInput.addEventListener('change', onManualCoords);
+  lngInput.addEventListener('change', onManualCoords);
+
+  // Botones de tarjetas.
+  _wireNapCardButtons(scope, naps);
+}
+
+function _wireNapCardButtons(scope, naps) {
+  // "Ver puertos"
+  wireNapPortsButtons(scope);
+
+  // "Seleccionar para GPON"
+  scope.querySelectorAll('[data-action="select-gpon"]').forEach(btn => {
+    // Evitar duplicar listeners: clonar el nodo.
+    const fresh = btn.cloneNode(true);
+    btn.parentNode.replaceChild(fresh, btn);
+    fresh.addEventListener('click', async (ev) => {
+      ev.stopPropagation();
+      _napPanelState.selectedNap = fresh.dataset.nap;
+      _renderNapCards(naps, scope);
+      _wireNapCardButtons(scope, naps);
+      await _renderGponSummary(scope);
+    });
+  });
+}
+
+// Renderiza el panel NAP completo (devuelve HTML string + activa lógica tras inserción).
+function renderNapPanel(naps) {
+  // Generar taskId una sola vez por apertura (si ya hay uno no lo regeneramos).
+  if (!_napPanelState.taskId) {
+    _napPanelState.taskId = _napGenTaskId();
+    _napPanelState.openedAt = new Date().toISOString();
+  }
+
+  const taskId = _napPanelState.taskId;
+  const fechaHora = formatDate(_napPanelState.openedAt);
+
+  if (!naps || naps.length === 0) {
+    return `<div class="detail-empty">No hay NAPs en el sector.</div>`;
+  }
+
+  return `
+    <div class="nap-panel" data-panel="nap-gpon">
+
+      <!-- 1) Cabecera de tarea -->
+      <div class="nap-task-header">
+        <span class="nap-task-badge">${escapeHtml(taskId)}</span>
+        <span class="nap-task-date">${escapeHtml(fechaHora)}</span>
+      </div>
+
+      <!-- 2) Coordenada de la tarea -->
+      <div class="nap-gps-section">
+        <button class="add-row-btn nap-gps-btn" type="button" data-action="nap-gps"
+          aria-label="Obtener ubicación GPS">
+          Usar mi ubicacion
+        </button>
+        <div class="nap-coords-row">
+          <label class="nap-coord-label">
+            <span>Latitud</span>
+            <input type="number" step="any" data-field="nap-lat" class="nap-coord-input"
+              placeholder="-0.1800" aria-label="Latitud"
+              value="${_napPanelState.coords ? _napPanelState.coords.latitude : ''}">
+          </label>
+          <label class="nap-coord-label">
+            <span>Longitud</span>
+            <input type="number" step="any" data-field="nap-lng" class="nap-coord-input"
+              placeholder="-78.4680" aria-label="Longitud"
+              value="${_napPanelState.coords ? _napPanelState.coords.longitude : ''}">
+          </label>
+        </div>
+        <div class="nap-gps-status${_napPanelState.coords ? ' ok' : ''}" data-slot="nap-gps-status">
+          ${_napPanelState.coords
+            ? `Ubicacion capturada (precision ±${_napPanelState.coords.accuracy != null ? _napPanelState.coords.accuracy.toFixed(0) : '?'}m)`
+            : 'Sin ubicacion — toca el boton o ingresa lat/lng manualmente.'}
+        </div>
+      </div>
+
+      <!-- 3) Tarjetas de NAPs -->
+      <div class="nap-section-title">NAPs disponibles en el sector</div>
+      <div data-slot="nap-cards"></div>
+
+      <!-- 4) Bloque resumen GPON -->
+      <div data-slot="gpon-summary" hidden></div>
+
+    </div>`;
+}
+
+// Wrapper que carga NAPs y arma el panel completo (usado en SERVICIO_ITEMS.load).
+async function loadNapPanel(cuenta) {
+  const naps = await WifixAPI.getNearbyNaps(cuenta);
+  // Guardar en estado para que _bootNapPanel pueda acceder sin re-fetch.
+  _napPanelState.naps = naps;
+  // Resetear selectedNap al abrir (pero mantener coords y taskId si ya están).
+  _napPanelState.selectedNap = null;
+  return renderNapPanel(naps);
+}
+
+// Al terminar de insertar el HTML del panel, activa la lógica interactiva.
+// Llamado desde openDatosServicio después de body.innerHTML = html.
+function _bootNapPanel(body) {
+  const panel = body.querySelector('[data-panel="nap-gpon"]');
+  if (!panel) return;
+  const naps = _napPanelState.naps;
+  _renderNapCards(naps, panel);
+  _wireNapPanel(panel, naps);
+}
+
+// Función heredada — se mantiene para backward-compat con cualquier llamada externa.
 function renderNapsList(naps) {
   if (!naps || naps.length === 0) return `<div class="detail-empty">No hay NAPs cercanas.</div>`;
-  return naps.map(n => `
-    <div class="nap-card" data-nap="${escapeHtml(n.napCode)}">
-      <div class="nap-head">
-        <span class="nap-name">${escapeHtml(n.napCode)}</span>
-        <span class="nap-distance">${n.distanceMeters.toFixed(1)} m · ${n.occupiedPorts}/${n.totalPorts} puertos</span>
-      </div>
-      <button class="add-row-btn" data-action="view-ports" data-nap="${escapeHtml(n.napCode)}">Ver puertos</button>
-      <div class="nap-ports-slot" data-slot="ports-${escapeHtml(n.napCode)}"></div>
-    </div>`).join('');
+  return renderNapPanel(naps);
 }
 
 function renderPortsTable(napPorts) {
@@ -579,8 +887,8 @@ function renderHistorySummary(history) {
 }
 
 const SERVICIO_ITEMS = [
-  { id: 'naps',    icon: SERVICIO_ICONS.nap,     title: 'NAPs cercanas (distancia y puertos)',
-    load: (cuenta) => WifixAPI.getNearbyNaps(cuenta).then(renderNapsList) },
+  { id: 'naps',    icon: SERVICIO_ICONS.nap,     title: 'NAPs y seleccion GPON Xtreme',
+    load: (cuenta) => loadNapPanel(cuenta) },
   { id: 'status',  icon: SERVICIO_ICONS.user,    title: 'Status del cliente por contrato/cuenta',
     load: (cuenta) => WifixAPI.getContractStatus(cuenta).then(c => renderStatusFromContract(c, cuenta)) },
   { id: 'metrics', icon: SERVICIO_ICONS.metrics, title: 'Métricas de red (RX/TX, SNR, tráfico)',
@@ -625,11 +933,21 @@ function openDatosServicio() {
       const wasOpen = node.classList.contains('open');
       node.classList.toggle('open');
       if (!wasOpen && !body.dataset.loaded) {
+        // Al abrir el panel NAP por primera vez, asegurar que el taskId
+        // se genere fresco (renderNapPanel lo crea si es null).
+        if (id === 'naps') {
+          _napPanelState.taskId = null;
+          _napPanelState.openedAt = null;
+        }
         body.innerHTML = `<div class="detail-loading">Cargando…</div>`;
         try {
           body.innerHTML = await item.load(cuenta);
           body.dataset.loaded = '1';
-          wireNapPortsButtons(body);
+          if (id === 'naps') {
+            _bootNapPanel(body);
+          } else {
+            wireNapPortsButtons(body);
+          }
         } catch (err) {
           console.error('[Wifix] servicio', id, err);
           body.innerHTML = `<div class="detail-error">${escapeHtml(err.message || 'Error al cargar')}</div>`;
@@ -946,6 +1264,72 @@ function hopRowHtml(index) {
     </div>`;
 }
 
+// --- Ping en vivo (consola CMD) -----------------------------------------------
+function pingLiveHtml() {
+  return `
+    <div class="tool-form" data-tool="ping-live">
+      <label class="form-row">
+        <span class="form-label">Destino</span>
+        <input type="text" data-field="liveHost" value="8.8.8.8"
+               placeholder="8.8.8.8" autocomplete="off" spellcheck="false"
+               aria-label="Dirección IP o nombre de host para ping en vivo">
+      </label>
+      <div class="live-console-toolbar" role="group" aria-label="Controles de ping en vivo">
+        <button class="live-btn live-btn-start" data-action="live-start"
+                type="button" aria-label="Iniciar ping continuo">
+          Iniciar ping
+        </button>
+        <button class="live-btn live-btn-stop" data-action="live-stop"
+                type="button" disabled aria-label="Detener ping">
+          Detener
+        </button>
+        <button class="live-btn live-btn-clear" data-action="live-clear"
+                type="button" aria-label="Limpiar consola">
+          Limpiar
+        </button>
+      </div>
+      <div class="live-stats" data-slot="stats" aria-live="polite" aria-atomic="true"></div>
+      <div class="live-console" data-slot="console"
+           role="log" aria-label="Salida del ping" aria-live="polite"></div>
+    </div>`;
+}
+
+// --- Traceroute en vivo (consola CMD) -----------------------------------------
+function tracerouteLiveHtml() {
+  return `
+    <div class="tool-form" data-tool="traceroute-live">
+      <div class="form-grid-2">
+        <label class="form-row">
+          <span class="form-label">Destino</span>
+          <input type="text" data-field="liveHost" value="8.8.8.8"
+                 placeholder="8.8.8.8" autocomplete="off" spellcheck="false"
+                 aria-label="Dirección IP o nombre de host para traceroute en vivo">
+        </label>
+        <label class="form-row">
+          <span class="form-label">Max. saltos (20-30)</span>
+          <input type="number" data-field="liveMaxHops" value="30" min="20" max="30" step="1"
+                 aria-label="Número máximo de saltos">
+        </label>
+      </div>
+      <div class="live-console-toolbar" role="group" aria-label="Controles de traceroute en vivo">
+        <button class="live-btn live-btn-start" data-action="live-start"
+                type="button" aria-label="Iniciar traceroute">
+          Iniciar traceroute
+        </button>
+        <button class="live-btn live-btn-stop" data-action="live-stop"
+                type="button" disabled aria-label="Detener traceroute">
+          Detener
+        </button>
+        <button class="live-btn live-btn-clear" data-action="live-clear"
+                type="button" aria-label="Limpiar consola">
+          Limpiar
+        </button>
+      </div>
+      <div class="live-console" data-slot="console"
+           role="log" aria-label="Salida del traceroute" aria-live="polite"></div>
+    </div>`;
+}
+
 function collectFields(formEl) {
   const out = {};
   formEl.querySelectorAll(':scope > .form-row [data-field], :scope > .form-grid-2 [data-field], :scope > .form-grid-3 [data-field]').forEach(el => {
@@ -1034,6 +1418,11 @@ const HERRAMIENTAS_ITEMS = [
   { id: 'traceroute', title: 'Traceroute', icon: TOOL_ICONS.trace,
     render: tracerouteFormHtml, collect: collectTraceroute,
     save: (acct, payload) => WifixAPI.createTracerouteTest(acct, payload) },
+  // Herramientas de diagnóstico en vivo — solo pantalla, sin guardado en backend.
+  { id: 'ping-live', title: 'Ping en Vivo (CMD)', icon: TOOL_ICONS.terminal,
+    render: pingLiveHtml },
+  { id: 'traceroute-live', title: 'Traceroute en Vivo (CMD)', icon: TOOL_ICONS.terminal,
+    render: tracerouteLiveHtml },
 ];
 
 function openHerramientas() {
@@ -1105,6 +1494,7 @@ function wireToolForm(bodyEl, item) {
   }
 
   const saveBtn = formEl.querySelector('[data-action="save"]');
+  if (!saveBtn) return;   // Herramientas solo-diagnóstico (sin guardado en backend)
   saveBtn.addEventListener('click', async () => {
     const cuenta = currentAccount();
     if (!cuenta) {

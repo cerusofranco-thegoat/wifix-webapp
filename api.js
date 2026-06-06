@@ -184,9 +184,16 @@
     };
   }
   function mockNearbyNaps() {
+    // Clúster de NAPs alrededor de lat -0.1800, lng -78.4680 (Quito, sector norte)
+    // Las coordenadas están separadas decenas/centenas de metros entre sí.
+    // distanceMeters es fallback si no hay coordenada GPS capturada en el cliente.
     return [
-      { napCode: 'NAP-12-04-3', distanceMeters: 58.2, occupiedPorts: 11, totalPorts: 16 },
-      { napCode: 'NAP-12-05-1', distanceMeters: 142.7, occupiedPorts: 6, totalPorts: 8 },
+      { napCode: 'NAP-12-04-3', latitude: -0.18012, longitude: -78.46835, occupiedPorts: 11, totalPorts: 16 },
+      { napCode: 'NAP-12-05-1', latitude: -0.18154, longitude: -78.46910, occupiedPorts: 6,  totalPorts: 8  },
+      { napCode: 'NAP-12-06-2', latitude: -0.18220, longitude: -78.46760, occupiedPorts: 4,  totalPorts: 8  },
+      { napCode: 'NAP-13-01-1', latitude: -0.17890, longitude: -78.46650, occupiedPorts: 14, totalPorts: 16 },
+      { napCode: 'NAP-13-02-4', latitude: -0.17950, longitude: -78.46995, occupiedPorts: 3,  totalPorts: 8  },
+      { napCode: 'NAP-11-09-2', latitude: -0.18380, longitude: -78.46820, occupiedPorts: 16, totalPorts: 16 },
     ];
   }
   function mockNapPorts(napCode) {

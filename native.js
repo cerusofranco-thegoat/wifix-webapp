@@ -57,6 +57,28 @@
       return plugin.traceroute({ host, maxHops, timeoutSec });
     },
 
+    // --- Ping único (para consola en vivo) ------------------------------------
+    // Espeja plugin.pingOnce — devuelve una sola respuesta ICMP.
+    // opts: { timeoutSec }
+    // Retorna: { status:'reply'|'timeout'|'unreachable', from?, bytes?, ttl?, timeMs?, raw }
+    async pingOnce(host, opts) {
+      const plugin = nativePlugin();
+      if (!plugin) throw new Error('Plugin nativo no disponible (estás en el navegador).');
+      const { timeoutSec = 3 } = opts || {};
+      return plugin.pingOnce({ host, timeoutSec });
+    },
+
+    // --- Salto individual de traceroute (para consola en vivo) ----------------
+    // Espeja plugin.traceHop — mide un TTL específico.
+    // opts: { timeoutSec }
+    // Retorna: { ttl, ip?, rttMs?, status:'intermediate'|'reached'|'timeout', raw }
+    async traceHop(host, ttl, opts) {
+      const plugin = nativePlugin();
+      if (!plugin) throw new Error('Plugin nativo no disponible.');
+      const { timeoutSec = 3 } = opts || {};
+      return plugin.traceHop({ host, ttl, timeoutSec });
+    },
+
     async getWifiInfo() {
       const plugin = nativePlugin();
       if (!plugin) throw new Error('Plugin nativo no disponible.');
@@ -120,16 +142,45 @@
       return plugin.scanAccessPoints();
     },
 
-    async getCurrentPosition() {
+    // Obtiene la posición GPS actual.
+    // opts: { timeoutMs } — timeout en milisegundos (por defecto 10000).
+    // Devuelve: { latitude, longitude, accuracy }
+    //
+    // Prioridad:
+    //  1) Capacitor.Plugins.Geolocation (APK nativo)
+    //  2) navigator.geolocation (fallback navegador)
+    //  3) Error si ninguno está disponible.
+    async getCurrentPosition(opts) {
+      const timeoutMs = (opts && opts.timeoutMs) || 10000;
+
+      // --- Rama Capacitor (APK) ---
       const Geo = global.Capacitor && global.Capacitor.Plugins && global.Capacitor.Plugins.Geolocation;
-      if (!Geo) throw new Error('Plugin de Geolocation no disponible.');
-      const perms = await Geo.checkPermissions();
-      if (perms.location !== 'granted') {
-        const req = await Geo.requestPermissions({ permissions: ['location'] });
-        if (req.location !== 'granted') throw new Error('Permiso de ubicación denegado.');
+      if (Geo) {
+        await Geo.requestPermissions({ permissions: ['location'] });
+        const pos = await Geo.getCurrentPosition({ enableHighAccuracy: true, timeout: timeoutMs });
+        return {
+          latitude:  pos.coords.latitude,
+          longitude: pos.coords.longitude,
+          accuracy:  pos.coords.accuracy,
+        };
       }
-      const pos = await Geo.getCurrentPosition({ enableHighAccuracy: true, timeout: 10000 });
-      return { lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: pos.coords.accuracy, ts: pos.timestamp };
+
+      // --- Rama navegador (fallback) ---
+      if (global.navigator && global.navigator.geolocation) {
+        return new Promise((resolve, reject) => {
+          global.navigator.geolocation.getCurrentPosition(
+            (pos) => resolve({
+              latitude:  pos.coords.latitude,
+              longitude: pos.coords.longitude,
+              accuracy:  pos.coords.accuracy,
+            }),
+            (err) => reject(new Error(err.message || 'Error de geolocalización.')),
+            { enableHighAccuracy: true, timeout: timeoutMs }
+          );
+        });
+      }
+
+      throw new Error('Geolocalización no disponible en este dispositivo.');
     },
 
     async speedtest(opts) {
@@ -586,10 +637,59 @@
   global.WifixNative = WifixNative;
 
   // --------------------------------------------------------------------------
-  // Si NO es nativo, no hacemos nada más.
+  // Si NO es nativo: solo inyectar aviso en las consolas en vivo y salir.
   // --------------------------------------------------------------------------
   if (!isNative()) {
     console.info('[WifixNative] no es Capacitor — modo webapp puro.');
+
+    function injectBrowserNotice(formEl) {
+      if (formEl.dataset.liveWired === '1') return;
+      formEl.dataset.liveWired = '1';
+      const output = formEl.querySelector('[data-slot="console"]');
+      const startBtn = formEl.querySelector('[data-action="live-start"]');
+      if (!output) return;
+      const msg = formEl.dataset.tool === 'ping-live'
+        ? 'Ping en vivo solo disponible en la app Android (APK).'
+        : 'Traceroute en vivo solo disponible en la app Android (APK).';
+      const line = document.createElement('div');
+      line.className = 'console-line console-warn';
+      line.textContent = msg;
+      output.appendChild(line);
+      if (startBtn) {
+        startBtn.disabled = true;
+        startBtn.title = 'Requiere APK Android';
+      }
+    }
+
+    function scanLiveForms(root) {
+      if (!root || !root.querySelectorAll) return;
+      root.querySelectorAll('.tool-form[data-tool="ping-live"], .tool-form[data-tool="traceroute-live"]')
+        .forEach(injectBrowserNotice);
+    }
+
+    const browserObserver = new MutationObserver((mutations) => {
+      for (const m of mutations) {
+        m.addedNodes.forEach(node => {
+          if (node.nodeType !== 1) return;
+          if (node.matches && (node.matches('.tool-form[data-tool="ping-live"]') || node.matches('.tool-form[data-tool="traceroute-live"]'))) {
+            injectBrowserNotice(node);
+          }
+          scanLiveForms(node);
+        });
+      }
+    });
+
+    function startBrowserObserver() {
+      scanLiveForms(document.body);
+      browserObserver.observe(document.body, { childList: true, subtree: true });
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', startBrowserObserver);
+    } else {
+      startBrowserObserver();
+    }
+
     return;
   }
 
@@ -1691,13 +1791,218 @@
   }
 
   // --------------------------------------------------------------------------
+  // Consola en vivo — Ping estilo CMD
+  // --------------------------------------------------------------------------
+  function wirePingLiveConsole(formEl) {
+    if (formEl.dataset.liveWired === '1') return;
+    formEl.dataset.liveWired = '1';
+
+    const hostInput  = formEl.querySelector('[data-field="liveHost"]');
+    const startBtn   = formEl.querySelector('[data-action="live-start"]');
+    const stopBtn    = formEl.querySelector('[data-action="live-stop"]');
+    const clearBtn   = formEl.querySelector('[data-action="live-clear"]');
+    const output     = formEl.querySelector('[data-slot="console"]');
+    const statsEl    = formEl.querySelector('[data-slot="stats"]');
+
+    if (!startBtn || !output) return;
+
+    let running = false;
+
+    function appendLine(text, cls) {
+      const line = document.createElement('div');
+      line.className = 'console-line' + (cls ? ' ' + cls : '');
+      line.textContent = text;
+      output.appendChild(line);
+      output.scrollTop = output.scrollHeight;
+    }
+
+    function updateStats(sent, received, times) {
+      const lost     = sent - received;
+      const pct      = sent > 0 ? Math.round((lost / sent) * 100) : 0;
+      const min      = times.length ? Math.min(...times).toFixed(0) : '—';
+      const max      = times.length ? Math.max(...times).toFixed(0) : '—';
+      const avg      = times.length
+        ? (times.reduce((a, b) => a + b, 0) / times.length).toFixed(0)
+        : '—';
+      statsEl.textContent =
+        `Enviados: ${sent}  Recibidos: ${received}  Perdidos: ${lost} (${pct}%)` +
+        (times.length ? `  min/prom/max: ${min}/${avg}/${max} ms` : '');
+    }
+
+    startBtn.addEventListener('click', async () => {
+      const host = (hostInput ? hostInput.value.trim() : '') || '8.8.8.8';
+      if (running) return;
+      running = true;
+      startBtn.disabled = true;
+      stopBtn.disabled  = false;
+
+      let sent = 0, received = 0;
+      const times = [];
+
+      appendLine(`Haciendo ping a ${host} con datos de 32 bytes:`, 'console-info');
+
+      while (running) {
+        sent++;
+        let result;
+        try {
+          result = await WifixNative.pingOnce(host, { timeoutSec: 3 });
+        } catch (err) {
+          appendLine('Error al ejecutar ping: ' + (err.message || String(err)), 'console-error');
+          running = false;
+          break;
+        }
+
+        if (result.status === 'reply') {
+          received++;
+          const t = typeof result.timeMs === 'number' ? result.timeMs : NaN;
+          if (!isNaN(t)) times.push(t);
+          appendLine(
+            `Respuesta desde ${result.from || host}: bytes=${result.bytes ?? 32} tiempo=${isNaN(t) ? '?' : t + 'ms'} TTL=${result.ttl ?? '?'}`,
+            'console-ok'
+          );
+        } else if (result.status === 'timeout') {
+          appendLine('Tiempo de espera agotado para esta solicitud.', 'console-warn');
+        } else {
+          appendLine('Host de destino inaccesible.', 'console-warn');
+        }
+
+        updateStats(sent, received, times);
+
+        if (running) {
+          await new Promise(r => setTimeout(r, 2500));
+        }
+      }
+
+      // Bloque resumen
+      const lost = sent - received;
+      const pct  = sent > 0 ? Math.round((lost / sent) * 100) : 0;
+      appendLine('', '');
+      appendLine(`Estadísticas de ping para ${host}:`, 'console-info');
+      appendLine(
+        `    Paquetes: enviados=${sent}, recibidos=${received}, perdidos=${lost} (${pct}% perdidos)`,
+        'console-info'
+      );
+      if (times.length) {
+        const min = Math.min(...times).toFixed(0);
+        const max = Math.max(...times).toFixed(0);
+        const avg = (times.reduce((a, b) => a + b, 0) / times.length).toFixed(0);
+        appendLine(
+          `Tiempos aproximados ida y vuelta en ms: Mínimo=${min}ms, Máximo=${max}ms, Media=${avg}ms`,
+          'console-info'
+        );
+      }
+
+      startBtn.disabled = false;
+      stopBtn.disabled  = true;
+    });
+
+    stopBtn.addEventListener('click', () => {
+      running = false;
+    });
+
+    if (clearBtn) {
+      clearBtn.addEventListener('click', () => {
+        output.innerHTML = '';
+        statsEl.textContent = '';
+      });
+    }
+  }
+
+  // --------------------------------------------------------------------------
+  // Consola en vivo — Traceroute estilo CMD
+  // --------------------------------------------------------------------------
+  function wireTracerouteLiveConsole(formEl) {
+    if (formEl.dataset.liveWired === '1') return;
+    formEl.dataset.liveWired = '1';
+
+    const hostInput  = formEl.querySelector('[data-field="liveHost"]');
+    const hopsInput  = formEl.querySelector('[data-field="liveMaxHops"]');
+    const startBtn   = formEl.querySelector('[data-action="live-start"]');
+    const stopBtn    = formEl.querySelector('[data-action="live-stop"]');
+    const clearBtn   = formEl.querySelector('[data-action="live-clear"]');
+    const output     = formEl.querySelector('[data-slot="console"]');
+
+    if (!startBtn || !output) return;
+
+    let running = false;
+
+    function appendLine(text, cls) {
+      const line = document.createElement('div');
+      line.className = 'console-line' + (cls ? ' ' + cls : '');
+      line.textContent = text;
+      output.appendChild(line);
+      output.scrollTop = output.scrollHeight;
+    }
+
+    startBtn.addEventListener('click', async () => {
+      const host     = (hostInput ? hostInput.value.trim() : '') || '8.8.8.8';
+      const maxHops  = Math.min(30, Math.max(20, parseInt((hopsInput ? hopsInput.value : '30'), 10) || 30));
+      if (running) return;
+      running = true;
+      startBtn.disabled = true;
+      stopBtn.disabled  = false;
+
+      appendLine(`Traza de ruta a ${host} con máximo de ${maxHops} saltos:`, 'console-info');
+      appendLine('', '');
+
+      let reached = false;
+
+      for (let ttl = 1; ttl <= maxHops && running; ttl++) {
+        let result;
+        try {
+          result = await WifixNative.traceHop(host, ttl, { timeoutSec: 3 });
+        } catch (err) {
+          appendLine(`  ${ttl}    Error: ` + (err.message || String(err)), 'console-error');
+          running = false;
+          break;
+        }
+
+        if (result.status === 'timeout') {
+          appendLine(`  ${String(ttl).padEnd(3)}   *    Tiempo de espera agotado.`, 'console-warn');
+        } else {
+          const rtt = typeof result.rttMs === 'number' ? result.rttMs.toFixed(0) + ' ms' : '? ms';
+          appendLine(`  ${String(ttl).padEnd(3)}   ${rtt.padEnd(8)}   ${result.ip || '?'}`, 'console-ok');
+        }
+
+        if (result.status === 'reached') {
+          reached = true;
+          running = false;
+          break;
+        }
+
+        if (running) {
+          await new Promise(r => setTimeout(r, 400));
+        }
+      }
+
+      appendLine('', '');
+      appendLine(reached ? 'Traza completa.' : 'Traza detenida.', 'console-info');
+
+      startBtn.disabled = false;
+      stopBtn.disabled  = true;
+    });
+
+    stopBtn.addEventListener('click', () => {
+      running = false;
+    });
+
+    if (clearBtn) {
+      clearBtn.addEventListener('click', () => {
+        output.innerHTML = '';
+      });
+    }
+  }
+
+  // --------------------------------------------------------------------------
   // Mutation observer: cada vez que se renderiza un .tool-form, lo enganchamos.
   // --------------------------------------------------------------------------
   const FORM_HANDLERS = {
     ping: wirePingForm,
     traceroute: wireTracerouteForm,
     heatmap: wireHeatmapForm,
-    speedtest: wireSpeedtestForm
+    speedtest: wireSpeedtestForm,
+    'ping-live': wirePingLiveConsole,
+    'traceroute-live': wireTracerouteLiveConsole
     // distance: removido — la medición de distancia ahora vive dentro del
     // Mapa de Calor (haversine continuo entre router anclado y GPS actual).
   };

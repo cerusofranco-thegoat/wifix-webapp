@@ -190,6 +190,126 @@ public class NetworkToolsPlugin extends Plugin {
     }
 
     // -----------------------------------------------------------------------
+    // pingOnce — un solo ping ICMP (modo "uno por uno" en vivo; el bucle lo
+    // maneja JS). Devuelve status reply/timeout/unreachable + datos del reply.
+    // -----------------------------------------------------------------------
+    @PluginMethod
+    public void pingOnce(PluginCall call) {
+        final String host = call.getString("host");
+        if (host == null || host.isEmpty()) {
+            call.reject("host requerido");
+            return;
+        }
+        final int timeoutSec = call.getInt("timeoutSec", 3);
+
+        new Thread(() -> {
+            try {
+                Process p = new ProcessBuilder()
+                    .command("/system/bin/ping",
+                             "-c", "1",
+                             "-W", String.valueOf(timeoutSec),
+                             host)
+                    .redirectErrorStream(true)
+                    .start();
+
+                String raw = readAll(p);
+                int exit = p.waitFor();
+
+                JSObject result = new JSObject();
+                result.put("raw", raw);
+                result.put("exitCode", exit);
+
+                Matcher mr = Pattern
+                    .compile("(\\d+)\\s+bytes\\s+from\\s+([\\d.]+):.*?ttl=(\\d+).*?time[=<]([\\d.]+)\\s*ms", Pattern.CASE_INSENSITIVE | Pattern.DOTALL)
+                    .matcher(raw);
+                if (mr.find()) {
+                    result.put("status", "reply");
+                    result.put("bytes", Integer.parseInt(mr.group(1)));
+                    result.put("from", mr.group(2));
+                    result.put("ttl", Integer.parseInt(mr.group(3)));
+                    result.put("timeMs", Double.parseDouble(mr.group(4)));
+                } else if (Pattern
+                        .compile("unreachable|unknown host|bad address", Pattern.CASE_INSENSITIVE)
+                        .matcher(raw).find()) {
+                    result.put("status", "unreachable");
+                } else {
+                    result.put("status", "timeout");
+                }
+
+                call.resolve(result);
+            } catch (Exception e) {
+                call.reject("pingOnce falló: " + e.getMessage(), e);
+            }
+        }).start();
+    }
+
+    // -----------------------------------------------------------------------
+    // traceHop — un solo salto de traceroute con un TTL fijo (modo "uno por
+    // uno"; el bucle de TTL lo maneja JS). Misma lógica de parsing por-salto
+    // que el método traceroute.
+    // -----------------------------------------------------------------------
+    @PluginMethod
+    public void traceHop(PluginCall call) {
+        final String host = call.getString("host");
+        if (host == null || host.isEmpty()) {
+            call.reject("host requerido");
+            return;
+        }
+        final Integer ttlArg = call.getInt("ttl");
+        if (ttlArg == null) {
+            call.reject("ttl requerido");
+            return;
+        }
+        final int ttl = ttlArg;
+        final int timeoutSec = call.getInt("timeoutSec", 3);
+
+        new Thread(() -> {
+            try {
+                long start = System.currentTimeMillis();
+                Process p = new ProcessBuilder()
+                    .command("/system/bin/ping",
+                             "-c", "1",
+                             "-W", String.valueOf(timeoutSec),
+                             "-t", String.valueOf(ttl),
+                             host)
+                    .redirectErrorStream(true)
+                    .start();
+                String raw = readAll(p);
+                p.waitFor();
+                long elapsed = System.currentTimeMillis() - start;
+
+                JSObject hop = new JSObject();
+                hop.put("ttl", ttl);
+                hop.put("raw", raw);
+
+                Matcher mh = Pattern
+                    .compile("From\\s+([\\d.]+).*?(Time to live exceeded|TTL exceeded)", Pattern.CASE_INSENSITIVE | Pattern.DOTALL)
+                    .matcher(raw);
+                if (mh.find()) {
+                    hop.put("ip", mh.group(1));
+                    hop.put("rttMs", (double) elapsed);
+                    hop.put("status", "intermediate");
+                } else {
+                    Matcher me = Pattern
+                        .compile("\\d+\\s+bytes\\s+from\\s+([\\d.]+).*?time[=<]([\\d.]+)\\s*ms", Pattern.DOTALL)
+                        .matcher(raw);
+                    if (me.find()) {
+                        hop.put("ip", me.group(1));
+                        hop.put("rttMs", Double.parseDouble(me.group(2)));
+                        hop.put("status", "reached");
+                    } else {
+                        hop.put("status", "timeout");
+                    }
+                }
+
+                call.resolve(hop);
+            } catch (Exception e) {
+                call.reject("traceHop falló: " + e.getMessage(), e);
+            }
+        }).start();
+    }
+
+    // -----------------------------------------------------------------------
     // getWifiInfo — requiere ACCESS_FINE_LOCATION desde Android 10
     // -----------------------------------------------------------------------
     @PluginMethod
