@@ -238,7 +238,7 @@ confirmAccountBtn.addEventListener('click', async () => {
     validatedProfile = profile;
     validatedAccount = cuenta;
 
-    const subGrid = document.querySelector('.sub-grid');
+    const subGrid = subscreen.querySelector('.sub-grid');
     if (subGrid) subGrid.classList.add('account-confirmed');
     enableSubCards();
 
