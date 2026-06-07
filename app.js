@@ -1449,6 +1449,44 @@ const SERIAL_PATTERNS = {
 /** Patrón laxo cuando el modelo no tiene entrada en SERIAL_PATTERNS. */
 const SERIAL_PATTERN_FALLBACK = { re: /^[A-Z0-9]{6,20}$/, len: 10 };
 
+/**
+ * Devuelve true si el modelo tiene un patrón DISTINTIVO (prefijo literal fijo
+ * al inicio del regex, ej. XPON, HWTC, STGU, ZTEG, ZTEL).
+ * Los patrones puramente genéricos (solo-largo, ej. ^[A-Z0-9]{12}$) devuelven false.
+ * Se detecta comprobando si la source del regex contiene al menos una letra A-Z
+ * literal al inicio (antes de cualquier cuantificador o clase de caracteres).
+ *
+ * @param {string} modelName
+ * @returns {boolean}
+ */
+function isDistinctivePattern(modelName) {
+  const entry = SERIAL_PATTERNS[modelName];
+  if (!entry) return false;
+  // La source empieza con "^" y luego letras literales concretas (no "[")
+  return /^\^[A-Z]{2,}/.test(entry.re.source);
+}
+
+/**
+ * Dado un array de candidatos YA limpios (upper/trim/sin labels/sin espacios),
+ * devuelve los nombres de modelo cuyos patrones DISTINTIVOS matchean algún candidato.
+ * Ignora patrones genéricos (solo-largo) para no generar falsos positivos.
+ *
+ * @param {string[]} cleanedCandidates
+ * @returns {string[]} nombres de modelo únicos detectados
+ */
+function detectModelsFromCandidates(cleanedCandidates) {
+  const detected = [];
+  for (const [name] of Object.entries(SERIAL_PATTERNS)) {
+    if (!isDistinctivePattern(name)) continue;
+    const { re } = SERIAL_PATTERNS[name];
+    if (cleanedCandidates.some(c => re.test(c))) {
+      detected.push(name);
+    }
+  }
+  // Deduplicar (puede haber modelos con el mismo patrón, ej. ONU300G y ONU HUR)
+  return [...new Set(detected)];
+}
+
 /** Rótulos a quitar del inicio de cada candidato (orden largo a corto). */
 const SERIAL_LABELS = ['HOST SN', 'GPON SN', 'PON SN', 'D-SN', 'S/N', 'SN'];
 const _LABEL_RE = new RegExp(
@@ -1479,7 +1517,23 @@ function dataUrlToFile(dataUrl, filename) {
  * Dado un array de strings crudos (barcode rawValues o líneas de OCR) y el
  * nombre del modelo seleccionado, devuelve el mejor serial posible.
  *
- * Retorna: { serial: string, confidence: 'ok' | 'warn', candidates: string[] }
+ * Retorna:
+ *   {
+ *     serial:         string,
+ *     confidence:     'ok' | 'warn' | 'mismatch',
+ *     candidates:     string[],   // los que matchean el patrón (o mejor esfuerzo si warn)
+ *     cleaned:        string[],   // todos los candidatos limpios (para reuso)
+ *     detectedModels: string[],   // modelos detectados por patrones distintivos
+ *   }
+ *
+ * confidence:
+ *   'ok'       → al menos un candidato matchea el patrón del modelo seleccionado.
+ *   'warn'     → ningún candidato matchea; se devuelve mejor esfuerzo por longitud.
+ *                Se usa cuando el modelo es genérico/fallback (sin prefijo distintivo),
+ *                o cuando no se detectó ningún modelo con patrón distintivo.
+ *   'mismatch' → el modelo seleccionado tiene patrón DISTINTIVO, no hay match, pero
+ *                sí se detectó al menos un modelo DIFERENTE en los candidatos limpios.
+ *                Indica que la foto/código es de otro equipo.
  */
 function extractSerial(rawCandidates, modelName) {
   const pattern = SERIAL_PATTERNS[modelName] || SERIAL_PATTERN_FALLBACK;
@@ -1491,20 +1545,49 @@ function extractSerial(rawCandidates, modelName) {
 
   const matches = [...new Set(cleaned.filter(c => pattern.re.test(c)))];
 
-  if (matches.length === 1) {
-    return { serial: matches[0], confidence: 'ok', candidates: matches };
-  }
-  if (matches.length > 1) {
-    return { serial: matches[0], confidence: 'ok', candidates: matches };
+  if (matches.length >= 1) {
+    return {
+      serial: matches[0],
+      confidence: 'ok',
+      candidates: matches,
+      cleaned,
+      detectedModels: [],
+    };
   }
 
-  // Sin match exacto: mejor esfuerzo por longitud más cercana al patrón
+  // Sin match exacto: calcular mejor esfuerzo y detectar modelos alternativos
   const bestEffort = cleaned
     .filter(c => c.length >= 4)
     .sort((a, b) => Math.abs(a.length - pattern.len) - Math.abs(b.length - pattern.len));
 
   const best = bestEffort[0] || '';
-  return { serial: best, confidence: 'warn', candidates: bestEffort.slice(0, 5) };
+  const detectedModels = detectModelsFromCandidates(cleaned);
+
+  // Determinar si hay mismatch claro:
+  //   - El modelo seleccionado tiene patrón distintivo (o no hay modelo y se detectó uno)
+  //   - Se detectó al menos un modelo diferente al seleccionado
+  const isMismatch =
+    (isDistinctivePattern(modelName) && detectedModels.length > 0 &&
+      detectedModels.some(d => d !== modelName)) ||
+    (!modelName && detectedModels.length === 1);
+
+  if (isMismatch) {
+    return {
+      serial: best,            // valor de "mejor esfuerzo" disponible pero NO autorellenar
+      confidence: 'mismatch',
+      candidates: bestEffort.slice(0, 5),
+      cleaned,
+      detectedModels,
+    };
+  }
+
+  return {
+    serial: best,
+    confidence: 'warn',
+    candidates: bestEffort.slice(0, 5),
+    cleaned,
+    detectedModels,
+  };
 }
 
 /** Devuelve true si el puente nativo de escaneo está disponible. */
@@ -1536,15 +1619,30 @@ async function openRetirados() {
       <div class="serial-detect-block" data-slot="serialBlock">
 
         ${nativeAvailable ? `
-        <button type="button" class="scan-serial-btn" data-action="scanSerial" disabled
-          aria-label="Escanear serial con cámara">
-          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3m0 4h4v-4m-7 4h3"/></svg>
-          Escanear serial
-        </button>
-        <p class="serial-browser-note" style="display:none"></p>
+        <p class="serial-browser-note">Escaneá el código o tomá una foto del serial (opcional)</p>
+        <div class="serial-actions">
+          <button type="button" class="serial-action-btn scan-serial-btn" data-action="scanSerial" disabled
+            aria-label="Escanear serial con cámara">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3m0 4h4v-4m-7 4h3"/></svg>
+            Escanear serial
+          </button>
+          <button type="button" class="serial-action-btn ocr-fallback-btn" data-action="ocrFallback" disabled
+            aria-label="Tomar foto del serial para detectarlo con OCR">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+            Tomar foto
+          </button>
+        </div>
         ` : `
         <p class="serial-browser-note">Escaneo disponible solo en la app</p>
+        <button type="button" class="serial-action-btn ocr-fallback-btn" data-action="ocrFallback"
+          aria-label="Tomar foto del serial para detectarlo con OCR">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+          Tomar foto
+        </button>
         `}
+
+        <input type="file" accept="image/*" capture="environment"
+          data-slot="ocrFileInput" style="display:none" aria-hidden="true" tabindex="-1">
 
         <div class="serial-result-row" data-slot="serialResultRow" style="display:none">
           <span class="serial-confidence-badge" data-slot="serialBadge"></span>
@@ -1557,13 +1655,6 @@ async function openRetirados() {
           <input type="text" data-field="serialValue" placeholder="${nativeAvailable ? 'Escanear para detectar' : '48575443A1B2C3D4'}"
             aria-labelledby="serialValueLabel" autocomplete="off" autocapitalize="characters" spellcheck="false">
         </label>
-
-        <button type="button" class="ocr-fallback-btn" data-action="ocrFallback"
-          ${nativeAvailable ? '' : 'style="display:none"'}>
-          No se pudo leer — usar foto
-        </button>
-        <input type="file" accept="image/*" capture="environment"
-          data-slot="ocrFileInput" style="display:none" aria-hidden="true" tabindex="-1">
 
       </div>
       <!-- /Bloque de detección de serial -->
@@ -1584,6 +1675,8 @@ async function openRetirados() {
   const serialInput  = formEl.querySelector('[data-field="serialValue"]');
   const scanBtn      = formEl.querySelector('[data-action="scanSerial"]');
   const ocrBtn       = formEl.querySelector('[data-action="ocrFallback"]');
+  // HTML de reposo del botón fallback (ícono + texto); se reutiliza en todos los resets
+  const OCR_BTN_IDLE_HTML = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg> Tomar foto`;
   const ocrFileInput = formEl.querySelector('[data-slot="ocrFileInput"]');
   const serialResultRow      = formEl.querySelector('[data-slot="serialResultRow"]');
   const serialBadge          = formEl.querySelector('[data-slot="serialBadge"]');
@@ -1614,25 +1707,90 @@ async function openRetirados() {
     reasonSel.innerHTML = `<option value="">No se pudo cargar</option>`;
   }
 
-  // ---- Habilitar botón de escanear cuando hay modelo elegido ---------------
-  if (scanBtn) {
-    modelSel.addEventListener('change', () => {
-      scanBtn.disabled = !modelSel.value;
-    });
+  // ---- Habilitar botones de captura cuando hay modelo elegido ---------------
+  modelSel.addEventListener('change', () => {
+    if (scanBtn) scanBtn.disabled = !modelSel.value;
+    if (ocrBtn)  ocrBtn.disabled  = !modelSel.value;
+  });
+
+  // ---- Slot de sugerencia de modelo (mismatch) — se crea una sola vez ------
+  let mismatchHint = serialResultRow.querySelector('[data-slot="mismatchHint"]');
+  if (!mismatchHint) {
+    mismatchHint = document.createElement('div');
+    mismatchHint.setAttribute('data-slot', 'mismatchHint');
+    mismatchHint.setAttribute('role', 'alert');
+    mismatchHint.setAttribute('aria-live', 'polite');
+    mismatchHint.className = 'serial-mismatch-hint';
+    mismatchHint.style.display = 'none';
+    serialResultRow.appendChild(mismatchHint);
   }
 
   // ---- Aplica resultado de extracción al formulario -----------------------
   function applySerialResult(result) {
     serialResultRow.style.display = '';
 
+    // Limpiar sugerencia de mismatch de ejecuciones previas
+    mismatchHint.style.display = 'none';
+    mismatchHint.innerHTML = '';
+
     if (result.confidence === 'ok') {
       serialBadge.textContent = '✓ Detectado';
       serialBadge.className = 'serial-confidence-badge ok';
+    } else if (result.confidence === 'mismatch') {
+      serialBadge.textContent = '⚠ Tu modelo no coincide con la foto. Elegí el modelo correcto.';
+      serialBadge.className = 'serial-confidence-badge warn';
     } else {
+      // 'warn'
       serialBadge.textContent = '⚠ Verificá el serial';
       serialBadge.className = 'serial-confidence-badge warn';
     }
 
+    if (result.confidence === 'mismatch') {
+      // NO autorellenar el input con el valor dudoso
+      serialCandidatesSel.style.display = 'none';
+
+      // Mostrar sugerencia si hay modelo detectado
+      if (result.detectedModels && result.detectedModels.length >= 1) {
+        const suggestedName = result.detectedModels[0];
+
+        // Buscar el id del modelo sugerido en el select
+        let suggestedId = '';
+        for (const [id, name] of Object.entries(modelNameById)) {
+          if (name === suggestedName) { suggestedId = id; break; }
+        }
+
+        const nameEsc = escapeHtml(suggestedName);
+        mismatchHint.innerHTML =
+          `<span class="serial-mismatch-hint__text">Parece un ${nameEsc}</span>` +
+          (suggestedId
+            ? `<button type="button" class="serial-mismatch-hint__btn"
+                 data-suggested-id="${escapeHtml(suggestedId)}"
+                 data-suggested-name="${nameEsc}">Usar ${nameEsc}</button>`
+            : '');
+        mismatchHint.style.display = 'flex';
+
+        // Listener del botón "Usar {modelo}"
+        const usarBtn = mismatchHint.querySelector('[data-suggested-id]');
+        if (usarBtn) {
+          usarBtn.addEventListener('click', () => {
+            const newId   = usarBtn.dataset.suggestedId;
+            const newName = usarBtn.dataset.suggestedName;
+
+            // (a) Setear el modelo en el select
+            modelSel.value = newId;
+            // (b) Disparar change para re-habilitar el botón de escanear
+            modelSel.dispatchEvent(new Event('change'));
+            // (c) Re-evaluar con el modelo correcto usando los candidatos limpios
+            applySerialResult(extractSerial(result.cleaned, newName));
+          }, { once: true });
+        }
+      }
+
+      serialInput.focus();
+      return;
+    }
+
+    // confidence 'ok' o 'warn': comportamiento original
     if (result.candidates.length > 1) {
       serialCandidatesSel.style.display = '';
       serialCandidatesSel.innerHTML = result.candidates
@@ -1706,7 +1864,7 @@ async function openRetirados() {
           serialBadge.textContent = '⚠ Error al acceder a la cámara';
           serialResultRow.style.display = '';
           ocrBtn.disabled = false;
-          ocrBtn.textContent = 'No se pudo leer — usar foto';
+          ocrBtn.innerHTML = OCR_BTN_IDLE_HTML;
           return;
         }
 
@@ -1716,7 +1874,7 @@ async function openRetirados() {
           serialBadge.textContent = '⚠ No se tomó ninguna foto';
           serialResultRow.style.display = '';
           ocrBtn.disabled = false;
-          ocrBtn.textContent = 'No se pudo leer — usar foto';
+          ocrBtn.innerHTML = OCR_BTN_IDLE_HTML;
           return;
         }
 
@@ -1754,7 +1912,7 @@ async function openRetirados() {
           serialResultRow.style.display = '';
         } finally {
           ocrBtn.disabled = false;
-          ocrBtn.textContent = 'No se pudo leer — usar foto';
+          ocrBtn.innerHTML = OCR_BTN_IDLE_HTML;
         }
       });
 
@@ -1797,7 +1955,7 @@ async function openRetirados() {
           serialResultRow.style.display = '';
         } finally {
           ocrBtn.disabled = false;
-          ocrBtn.textContent = 'No se pudo leer — usar foto';
+          ocrBtn.innerHTML = OCR_BTN_IDLE_HTML;
           ocrFileInput.value = '';
         }
       });
@@ -1840,6 +1998,17 @@ async function openRetirados() {
     if (!serial || !modelId || !reasonCode) {
       showSaveFeedback(saveBtn, 'Completa serie, modelo y motivo', false);
       return;
+    }
+
+    // Guard: si el modelo tiene patrón DISTINTIVO, el serial debe matchearlo.
+    // Evita guardar un serial de otro equipo cuando el backend no valida el formato.
+    const modelName = modelNameById[modelId] || '';
+    if (isDistinctivePattern(modelName)) {
+      const cleanedSerial = serial.toUpperCase().replace(/\s+/g, '');
+      if (!SERIAL_PATTERNS[modelName].re.test(cleanedSerial)) {
+        showSaveFeedback(saveBtn, 'Tu modelo no coincide con la foto. Elegí el modelo correcto.', false);
+        return;
+      }
     }
     const payload = {
       serialValue:        serial,
