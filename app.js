@@ -20,7 +20,11 @@ const subscreen = document.getElementById('subscreen');
 const subHeading = document.getElementById('subHeading');
 const subEyebrow = document.getElementById('subEyebrow');
 const backBtn = document.getElementById('backBtn');
-const subCards = document.querySelectorAll('.sub-card');
+const subCards = subscreen.querySelectorAll('.sub-card');
+
+// === Visitas Técnicas subscreen =============================================
+const subscreenVisitas = document.getElementById('subscreenVisitas');
+const backBtnVisitas = document.getElementById('backBtnVisitas');
 
 const detailPersonales = document.getElementById('detailPersonales');
 const detailEyebrow = document.getElementById('detailEyebrow');
@@ -108,6 +112,19 @@ cards.forEach(card => {
   card.addEventListener('click', () => {
     const type = card.dataset.type;
     currentCategory = type;
+
+    // "Visitas Técnicas" abre el sub-menú de visitas (#subscreenVisitas).
+    if (type === 'visitas') {
+      subscreenVisitas.classList.add('open');
+      subscreenVisitas.setAttribute('aria-hidden', 'false');
+      requestAnimationFrame(() => {
+        const first = subscreenVisitas.querySelector('button:not([disabled]):not([tabindex="-1"])');
+        if (first) first.focus({ preventScroll: true });
+      });
+      return;
+    }
+
+    // "Instalaciones" (y cualquier otro tipo futuro): comportamiento original.
     const meta = labels[type];
     if (meta) {
       subEyebrow.textContent = meta.eyebrow;
@@ -123,6 +140,32 @@ backBtn.addEventListener('click', () => {
   subscreen.setAttribute('aria-hidden', 'true');
 });
 
+// === Visitas Técnicas: sub-menú y navegación ================================
+
+// Volver desde subscreenVisitas → home
+backBtnVisitas.addEventListener('click', () => {
+  subscreenVisitas.classList.remove('open');
+  subscreenVisitas.setAttribute('aria-hidden', 'true');
+  // Restaurar foco a la tarjeta "Visitas Técnicas"
+  const visitasCard = document.querySelector('.category-card[data-type="visitas"]');
+  if (visitasCard) visitasCard.focus({ preventScroll: true });
+});
+
+// Sub-cards de subscreenVisitas
+subscreenVisitas.querySelectorAll('[data-sub-visitas]').forEach(card => {
+  card.addEventListener('click', () => {
+    const sub = card.dataset.subVisitas;
+    // Las tarjetas "próximamente" tienen aria-disabled y no hacen nada
+    if (card.getAttribute('aria-disabled') === 'true') return;
+
+    if (sub === 'asistencia') {
+      if (window.AsistenciaCliente && typeof window.AsistenciaCliente.open === 'function') {
+        window.AsistenciaCliente.open();
+      }
+    }
+  });
+});
+
 // === Account input ==========================================================
 const accountInput = document.getElementById('accountInput');
 const clearAccount = document.getElementById('clearAccount');
@@ -135,7 +178,7 @@ let validatedAccount = null;
 function invalidateAccountCache() {
   validatedProfile = null;
   validatedAccount = null;
-  const subGrid = document.querySelector('.sub-grid');
+  const subGrid = subscreen.querySelector('.sub-grid');
   if (subGrid) {
     subGrid.classList.remove('account-confirmed');
     subGrid.querySelectorAll('.sub-card').forEach((c) => {
@@ -151,7 +194,7 @@ function invalidateAccountCache() {
 }
 
 function enableSubCards() {
-  const subGrid = document.querySelector('.sub-grid');
+  const subGrid = subscreen.querySelector('.sub-grid');
   if (!subGrid) return;
   subGrid.querySelectorAll('.sub-card').forEach((c) => {
     c.removeAttribute('aria-disabled');

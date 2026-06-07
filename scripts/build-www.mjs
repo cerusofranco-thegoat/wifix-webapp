@@ -14,13 +14,29 @@ const ASSETS = [
   'app.js',
   'api.js',
   'native.js',
-  'styles.css'
+  'asistencia.js',
+  'styles.css',
+  'manifest.webmanifest',
 ];
 
-fs.rmSync(WWW, { recursive: true, force: true });
+// Directorios completos que se copian recursivamente a www/
+const DIRS = [
+  'icons',
+];
+
+// Intenta limpiar www/ completo; si está bloqueado (ej. http-server en Windows),
+// continúa de todas formas — los archivos se sobreescriben individualmente.
+try {
+  fs.rmSync(WWW, { recursive: true, force: true });
+} catch (e) {
+  if (e.code !== 'EBUSY') throw e;
+  console.warn('[build-www] www/ bloqueado (servidor activo) — sobreescribiendo archivos individuales.');
+}
 fs.mkdirSync(WWW, { recursive: true });
 
 let copied = 0;
+
+// Copia archivos individuales
 for (const name of ASSETS) {
   const src = path.join(ROOT, name);
   if (!fs.existsSync(src)) {
@@ -29,6 +45,25 @@ for (const name of ASSETS) {
   }
   fs.copyFileSync(src, path.join(WWW, name));
   copied++;
+}
+
+// Copia directorios completos
+for (const dir of DIRS) {
+  const srcDir = path.join(ROOT, dir);
+  if (!fs.existsSync(srcDir)) {
+    console.warn(`[build-www] skip dir (no existe): ${dir}/`);
+    continue;
+  }
+  const destDir = path.join(WWW, dir);
+  fs.mkdirSync(destDir, { recursive: true });
+  for (const file of fs.readdirSync(srcDir)) {
+    const srcFile  = path.join(srcDir, file);
+    const destFile = path.join(destDir, file);
+    if (fs.statSync(srcFile).isFile()) {
+      fs.copyFileSync(srcFile, destFile);
+      copied++;
+    }
+  }
 }
 
 console.log(`[build-www] ${copied} archivos copiados a www/`);

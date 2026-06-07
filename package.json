@@ -11,7 +11,8 @@
     "cap:run": "npm run build:web && cap run android"
   },
   "devDependencies": {
-    "@capacitor/cli": "^6.1.2"
+    "@capacitor/cli": "^6.1.2",
+    "jimp": "^1.6.1"
   },
   "dependencies": {
     "@capacitor-mlkit/barcode-scanning": "^6.2.0",
