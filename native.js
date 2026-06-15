@@ -183,28 +183,27 @@
       throw new Error('Geolocalización no disponible en este dispositivo.');
     },
 
-    async speedtest(opts) {
-      // Speedtest tipo Ookla contra servidores Ookla reales (los mismos que
-      // usa speedtest.net), geo-elegidos por la API a la IP del cliente.
-      // En Quito típicamente devuelve CNT, Movistar, Netlife, NEDETEL, Setel.
-      //
-      //  1) Discover: API de Ookla (via CapacitorHttp para saltar CORS) →
-      //     lista de ~20 servers cercanos ordenados por distancia.
-      //  2) Ping a cada server (en paralelo) → eliminar offline y elegir
-      //     el de menor latencia como "seleccionado".
-      //  3) Latencia precisa: 12 muestras al server elegido.
-      //  4) Download multi-stream: 6 conexiones paralelas durante 15 s
-      //     contra ${server}/random4000x4000.jpg, throughput en vivo.
-      //  5) Upload multi-stream: 4 XHR paralelas a /upload.php con
-      //     payload 5 MB cada una, 15 s, throughput por xhr.upload.onprogress.
-      // TODO ISP Monitor: comparar con QoS del lado del ISP.
-
-      const onProgress = (opts && opts.onProgress) || (() => {});
-
+    // ------------------------------------------------------------------------
+    // speedtestServers — SÓLO discovery + ping (fases 1-2 del antiguo motor).
+    // No mide banda; alimenta el selector de servidor de la UI.
+    //
+    //  1) Discover: API de Ookla (via CapacitorHttp para saltar CORS) →
+    //     lista de ~20 servers cercanos ordenados por distancia.
+    //  2) Ping a los 8 más cercanos (vía plugin nativo, sin CORS) → pingMs por
+    //     servidor.
+    //  3) Auto-selección del recomendado: el de menor ping si alguno respondió;
+    //     si ninguno respondió, el más cercano por distancia (la lista ya viene
+    //     ordenada por cercanía desde la API).
+    //
+    // Devuelve { servers, selected } donde:
+    //  - servers: array de objetos servidor (ver contrato), con flag `selected`
+    //    en true en el recomendado.
+    //  - selected: el objeto servidor recomendado (referencia dentro de servers).
+    // ------------------------------------------------------------------------
+    async speedtestServers() {
       // ---------- Fase 1: Discovery con la API de Ookla ----------
       // La API geo-localiza por IP del cliente y devuelve servers cercanos.
       // CapacitorHttp.request hace requests nativas (Java) → bypass CORS.
-      onProgress({ phase: 'discover' });
       const Http = global.Capacitor && global.Capacitor.Plugins && global.Capacitor.Plugins.CapacitorHttp;
       const OOKLA_API = 'https://www.speedtest.net/api/js/servers?engine=js&https_functional=true&limit=20';
 
@@ -232,21 +231,25 @@
         throw new Error('La API de Ookla no devolvió servidores para tu ubicación.');
       }
 
-      // ---------- Fase 2: Ping a cada server (paralelo) ----------
-      onProgress({ phase: 'discover', detail: 'pinging' });
+      // ---------- Puente al plugin nativo ----------
+      // ping/latencia/download/upload corren en Java (HttpURLConnection):
+      // sin CORS y con ancho de banda real. Discovery se queda en JS arriba.
+      const NetworkTools = global.Capacitor && global.Capacitor.Plugins
+        && global.Capacitor.Plugins.NetworkTools;
+      if (!NetworkTools || typeof NetworkTools.httpPing !== 'function') {
+        throw new Error('Plugin NetworkTools (speedtest nativo) no disponible. Recompila el APK.');
+      }
+
+      // ---------- Fase 2: Ping a cada server (vía plugin nativo) ----------
       const pingServer = async (server) => {
         const base = server.url.replace(/\/upload\.php$/i, '');
         const pingUrl = `${base}/random350x350.jpg`;
-        const samples = [];
-        for (let i = 0; i < 4; i++) {
-          const t0 = performance.now();
-          try {
-            const res = await fetch(`${pingUrl}?n=${Date.now()}_${i}`, { cache: 'no-store' });
-            await res.arrayBuffer();
-            if (i > 0) samples.push(performance.now() - t0);
-          } catch (_) {}
+        try {
+          const r = await NetworkTools.httpPing({ url: pingUrl, samples: 3 });
+          return (r && r.ok && r.avgMs != null) ? r.avgMs : null;
+        } catch (_) {
+          return null;
         }
-        return samples.length ? samples.reduce((a, b) => a + b, 0) / samples.length : null;
       };
       // Pingueamos hasta los 8 más cercanos por geografía para no demorar.
       const candidates = ooklaServers.slice(0, 8);
@@ -262,175 +265,214 @@
         distance: s.distance,
         pingMs: pings[i] != null ? Number(pings[i].toFixed(1)) : null,
         online: pings[i] != null,
+        selected: false,
       }));
+      // Auto-selección del recomendado: el de menor ping si alguno respondió;
+      // si ninguno respondió, el más cercano por distancia (servers ya viene
+      // ordenado por cercanía desde la API).
       const online = servers.filter((s) => s.online);
-      if (online.length === 0) {
-        throw new Error('Ningún servidor Ookla cercano respondió al ping (probable bloqueo CORS).');
-      }
       online.sort((a, b) => a.pingMs - b.pingMs);
-      const selected = online[0];
-      selected.selected = true;
-      // Marca en el array original para que la UI lo muestre
-      const selectedIdx = servers.findIndex((s) => s.id === selected.id);
-      servers[selectedIdx].selected = true;
+      const best = online.length > 0 ? online[0] : servers[0];
+      // Marca en el array original para que la UI lo resalte.
+      const selectedIdx = servers.findIndex((s) => s.id === best.id);
+      if (selectedIdx >= 0) servers[selectedIdx].selected = true;
 
-      const serverName = selected.label;
-      const colo = selected.sponsor;
-      const city = selected.city;
-      const country = selected.country;
+      return { servers, selected: servers[selectedIdx >= 0 ? selectedIdx : 0] };
+    },
 
-      // ---------- Fase 3: Latencia precisa al server elegido ----------
-      onProgress({ phase: 'latency', progress: 0 });
-      const baseUrl = selected.url.replace(/\/upload\.php$/i, '');
-      const pingUrl = `${baseUrl}/random350x350.jpg`;
-      const latencies = [];
-      let lost = 0;
-      const LATENCY_SAMPLES = 12;
-      for (let i = 0; i < LATENCY_SAMPLES + 1; i++) {
-        const t0 = performance.now();
-        try {
-          const res = await fetch(`${pingUrl}?n=${Date.now()}_${i}`, { cache: 'no-store' });
-          await res.arrayBuffer();
-          if (i > 0) latencies.push(performance.now() - t0);
-        } catch (_) { if (i > 0) lost++; }
-        onProgress({ phase: 'latency', progress: i / LATENCY_SAMPLES });
+    async speedtest(opts) {
+      // Mide latencia/descarga/subida REALMENTE contra el servidor Ookla/ISP
+      // elegido (no contra Cloudflare). Los endpoints se derivan de server.url
+      // (forma: https://host:puerto/speedtest/upload.php):
+      //   base    = url sin "/upload.php"
+      //   latencia= base/latency.txt (fallback base/random350x350.jpg)
+      //   bajada  = base/random4000x4000.jpg (Ookla la genera al vuelo)
+      //   subida  = server.url (el upload.php; acepta POST chunked)
+      //
+      // Fallback honesto y ETIQUETADO: si la bajada o la subida contra el
+      // servidor falla (0 bytes / 0 Mbps / rechazo del plugin), se reintenta
+      // esa fase contra Cloudflare (speed.cloudflare.com/__down|__up) y se marca
+      // measuredVia='cloudflare-fallback'. Si incluso Cloudflare falla, se lanza
+      // un Error con el motivo real (código HTTP / última excepción del plugin).
+      // Nunca devuelve 0 en silencio.
+      //
+      // opts:
+      //   server     — objeto servidor de speedtestServers().servers; si no
+      //                viene, se descubre internamente y se usa el recomendado
+      //                (selected) → "mandar sin elegir = más cercano y mejor".
+      //   onProgress — callback con las mismas fases/campos de siempre
+      //                (discover, latency, download, upload, done; cada uno con
+      //                phase/progress/mbps/elapsedMs según corresponda).
+      // TODO ISP Monitor: comparar con QoS del lado del ISP.
+
+      const onProgress = (opts && opts.onProgress) || (() => {});
+
+      // ---------- Fase 1: resolver servidor (elegido o auto) ----------
+      onProgress({ phase: 'discover' });
+      let server = opts && opts.server;
+      let servers;
+      if (server && server.url) {
+        // Servidor elegido por el técnico: no re-descubrimos la lista completa.
+        // Conservamos `servers` con ese único servidor para mantener el contrato
+        // (la UI ya tiene la lista que obtuvo con speedtestServers()).
+        servers = [server];
+      } else {
+        const disc = await this.speedtestServers();
+        servers = disc.servers;
+        server = disc.selected;
       }
-      const latencyMs = latencies.length ? Math.min(...latencies) : NaN;
-      const avgLat = latencies.reduce((a, b) => a + b, 0) / Math.max(1, latencies.length);
-      const jitterMs = latencies.length > 1
-        ? Math.sqrt(latencies.reduce((s, x) => s + (x - avgLat) ** 2, 0) / latencies.length)
-        : 0;
-      const packetLossPercent = (lost / LATENCY_SAMPLES) * 100;
+      if (!server || !server.url) {
+        throw new Error('No hay servidor disponible para medir.');
+      }
 
-      // ---------- Fase 4: Download multi-stream (saturando) ----------
-      // 6 conexiones paralelas durante mínimo 15 s. Esto satura el link
-      // — un solo stream HTTP raramente alcanza el bandwidth real por TCP
-      // slow-start y limitaciones de servidor.
-      onProgress({ phase: 'download', progress: 0, mbps: 0, elapsedMs: 0 });
-      const DL_PARALLEL = 6;
-      const DL_MIN_MS = 15000;
-      const DL_MAX_MS = 22000;
-      const dlFile = `${baseUrl}/random4000x4000.jpg`;
-      const dlCtrl = new AbortController();
-      let dlBytes = 0;
-      const dlStart = performance.now();
+      const NetworkTools = global.Capacitor && global.Capacitor.Plugins
+        && global.Capacitor.Plugins.NetworkTools;
+      if (!NetworkTools || typeof NetworkTools.httpPing !== 'function') {
+        throw new Error('Plugin NetworkTools (speedtest nativo) no disponible. Recompila el APK.');
+      }
 
-      const dlRunner = async () => {
-        while (!dlCtrl.signal.aborted) {
-          try {
-            const res = await fetch(`${dlFile}?n=${Math.random()}`, { signal: dlCtrl.signal, cache: 'no-store' });
-            if (!res.body || !res.body.getReader) {
-              const buf = await res.arrayBuffer();
-              dlBytes += buf.byteLength;
-              continue;
-            }
-            const reader = res.body.getReader();
-            while (!dlCtrl.signal.aborted) {
-              const { done, value } = await reader.read();
-              if (done) break;
-              dlBytes += value.length;
-            }
-          } catch (_) { /* abort u otro */ }
+      // Endpoints derivados del servidor elegido.
+      const base = server.url.replace(/\/upload\.php$/i, '');
+      const SRV_LATENCY = `${base}/latency.txt`;
+      const SRV_LATENCY_ALT = `${base}/random350x350.jpg`;
+      const SRV_DOWN = `${base}/random4000x4000.jpg`;
+      const SRV_UP = server.url;
+
+      // Endpoints Cloudflare (fallback honesto y etiquetado).
+      const CF_DOWN = 'https://speed.cloudflare.com/__down';
+      const CF_UP = 'https://speed.cloudflare.com/__up';
+
+      const serverName = server.sponsor || server.label || 'Servidor';
+      const city = server.city;
+      const country = server.country;
+      let colo = server.sponsor;   // metadata; download puede sobreescribir.
+
+      // ---------- Fase 2: Latencia precisa contra el servidor (nativo) ----------
+      onProgress({ phase: 'latency', progress: 0 });
+      const LATENCY_SAMPLES = 12;
+      let latencyMs = NaN, jitterMs = 0, packetLossPercent = 0;
+      try {
+        let lat = await NetworkTools.httpPing({ url: SRV_LATENCY, samples: LATENCY_SAMPLES });
+        // Si latency.txt no existe / no responde, reintentar con el asset jpg
+        // (presente en todo servidor Ookla).
+        if (!lat || !lat.ok || lat.minMs == null) {
+          lat = await NetworkTools.httpPing({ url: SRV_LATENCY_ALT, samples: LATENCY_SAMPLES });
         }
-      };
-      const dlTasks = Array.from({ length: DL_PARALLEL }, () => dlRunner());
+        latencyMs = lat && lat.minMs != null ? lat.minMs : NaN;
+        jitterMs = lat && lat.jitterMs != null ? lat.jitterMs : 0;
+        packetLossPercent = lat && lat.packetLossPercent != null ? lat.packetLossPercent : 0;
+      } catch (_) { /* deja NaN/0 */ }
+      onProgress({ phase: 'latency', progress: 1 });
 
-      const dlWindow = [];
-      const dlReporter = setInterval(() => {
-        const now = performance.now();
-        dlWindow.push({ ts: now, bytes: dlBytes });
-        while (dlWindow.length > 1 && now - dlWindow[0].ts > 2000) dlWindow.shift();
-        let liveMbps = 0;
-        if (dlWindow.length >= 2) {
-          const dt = (now - dlWindow[0].ts) / 1000;
-          const db = dlBytes - dlWindow[0].bytes;
-          liveMbps = (db * 8) / dt / 1e6;
-        }
+      // ---------- Suscripción a progreso nativo ----------
+      // El plugin emite "speedtestProgress" cada ~300ms con {phase,mbps,
+      // elapsedMs,progress}. Lo reenviamos a onProgress tal cual (mismos
+      // campos y nombres que el código JS anterior).
+      const sub = await NetworkTools.addListener('speedtestProgress', (p) => {
+        if (!p || !p.phase) return;
         onProgress({
-          phase: 'download',
-          progress: Math.min(1, (now - dlStart) / DL_MIN_MS),
-          mbps: Number(liveMbps.toFixed(2)),
-          elapsedMs: now - dlStart,
+          phase: p.phase,
+          progress: p.progress != null ? Math.min(1, p.progress) : 0,
+          mbps: p.mbps != null ? Number(p.mbps.toFixed(2)) : 0,
+          elapsedMs: p.elapsedMs || 0,
         });
-        if (now - dlStart >= DL_MIN_MS) dlCtrl.abort();
-        if (now - dlStart >= DL_MAX_MS) dlCtrl.abort();
-      }, 300);
-      await Promise.allSettled(dlTasks);
-      clearInterval(dlReporter);
-      const dlElapsedMs = performance.now() - dlStart;
-      const downloadMbps = (dlBytes * 8) / (dlElapsedMs / 1000) / 1e6;
-
-      // ---------- Fase 5: Upload multi-stream con XHR progress ----------
-      // XMLHttpRequest expone xhr.upload.onprogress — único camino al bytes
-      // subidos en vivo (fetch no lo permite sin Web Streams hacia el server).
-      onProgress({ phase: 'upload', progress: 0, mbps: 0, elapsedMs: 0 });
-      const UL_PARALLEL = 4;
-      const UL_MIN_MS = 15000;
-      const UL_MAX_MS = 22000;
-      const UL_CHUNK = 5 * 1024 * 1024;
-      const ulPayload = new Uint8Array(UL_CHUNK);
-      // Datos pseudo-random para que no se comprima al vuelo.
-      for (let i = 0; i < UL_CHUNK; i++) ulPayload[i] = (i * 137) & 0xff;
-
-      const ulCtrl = new AbortController();
-      let ulBytes = 0;
-      const ulStart = performance.now();
-      const activeXhrs = new Set();
-      ulCtrl.signal.addEventListener('abort', () => {
-        for (const xhr of activeXhrs) { try { xhr.abort(); } catch (_) {} }
       });
 
-      const ulRunner = () => new Promise((resolve) => {
-        const loop = () => {
-          if (ulCtrl.signal.aborted) return resolve();
-          const xhr = new XMLHttpRequest();
-          activeXhrs.add(xhr);
-          xhr.open('POST', selected.url + '?n=' + Math.random(), true);
-          xhr.setRequestHeader('Content-Type', 'application/octet-stream');
-          let lastLoaded = 0;
-          xhr.upload.onprogress = (e) => {
-            const delta = e.loaded - lastLoaded;
-            lastLoaded = e.loaded;
-            if (delta > 0) ulBytes += delta;
-          };
-          xhr.onloadend = () => { activeXhrs.delete(xhr); loop(); };
-          try { xhr.send(ulPayload); }
-          catch (_) { activeXhrs.delete(xhr); resolve(); }
-        };
-        loop();
-      });
-      const ulTasks = Array.from({ length: UL_PARALLEL }, () => ulRunner());
+      // measuredVia es 'server' por defecto; pasa a 'cloudflare-fallback' si
+      // alguna de las dos fases de banda tuvo que caer a Cloudflare.
+      let measuredVia = 'server';
+      let downloadMbps = 0, dlBytes = 0, dlElapsedMs = 0;
+      let uploadMbps = 0, ulBytes = 0, ulElapsedMs = 0;
+      try {
+        // ---------- Fase 3: Download multi-stream (nativo, saturando) ----------
+        // 6 conexiones paralelas mínimo 15 s. Satura el link: un solo stream
+        // raramente alcanza el bandwidth real por TCP slow-start. El plugin
+        // relanza el GET en bucle por stream hasta minMs; Ookla genera la
+        // imagen random4000x4000.jpg al vuelo (varios MB por request).
+        onProgress({ phase: 'download', progress: 0, mbps: 0, elapsedMs: 0 });
+        // El plugin puede rechazar (call.reject) ante errores de red; lo
+        // atrapamos para poder caer a Cloudflare en vez de abortar todo.
+        const dl = await NetworkTools.downloadTest({
+          url: SRV_DOWN,
+          parallelStreams: 6,
+          minMs: 15000,
+          maxMs: 22000,
+        }).catch((e) => ({ __rejected: (e && e.message) ? e.message : String(e) }));
+        downloadMbps = dl && dl.downloadMbps != null ? dl.downloadMbps : 0;
+        dlBytes = dl && dl.downloadBytes != null ? dl.downloadBytes : 0;
+        dlElapsedMs = dl && dl.downloadElapsedMs != null ? dl.downloadElapsedMs : 0;
+        if (dl && dl.colo) colo = dl.colo;
 
-      const ulWindow = [];
-      const ulReporter = setInterval(() => {
-        const now = performance.now();
-        ulWindow.push({ ts: now, bytes: ulBytes });
-        while (ulWindow.length > 1 && now - ulWindow[0].ts > 2000) ulWindow.shift();
-        let liveMbps = 0;
-        if (ulWindow.length >= 2) {
-          const dt = (now - ulWindow[0].ts) / 1000;
-          const db = ulBytes - ulWindow[0].bytes;
-          liveMbps = (db * 8) / dt / 1e6;
+        // Si el servidor no entregó nada, caer a Cloudflare (etiquetado).
+        if (!dlBytes || !downloadMbps) {
+          measuredVia = 'cloudflare-fallback';
+          const dlFile = `${CF_DOWN}?bytes=26214400`;   // 25 MB por request
+          const cf = await NetworkTools.downloadTest({
+            url: dlFile,
+            parallelStreams: 6,
+            minMs: 15000,
+            maxMs: 22000,
+          });
+          downloadMbps = cf && cf.downloadMbps != null ? cf.downloadMbps : 0;
+          dlBytes = cf && cf.downloadBytes != null ? cf.downloadBytes : 0;
+          dlElapsedMs = cf && cf.downloadElapsedMs != null ? cf.downloadElapsedMs : 0;
+          if (cf && cf.colo) colo = cf.colo;
+          // Ni el servidor ni Cloudflare entregaron nada: error con motivo real.
+          if (!dlBytes || !downloadMbps) {
+            const srvMsg = (dl && dl.__rejected)
+              ? `servidor rechazó (${dl.__rejected})`
+              : `servidor HTTP ${dl && dl.downloadFirstHttpCode != null ? dl.downloadFirstHttpCode : -1}` +
+                (dl && dl.downloadLastError ? ` · ${dl.downloadLastError}` : '');
+            const cfCode = cf && cf.downloadFirstHttpCode != null ? cf.downloadFirstHttpCode : -1;
+            const cfErr = cf && cf.downloadLastError ? ` · ${cf.downloadLastError}` : '';
+            throw new Error(`Bajada falló: ${srvMsg}; Cloudflare HTTP ${cfCode}${cfErr}`);
+          }
         }
-        onProgress({
-          phase: 'upload',
-          progress: Math.min(1, (now - ulStart) / UL_MIN_MS),
-          mbps: Number(liveMbps.toFixed(2)),
-          elapsedMs: now - ulStart,
-        });
-        if (now - ulStart >= UL_MIN_MS) ulCtrl.abort();
-        if (now - ulStart >= UL_MAX_MS) ulCtrl.abort();
-      }, 300);
-      await Promise.allSettled(ulTasks);
-      clearInterval(ulReporter);
-      const ulElapsedMs = performance.now() - ulStart;
-      const uploadMbps = (ulBytes * 8) / (ulElapsedMs / 1000) / 1e6;
+
+        // ---------- Fase 4: Upload multi-stream (nativo) ----------
+        // Subida contra el upload.php del servidor (POST chunked continuo).
+        onProgress({ phase: 'upload', progress: 0, mbps: 0, elapsedMs: 0 });
+        const ul = await NetworkTools.uploadTest({
+          url: SRV_UP,
+          parallelStreams: 4,
+          minMs: 15000,
+          maxMs: 22000,
+        }).catch((e) => ({ __rejected: (e && e.message) ? e.message : String(e) }));
+        uploadMbps = ul && ul.uploadMbps != null ? ul.uploadMbps : 0;
+        ulBytes = ul && ul.uploadBytes != null ? ul.uploadBytes : 0;
+        ulElapsedMs = ul && ul.uploadElapsedMs != null ? ul.uploadElapsedMs : 0;
+
+        // Si el servidor no aceptó nada, caer a Cloudflare (etiquetado).
+        if (!ulBytes || !uploadMbps) {
+          measuredVia = 'cloudflare-fallback';
+          const cf = await NetworkTools.uploadTest({
+            url: CF_UP,
+            parallelStreams: 4,
+            minMs: 15000,
+            maxMs: 22000,
+          });
+          uploadMbps = cf && cf.uploadMbps != null ? cf.uploadMbps : 0;
+          ulBytes = cf && cf.uploadBytes != null ? cf.uploadBytes : 0;
+          ulElapsedMs = cf && cf.uploadElapsedMs != null ? cf.uploadElapsedMs : 0;
+          // Ni el servidor ni Cloudflare aceptaron nada: error con motivo real.
+          if (!ulBytes || !uploadMbps) {
+            const srvMsg = (ul && ul.__rejected)
+              ? `servidor rechazó (${ul.__rejected})`
+              : 'servidor aceptó 0 bytes';
+            throw new Error(`Subida falló: ${srvMsg}; Cloudflare también devolvió 0.`);
+          }
+        }
+      } finally {
+        try { await sub.remove(); } catch (_) {}
+      }
 
       onProgress({ phase: 'done' });
       return {
         serverName,
         colo, city, country,
         servers,
+        selectedServer: server,
+        measuredVia,
         downloadMbps: Number(downloadMbps.toFixed(2)),
         uploadMbps: Number(uploadMbps.toFixed(2)),
         latencyMs: Number(latencyMs.toFixed(1)),
@@ -1633,9 +1675,11 @@
   }
 
   // --- Speedtest estilo Ookla --------------------------------------------------
-  // Descubre servidores, mide latencia con varias muestras, descarga 100 MB
-  // y sube 30 MB con throughput en vivo. Reporta servidor seleccionado +
-  // lista de candidatos con sus pings individuales.
+  // Descubre servidores cercanos y los pinguea para que el técnico ELIJA contra
+  // cuál medir (radiogroup seleccionable). Luego mide latencia con varias
+  // muestras, descarga y sube con throughput en vivo contra el servidor elegido.
+  // Si el servidor elegido no responde, el motor cae a Cloudflare (se avisa).
+  // Si no se elige ninguno, el motor auto-selecciona el más cercano/mejor ping.
   function wireSpeedtestForm(formEl) {
     if (formEl.dataset.nativeWired === '1') return;
     formEl.dataset.nativeWired = '1';
@@ -1653,11 +1697,13 @@
           <span class="speedtest-server-label">Servidor seleccionado</span>
           <span class="speedtest-server-name" data-slot="server-name">— pendiente —</span>
         </div>
-        <button type="button" class="speedtest-server-toggle" data-action="toggle-servers">
+        <button type="button" class="speedtest-server-toggle" data-action="toggle-servers" aria-expanded="false" aria-controls="speedtest-server-list">
           <span data-slot="server-count">0</span> servidores disponibles
           <span class="previous-caret" data-slot="servers-caret">▾</span>
         </button>
-        <div class="speedtest-server-list" data-slot="server-list" hidden></div>
+        <div class="speedtest-server-status" data-slot="discover-status" hidden></div>
+        <button type="button" class="speedtest-server-refresh" data-action="discover-servers" hidden>↻ Buscar servidores</button>
+        <div class="speedtest-server-list" id="speedtest-server-list" data-slot="server-list" role="radiogroup" aria-label="Servidores disponibles para el speedtest" hidden></div>
       </div>
 
       <div class="speedtest-gauges">
@@ -1685,8 +1731,15 @@
 
     const $ = (s) => panel.querySelector(`[data-slot="${s}"]`);
     const runBtn = panel.querySelector('[data-action="run-speedtest"]');
+    const toggleBtn = panel.querySelector('[data-action="toggle-servers"]');
+    const refreshBtn = panel.querySelector('[data-action="discover-servers"]');
     let testStartedAt = null;
     let elapsedTimer = null;
+
+    // Estado del selector de servidores
+    let availableServers = [];   // últimos servidores descubiertos
+    let chosenServer = null;     // servidor elegido por el técnico (o el recomendado)
+    let discovering = false;     // descubrimiento en curso
 
     function setProgress(pct, hue) {
       $('bar').style.width = `${Math.max(0, Math.min(100, pct))}%`;
@@ -1697,28 +1750,135 @@
       return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
     }
 
-    function renderServers(servers) {
+    // Latido del servidor elegido en la tarjeta de cabecera
+    function setChosenName(label) {
+      $('server-name').textContent = label || '— pendiente —';
+    }
+
+    // Marca visualmente el item elegido y sincroniza aria-checked + estado
+    function markChosen(id) {
+      chosenServer = availableServers.find((s) => s.id === id) || null;
+      const items = $('server-list').querySelectorAll('.speedtest-server-item');
+      items.forEach((it) => {
+        const on = it.dataset.serverId === id;
+        it.classList.toggle('selected', on);
+        it.setAttribute('aria-checked', String(on));
+        it.tabIndex = on ? 0 : -1; // patrón radiogroup: solo el elegido es tabbable
+      });
+      setChosenName(chosenServer ? chosenServer.label : null);
+    }
+
+    // Pinta la lista como radiogroup seleccionable. `recommendedId` recibe el badge.
+    function renderServers(servers, recommendedId) {
       const list = $('server-list');
       $('server-count').textContent = String(servers.length);
+      if (!servers.length) {
+        list.innerHTML = '<div class="speedtest-server-empty">No se encontraron servidores.</div>';
+        return;
+      }
       list.innerHTML = servers.map((s) => {
         const ping = s.online && s.pingMs != null ? `${s.pingMs} ms` : 'sin conexión';
-        const selected = s.selected ? ' selected' : '';
+        const isChosen = chosenServer ? s.id === chosenServer.id : s.selected;
+        const isRecommended = recommendedId != null ? s.id === recommendedId : s.selected;
+        const cls = [
+          'speedtest-server-item',
+          isChosen ? 'selected' : '',
+          s.online ? '' : 'is-offline',
+        ].filter(Boolean).join(' ');
+        const place = [s.city, s.country].filter(Boolean).join(', ');
+        const sub = [safeText(s.sponsor || ''), safeText(place)].filter(Boolean).join(' · ');
         return `
-          <div class="speedtest-server-item${selected}">
+          <div class="${cls}" role="radio" aria-checked="${isChosen}"
+               tabindex="${isChosen ? 0 : -1}" data-server-id="${safeText(s.id)}"
+               aria-label="${safeText(s.label)}${s.online ? '' : ', sin conexión'}">
             <div class="speedtest-server-info">
               <strong>${safeText(s.label)}</strong>
-              ${s.selected ? '<span class="speedtest-server-badge">más cercano</span>' : ''}
+              ${sub ? `<span class="speedtest-server-sub">${sub}</span>` : ''}
+              ${isRecommended ? '<span class="speedtest-server-badge">Recomendado · más cercano · mejor ping</span>' : ''}
             </div>
             <span class="speedtest-server-ping ${s.online ? '' : 'offline'}">${ping}</span>
           </div>`;
       }).join('');
     }
 
-    panel.querySelector('[data-action="toggle-servers"]').addEventListener('click', () => {
+    // Abre/cierra la lista
+    function setListOpen(open) {
       const list = $('server-list');
-      list.hidden = !list.hidden;
-      $('servers-caret').textContent = list.hidden ? '▾' : '▴';
+      list.hidden = !open;
+      $('servers-caret').textContent = open ? '▴' : '▾';
+      toggleBtn.setAttribute('aria-expanded', String(open));
+    }
+
+    // Descubre servidores (NO mide banda). Maneja carga / error / reintento.
+    async function discoverServers({ openList = false } = {}) {
+      if (discovering) return;
+      discovering = true;
+      refreshBtn.hidden = true;
+      $('discover-status').hidden = false;
+      $('discover-status').className = 'speedtest-server-status';
+      $('discover-status').textContent = 'Buscando servidores…';
+      if (openList) setListOpen(true);
+      try {
+        const { servers, selected } = await WifixNative.speedtestServers();
+        availableServers = Array.isArray(servers) ? servers : [];
+        const recommended = selected || availableServers.find((s) => s.selected) || availableServers[0] || null;
+        // Pre-selección: el recomendado (online de menor ping / más cercano)
+        chosenServer = recommended;
+        renderServers(availableServers, recommended ? recommended.id : null);
+        setChosenName(recommended ? recommended.label : null);
+        $('discover-status').hidden = true;
+        if (availableServers.length) setListOpen(openList || !$('server-list').hidden);
+      } catch (err) {
+        console.error('[Wifix] speedtestServers:', err);
+        availableServers = [];
+        chosenServer = null;
+        $('discover-status').className = 'speedtest-server-status is-error';
+        $('discover-status').textContent = `No se pudieron buscar servidores: ${err.message || err}`;
+        refreshBtn.hidden = false;
+        setChosenName(null);
+      } finally {
+        discovering = false;
+      }
+    }
+
+    // Click sobre un item → elegirlo
+    $('server-list').addEventListener('click', (ev) => {
+      const item = ev.target.closest('.speedtest-server-item');
+      if (!item || !item.dataset.serverId) return;
+      markChosen(item.dataset.serverId);
     });
+
+    // Navegación por teclado del radiogroup (flechas + espacio/enter)
+    $('server-list').addEventListener('keydown', (ev) => {
+      const items = Array.from($('server-list').querySelectorAll('.speedtest-server-item'));
+      if (!items.length) return;
+      const current = document.activeElement.closest('.speedtest-server-item');
+      let idx = items.indexOf(current);
+      if (ev.key === 'ArrowDown' || ev.key === 'ArrowRight') {
+        ev.preventDefault();
+        idx = (idx + 1) % items.length;
+        items[idx].focus(); markChosen(items[idx].dataset.serverId);
+      } else if (ev.key === 'ArrowUp' || ev.key === 'ArrowLeft') {
+        ev.preventDefault();
+        idx = (idx - 1 + items.length) % items.length;
+        items[idx].focus(); markChosen(items[idx].dataset.serverId);
+      } else if ((ev.key === ' ' || ev.key === 'Enter') && current) {
+        ev.preventDefault();
+        markChosen(current.dataset.serverId);
+      }
+    });
+
+    toggleBtn.addEventListener('click', () => {
+      const willOpen = $('server-list').hidden;
+      setListOpen(willOpen);
+      // Si nunca se descubrió, dispara el descubrimiento al abrir
+      if (willOpen && !availableServers.length && !discovering) discoverServers({ openList: true });
+    });
+
+    refreshBtn.addEventListener('click', () => discoverServers({ openList: true }));
+
+    // Descubrimiento automático al cablear el form (no dispara el test pesado)
+    discoverServers();
 
     runBtn.addEventListener('click', async () => {
       runBtn.disabled = true;
@@ -1736,7 +1896,9 @@
       }, 250);
 
       try {
-        const r = await WifixNative.speedtest({
+        // Mide contra el servidor elegido; si no hay (lista vacía / discovery
+        // falló), se omite y el motor auto-elige el más cercano / mejor ping.
+        const opts = {
           onProgress: (p) => {
             if (p.phase === 'discover') {
               $('status').textContent = 'Descubriendo servidores cercanos…';
@@ -1758,22 +1920,42 @@
               setProgress(100, '#00ff9d');
             }
           },
-        });
+        };
+        if (chosenServer) opts.server = chosenServer;
+        const r = await WifixNative.speedtest(opts);
 
-        // Mostrar resultado final
-        $('server-name').textContent = r.serverName || 'Cloudflare';
-        renderServers(r.servers || []);
+        // latencyMs puede no ser finito (NaN/null al serializar) → mostrar "—"
+        const latency = Number.isFinite(r.latencyMs) ? `${r.latencyMs} ms` : '—';
+
+        // Mostrar resultado final — servidor honesto (sin "Cloudflare" hardcodeado)
+        $('server-name').textContent = r.serverName || '— sin nombre —';
+        // Refresca la lista con los datos del motor (pings actualizados), pero
+        // conserva como elegido el servidor realmente medido.
+        if (Array.isArray(r.servers) && r.servers.length) {
+          availableServers = r.servers;
+          if (r.selectedServer) chosenServer = r.selectedServer;
+          renderServers(availableServers, chosenServer ? chosenServer.id : null);
+        }
         $('dl').textContent = r.downloadMbps;
         $('ul').textContent = r.uploadMbps;
-        $('latency').textContent = `Latencia ${r.latencyMs} ms`;
+        $('latency').textContent = `Latencia ${latency}`;
         $('jitter').textContent = `Jitter ${r.jitterMs} ms`;
         $('loss').textContent = `Loss ${r.packetLossPercent}%`;
-        $('status').style.color = '#3fb950';
-        $('status').textContent = `↓ ${r.downloadMbps} / ↑ ${r.uploadMbps} Mbps · ${r.latencyMs} ms · Cloudflare ${r.colo || ''}`.trim();
+
+        const place = [r.city, r.country].filter(Boolean).join(', ');
+        if (r.measuredVia === 'cloudflare-fallback') {
+          // El servidor elegido no respondió: se cayó a Cloudflare. Avisar.
+          $('status').style.color = '#d29922';
+          $('status').textContent = `⚠ medido vía Cloudflare ${r.colo || ''} — el servidor no respondió · ↓ ${r.downloadMbps} / ↑ ${r.uploadMbps} Mbps · ${latency}`.trim();
+        } else {
+          $('status').style.color = '#3fb950';
+          const via = [safeText(r.serverName), safeText(place)].filter(Boolean).join(' · ');
+          $('status').textContent = `↓ ${r.downloadMbps} / ↑ ${r.uploadMbps} Mbps · ${latency} · ${via}`.trim();
+        }
 
         setField(formEl, 'downloadMbps', r.downloadMbps);
         setField(formEl, 'uploadMbps', r.uploadMbps);
-        setField(formEl, 'latencyMs', r.latencyMs);
+        setField(formEl, 'latencyMs', Number.isFinite(r.latencyMs) ? r.latencyMs : null);
         setField(formEl, 'jitterMs', r.jitterMs);
         setField(formEl, 'packetLossPercent', r.packetLossPercent);
         setField(formEl, 'serverName', r.serverName);
