@@ -29,7 +29,10 @@ const DIRS = [
 try {
   fs.rmSync(WWW, { recursive: true, force: true });
 } catch (e) {
-  if (e.code !== 'EBUSY') throw e;
+  // En Windows un hijo bloqueado (ej. el .apk servido por http-server) hace
+  // fallar el rmdir del directorio con ENOTEMPTY/EPERM/EACCES además de EBUSY.
+  // En todos esos casos seguimos: los assets se sobreescriben uno por uno.
+  if (!['EBUSY', 'ENOTEMPTY', 'EPERM', 'EACCES'].includes(e.code)) throw e;
   console.warn('[build-www] www/ bloqueado (servidor activo) — sobreescribiendo archivos individuales.');
 }
 fs.mkdirSync(WWW, { recursive: true });
