@@ -2,10 +2,11 @@
   "name": "wifix-webapp",
   "version": "0.2.0",
   "private": true,
-  "description": "Wifix mobile webapp + Capacitor Android shell with native network tools.",
+  "description": "Wifix Certificate — webapp móvil + shell Capacitor Android con herramientas de red nativas.",
   "scripts": {
     "build:web": "node scripts/build-www.mjs",
     "serve": "npx http-server . -p 5173 -c-1",
+    "smoke": "node scripts/smoke-ui.mjs",
     "cap:sync": "npm run build:web && cap sync android",
     "cap:open": "cap open android",
     "cap:run": "npm run build:web && cap run android"

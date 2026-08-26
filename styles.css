@@ -700,6 +700,12 @@ body {
   color: rgba(180, 210, 255, 0.55);
   margin-top: 3px;
 }
+/* Variante de marca: "Certificate" bajo el wordmark WIFIX. */
+.logo-sub-brand {
+  color: rgba(0, 224, 255, 0.78);
+  letter-spacing: 3.6px;
+  font-weight: 600;
+}
 .icon-btn {
   width: 40px;
   height: 40px;
@@ -3006,3 +3012,354 @@ body.console-fullscreen-open { overflow: hidden; }
   font-size: 11px;
   font-weight: 700;
 }
+
+/* ==========================================================================
+   ISP Monitor (campos 9-13) — panel de consulta por serial GPON / MAC HFC,
+   graficos de 24 h y barra de disponibilidad.
+   ========================================================================== */
+
+.isp-panel { padding: 2px 0 4px; }
+
+.isp-hint {
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: rgba(180, 210, 255, 0.7);
+  margin: 2px 0 10px;
+}
+.isp-hint strong { color: rgba(0, 224, 255, 0.9); font-weight: 600; }
+
+/* Guia plegable: que codigo de la etiqueta corresponde a cada equipo. */
+.isp-labels {
+  margin: 0 0 10px;
+  border: 1px solid rgba(0, 224, 255, 0.15);
+  border-radius: 10px;
+  background: rgba(0, 224, 255, 0.03);
+  padding: 8px 10px;
+}
+.isp-labels summary {
+  font-size: 11px;
+  color: rgba(0, 224, 255, 0.75);
+  cursor: pointer;
+  list-style: none;
+  letter-spacing: 0.3px;
+}
+.isp-labels summary::-webkit-details-marker { display: none; }
+.isp-labels summary::before { content: '＋ '; }
+.isp-labels[open] summary::before { content: '－ '; }
+.isp-labels ul {
+  margin: 8px 0 0;
+  padding-left: 16px;
+  font-size: 11px;
+  line-height: 1.7;
+  color: rgba(180, 210, 255, 0.75);
+}
+.isp-labels li strong { color: #f0f6ff; font-weight: 600; }
+.isp-labels p {
+  margin: 8px 0 0;
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: rgba(255, 176, 32, 0.85);
+}
+.isp-labels p strong { color: #ffb020; }
+
+.port-note strong { color: #f0f6ff; font-weight: 600; }
+
+.isp-input {
+  font-family: 'Orbitron', sans-serif;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+
+.isp-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 10px;
+}
+.isp-consult-btn {
+  flex: 1;
+  margin-top: 0;
+  padding: 11px 14px;
+  font-size: 13px;
+}
+
+.isp-feedback {
+  font-size: 11.5px;
+  line-height: 1.45;
+  margin-top: 8px;
+  min-height: 0;
+}
+.isp-feedback:empty { display: none; }
+.isp-feedback.ok { color: #37d67a; }
+.isp-feedback.warn { color: #ffb020; }
+.isp-feedback.error { color: #ff7a7a; }
+
+.isp-results { margin-top: 12px; }
+
+/* --- Estado del equipo / red / tecnologia -------------------------------- */
+.isp-status-row {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.isp-status-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 6px;
+  border-radius: 12px;
+  background: rgba(0, 224, 255, 0.05);
+  border: 1px solid rgba(0, 224, 255, 0.15);
+}
+.isp-status-label {
+  font-size: 9.5px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: rgba(180, 210, 255, 0.6);
+}
+.isp-badge {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  padding: 4px 9px;
+  border-radius: 999px;
+  text-align: center;
+  white-space: nowrap;
+}
+.isp-badge.ok { background: rgba(55, 214, 122, 0.16); color: #37d67a; border: 1px solid rgba(55, 214, 122, 0.35); }
+.isp-badge.fail { background: rgba(255, 92, 122, 0.16); color: #ff5c7a; border: 1px solid rgba(255, 92, 122, 0.35); }
+.isp-badge.unknown { background: rgba(255, 255, 255, 0.07); color: rgba(255, 255, 255, 0.6); border: 1px solid rgba(255, 255, 255, 0.15); }
+.isp-badge.tech {
+  background: rgba(0, 224, 255, 0.12);
+  color: #00e0ff;
+  border: 1px solid rgba(0, 224, 255, 0.35);
+  font-family: 'Orbitron', sans-serif;
+}
+
+.isp-event {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(0, 224, 255, 0.12);
+  margin-bottom: 10px;
+}
+.isp-event.alert {
+  background: rgba(255, 176, 32, 0.1);
+  border-color: rgba(255, 176, 32, 0.4);
+}
+.isp-event-title {
+  font-size: 9.5px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: rgba(180, 210, 255, 0.6);
+}
+.isp-event.alert .isp-event-title { color: rgba(255, 176, 32, 0.85); }
+.isp-event-desc { font-size: 12.5px; color: #f0f6ff; }
+
+.isp-section-title {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: rgba(0, 224, 255, 0.6);
+  padding: 14px 0 8px;
+}
+
+.isp-partial {
+  font-size: 11px;
+  line-height: 1.45;
+  color: #ffb020;
+  background: rgba(255, 176, 32, 0.08);
+  border: 1px solid rgba(255, 176, 32, 0.3);
+  border-radius: 10px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+}
+
+.isp-footnote {
+  font-size: 10px;
+  letter-spacing: 0.5px;
+  color: rgba(180, 210, 255, 0.45);
+  text-align: center;
+  padding: 14px 0 2px;
+}
+
+/* --- Historial de equipos en el puerto ---------------------------------- */
+.isp-hist {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.isp-hist-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(0, 224, 255, 0.04);
+  border: 1px solid rgba(0, 224, 255, 0.12);
+}
+.isp-hist-period {
+  font-size: 9.5px;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  color: rgba(180, 210, 255, 0.6);
+  min-width: 88px;
+}
+.isp-hist-equipos {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  flex: 1;
+}
+.isp-hist-eq {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+}
+.isp-hist-eq .mono {
+  font-family: 'Orbitron', sans-serif;
+  font-size: 10.5px;
+  letter-spacing: 0.5px;
+  color: #f0f6ff;
+}
+.isp-hist-eq .isp-badge { font-size: 9px; padding: 2px 7px; }
+.isp-hist-empty { font-size: 11px; color: rgba(255, 255, 255, 0.45); }
+.isp-hist-extra {
+  flex-basis: 100%;
+  font-size: 10.5px;
+  color: rgba(255, 176, 32, 0.85);
+}
+
+/* --- Estadisticas de caidas --------------------------------------------- */
+.isp-stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.isp-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 10px 4px;
+  border-radius: 12px;
+  background: rgba(0, 224, 255, 0.05);
+  border: 1px solid rgba(0, 224, 255, 0.15);
+}
+.isp-stat-value {
+  font-family: 'Orbitron', sans-serif;
+  font-size: 20px;
+  font-weight: 700;
+  color: #00e0ff;
+  line-height: 1;
+}
+.isp-stat-label {
+  font-size: 9px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: rgba(180, 210, 255, 0.6);
+  text-align: center;
+  line-height: 1.3;
+}
+
+/* --- Barra de disponibilidad (serie 0/1) -------------------------------- */
+.band-block { margin-bottom: 12px; }
+.band-label {
+  font-size: 10.5px;
+  color: rgba(180, 210, 255, 0.7);
+  margin-bottom: 5px;
+}
+.band-track {
+  display: flex;
+  gap: 2px;
+  height: 22px;
+  border-radius: 6px;
+  overflow: hidden;
+}
+.band-cell {
+  flex: 1;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.1);
+}
+.band-cell.up { background: linear-gradient(180deg, #37d67a 0%, #23a75a 100%); }
+.band-cell.down { background: linear-gradient(180deg, #ff5c7a 0%, #d63a58 100%); }
+.band-cell.unknown { background: rgba(255, 255, 255, 0.12); }
+.band-axis {
+  display: flex;
+  justify-content: space-between;
+  font-size: 9.5px;
+  color: rgba(180, 210, 255, 0.5);
+  margin-top: 4px;
+}
+
+/* --- Graficos de linea --------------------------------------------------- */
+.isp-chart-card {
+  padding: 10px 10px 6px;
+  border-radius: 12px;
+  background: rgba(0, 224, 255, 0.04);
+  border: 1px solid rgba(0, 224, 255, 0.14);
+  margin-bottom: 10px;
+}
+.isp-chart-title {
+  font-size: 10.5px;
+  letter-spacing: 0.6px;
+  color: rgba(180, 210, 255, 0.75);
+  margin-bottom: 4px;
+}
+.chart-block { position: relative; }
+.chart-unit {
+  position: absolute;
+  top: 0;
+  right: 2px;
+  font-size: 9px;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  color: rgba(180, 210, 255, 0.45);
+}
+.chart-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  overflow: visible;
+}
+.chart-grid {
+  stroke: rgba(0, 224, 255, 0.12);
+  stroke-width: 1;
+  stroke-dasharray: 3 4;
+}
+.chart-axis {
+  fill: rgba(180, 210, 255, 0.5);
+  font-size: 8px;
+  font-family: 'Inter', sans-serif;
+}
+.chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding-top: 4px;
+}
+.chart-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10.5px;
+  color: rgba(180, 210, 255, 0.8);
+}
+.chart-legend-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  display: inline-block;
+}
+
+/* Aviso cuando la operadora no expone el detalle puerto a puerto. */
+.port-note { text-align: left; line-height: 1.5; }

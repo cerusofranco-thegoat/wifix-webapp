@@ -1,6 +1,6 @@
 {
   "appId": "com.tulpa.wifix",
-  "appName": "Wifix",
+  "appName": "Wifix Certificate",
   "webDir": "www",
   "server": {
     "androidScheme": "http",

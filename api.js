@@ -183,27 +183,165 @@
       ],
     };
   }
-  function mockNearbyNaps() {
-    // Clúster de NAPs alrededor de lat -0.1800, lng -78.4680 (Quito, sector norte)
-    // Las coordenadas están separadas decenas/centenas de metros entre sí.
-    // distanceMeters es fallback si no hay coordenada GPS capturada en el cliente.
-    return [
-      { napCode: 'NAP-12-04-3', latitude: -0.18012, longitude: -78.46835, occupiedPorts: 11, totalPorts: 16 },
-      { napCode: 'NAP-12-05-1', latitude: -0.18154, longitude: -78.46910, occupiedPorts: 6,  totalPorts: 8  },
-      { napCode: 'NAP-12-06-2', latitude: -0.18220, longitude: -78.46760, occupiedPorts: 4,  totalPorts: 8  },
-      { napCode: 'NAP-13-01-1', latitude: -0.17890, longitude: -78.46650, occupiedPorts: 14, totalPorts: 16 },
-      { napCode: 'NAP-13-02-4', latitude: -0.17950, longitude: -78.46995, occupiedPorts: 3,  totalPorts: 8  },
-      { napCode: 'NAP-11-09-2', latitude: -0.18380, longitude: -78.46820, occupiedPorts: 16, totalPorts: 16 },
+  // Genera NAPs mock alrededor de una coordenada, con la misma forma que
+  // devuelve la API de operadora (/api/tec/naps/{lat},{lng}).
+  function mockNearbyNaps(coords) {
+    const lat = coords && isFinite(coords.latitude) ? coords.latitude : -0.1800;
+    const lng = coords && isFinite(coords.longitude) ? coords.longitude : -78.4680;
+    const offsets = [
+      [20, 0.6], [47, 2.1], [61, 3.4], [73, 4.8], [92, 1.2], [113, 5.6],
     ];
+    const used = [4, 3, 2, 0, 2, 1];
+    return offsets.map(function (pair, i) {
+      const meters = pair[0];
+      const bearing = pair[1];
+      const dLat = (meters * Math.cos(bearing)) / 111320;
+      const dLng = (meters * Math.sin(bearing)) / (111320 * Math.cos(lat * Math.PI / 180));
+      const total = i % 2 === 0 ? 8 : 16;
+      return {
+        napCode: 'NAP-' + (12 + i) + '-0' + ((i % 6) + 1),
+        latitude: lat + dLat,
+        longitude: lng + dLng,
+        distanceMeters: meters,
+        occupiedPorts: used[i],
+        totalPorts: total,
+        freePorts: total - used[i],
+      };
+    });
   }
   function mockNapPorts(napCode) {
+    const ports = Array.from({ length: 16 }, function (_, i) {
+      const occupied = i % 3 !== 0;
+      const port = { portNumber: i + 1, occupied: occupied };
+      if (occupied) {
+        port.clientAccountNumber = 'WX-' + (100000 + i);
+        port.clientStatus = i % 7 === 0 ? 'S' : 'A';
+      }
+      return port;
+    });
     return {
       napCode: napCode,
-      ports: Array.from({ length: 16 }, (_, i) => ({
-        portNumber: i + 1,
-        occupied: i % 3 !== 0,
-        ...(i % 3 !== 0 ? { clientAccountNumber: 'WX-' + (100000 + i), clientStatus: i % 7 === 0 ? 'S' : 'A' } : {}),
-      })),
+      ports: ports,
+      detailAvailable: true,
+      occupiedPorts: ports.filter(function (p) { return p.occupied; }).length,
+      totalPorts: ports.length,
+    };
+  }
+
+  // --- ISP Monitor: ficha del terminal y series de 24 h -------------------
+  // Los mocks replican la forma que ya devuelve el backend con la API real:
+  // 288 muestras de 5 minutos, `online` para el terminal y `terminalsOnline`
+  // (cantidad de equipos del nodo) para la red.
+  function mockStamps(n, stepMs) {
+    const now = Date.now();
+    const out = [];
+    for (let i = n - 1; i >= 0; i--) out.push(new Date(now - i * stepMs).toISOString());
+    return out;
+  }
+  function mockSeries(id, scope, metric) {
+    const stamps = mockStamps(288, 300000);
+    let keys = [];
+    const points = stamps.map(function (t, i) {
+      // Perfil determinista por muestra: sin Math.random para que no "baile"
+      // entre re-renders del panel.
+      const wave = Math.sin((i / 288) * Math.PI * 2);
+      if (metric === 'status') {
+        if (scope === 'network') {
+          keys = ['terminalsOnline'];
+          // El nodo pierde un par de equipos en la madrugada.
+          const dip = i > 60 && i < 78 ? 2 : 0;
+          return { t: t, values: { terminalsOnline: 18 - dip } };
+        }
+        keys = ['online'];
+        const down = i > 63 && i < 72;
+        return { t: t, values: { online: down ? 0 : 1 } };
+      }
+      if (metric === 'snr') {
+        keys = ['snrDown', 'snrUp'];
+        const base = scope === 'terminal' ? 35 : 37;
+        return {
+          t: t,
+          values: {
+            snrDown: Math.round((base + wave * 2.5) * 10) / 10,
+            snrUp: Math.round((base - 4 + wave * 1.8) * 10) / 10,
+          },
+        };
+      }
+      keys = ['corrected', 'uncorrected'];
+      const spike = i > 63 && i < 72 ? 3 : 1;
+      return {
+        t: t,
+        values: {
+          corrected: Math.round((1.2 + Math.abs(wave) * 1.5) * spike * 1000) / 1000,
+          uncorrected: Math.round((0.05 + Math.abs(wave) * 0.12) * spike * 1000) / 1000,
+        },
+      };
+    });
+
+    // SNR y codewords llegan desglosados por canal upstream (formato DOCSIS
+    // real): dos canales, cada uno con su propia serie.
+    let channels = [];
+    if (metric === 'snr' || metric === 'codewords') {
+      channels = [
+        { label: 'Logical Upstream Channel 0/1.0/0', network: '2G-2', ifIndex: 5000016, keys: keys, points: points },
+        {
+          label: 'Logical Upstream Channel 0/1.1/0', network: '2G-2 v', ifIndex: 5000018, keys: keys,
+          points: points.map(function (p) {
+            const shifted = {};
+            keys.forEach(function (k) { shifted[k] = Math.round((p.values[k] * 0.97) * 1000) / 1000; });
+            return { t: p.t, values: shifted };
+          }),
+        },
+      ];
+    }
+
+    return {
+      id: id, scope: scope, metric: metric,
+      keys: keys, points: points, channels: channels, recognized: true, raw: null,
+      fetchedAt: nowIso(),
+    };
+  }
+  function mockTerminalSnapshot(id) {
+    const isMac = /^[0-9A-F]{12}$/i.test(String(id).replace(/[:-]/g, ''));
+    return {
+      id: id,
+      found: true,
+      online: true,
+      technology: isMac ? 'HFC' : 'GPON',
+      city: 'Quito',
+      networkIds: [9198],
+      event: { active: false, description: null },
+      history: [
+        { period: 'LastHour', ids: [id], statuses: ['up'], drop: null, events: null },
+        { period: 'LastDay', ids: [id], statuses: ['up'], drop: null, events: null },
+        { period: 'LastWeek', ids: [id], statuses: ['up'], drop: null, events: null },
+        { period: 'LastMonth', ids: ['ZTEGD0BB8294', id], statuses: ['down', 'up'], drop: null, events: null },
+      ],
+      fields: [
+        { key: 'device', path: 'device', value: 9919 },
+        { key: 'ifIndex', path: 'ifIndex', value: 285282307 },
+        { key: 'index', path: 'index', value: 11 },
+      ],
+      raw: null,
+      fetchedAt: nowIso(),
+    };
+  }
+  function mockDiagnostics(id) {
+    const isMac = /^[0-9A-F]{12}$/i.test(String(id).replace(/[:-]/g, ''));
+    // SNR y codewords son métricas DOCSIS: en GPON la operadora responde 204.
+    const docsis = function (scope, metric) {
+      return isMac
+        ? mockSeries(id, scope, metric)
+        : { id: id, scope: scope, metric: metric, keys: [], points: [], channels: [], recognized: true, raw: null, fetchedAt: nowIso() };
+    };
+    return {
+      id: id,
+      terminal: mockTerminalSnapshot(id),
+      status: { terminal: mockSeries(id, 'terminal', 'status'), network: mockSeries(id, 'network', 'status') },
+      snr: { terminal: docsis('terminal', 'snr'), network: docsis('network', 'snr') },
+      codewords: { terminal: docsis('terminal', 'codewords'), network: docsis('network', 'codewords') },
+      errors: [],
+      fetchedAt: nowIso(),
     };
   }
   function mockNetworkMetrics(accountNumber) {
@@ -463,13 +601,53 @@
     },
 
     // ---- Diagnóstico de Red (campos 6, 8-14, 19-21) ------------------------
-    async getNearbyNaps(accountNumber) {
+    // Campo 6: NAPs cercanas a una coordenada (GPS del técnico o de la tarea).
+    // La API de operadora indexa por lat/lng, no por número de cuenta.
+    async getNearbyNaps(coords) {
+      if (!coords || !isFinite(coords.latitude) || !isFinite(coords.longitude)) {
+        throw new Error('Se necesita una coordenada (lat/lng) para buscar NAPs.');
+      }
       if (this.useRealApi) {
-        return fetchJson('GET', '/accounts/' + encodeURIComponent(accountNumber) + '/nearby-naps');
+        return fetchJson(
+          'GET',
+          '/naps/nearby?lat=' + encodeURIComponent(coords.latitude) +
+            '&lng=' + encodeURIComponent(coords.longitude),
+        );
       }
       await delay(80);
-      return mockNearbyNaps();
+      return mockNearbyNaps(coords);
     },
+
+    // ---- ISP Monitor por serial GPON / MAC HFC (campos 9-13) --------------
+    // Ficha del equipo: estado del terminal, de la red y evento asociado.
+    async getTerminal(id) {
+      if (this.useRealApi) {
+        return fetchJson('GET', '/terminals/' + encodeURIComponent(id));
+      }
+      await delay(80);
+      return mockTerminalSnapshot(id);
+    },
+    // Panel completo: ficha + las 6 series de 24 h en una sola llamada.
+    async getTerminalDiagnostics(id) {
+      if (this.useRealApi) {
+        return fetchJson('GET', '/terminals/' + encodeURIComponent(id) + '/diagnostics');
+      }
+      await delay(140);
+      return mockDiagnostics(id);
+    },
+    // Serie suelta: scope = 'terminal' | 'network', metric = 'status' | 'snr' | 'codewords'.
+    async getTerminalSeries(id, scope, metric) {
+      if (this.useRealApi) {
+        return fetchJson(
+          'GET',
+          '/terminals/' + encodeURIComponent(id) + '/series/' +
+            encodeURIComponent(scope) + '/' + encodeURIComponent(metric),
+        );
+      }
+      await delay(80);
+      return mockSeries(id, scope, metric);
+    },
+
     async getNapPorts(napCode) {
       if (this.useRealApi) {
         return fetchJson('GET', '/naps/' + encodeURIComponent(napCode) + '/ports');

@@ -1,6 +1,7 @@
-# Wifix WebApp
+# Wifix Certificate — WebApp
 
-Mobile-first technician webapp for fiber-optic installations and service visits.
+Webapp mobile-first de Wifix Certificate para tecnicos de campo: instalaciones
+de fibra optica y visitas tecnicas.
 
 ## Features
 

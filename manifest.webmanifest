@@ -1,7 +1,7 @@
 {
-  "name": "Wifix Técnico",
-  "short_name": "Wifix",
-  "description": "Aplicación de campo para técnicos de fibra óptica Wifix",
+  "name": "Wifix Certificate",
+  "short_name": "Wifix Cert",
+  "description": "Wifix Certificate — app de campo para técnicos de fibra óptica",
   "start_url": ".",
   "display": "standalone",
   "orientation": "portrait",

@@ -527,11 +527,15 @@ function _napGenTaskId() {
   return `TASK/${num6}/${year}`;
 }
 
-// Devuelve distancia en metros desde coords capturadas a la NAP,
-// o null si no hay coordenadas.
+// Distancia en metros a la NAP. Se prefiere la que calcula la operadora
+// (viene en la respuesta de /api/tec/naps); si no viene, se calcula con
+// Haversine desde la coordenada capturada.
 function _napDistanceToNap(nap) {
+  if (nap && isFinite(nap.distanceMeters) && nap.distanceMeters > 0) {
+    return nap.distanceMeters;
+  }
   const c = _napPanelState.coords;
-  if (!c) return null;
+  if (!c || !nap || !isFinite(nap.latitude) || !isFinite(nap.longitude)) return null;
   return _napHaversineMeters(c.latitude, c.longitude, nap.latitude, nap.longitude);
 }
 
@@ -552,25 +556,28 @@ function _napOccupancyPct(nap) {
 function _napOccupancyBar(nap) {
   const pct = _napOccupancyPct(nap);
   const cls = pct >= 100 ? 'full' : pct >= 75 ? 'high' : pct >= 50 ? 'mid' : 'low';
+  const free = nap.freePorts !== undefined
+    ? nap.freePorts
+    : Math.max(0, (nap.totalPorts || 0) - (nap.occupiedPorts || 0));
   return `
     <div class="nap-occ-bar-wrap" role="progressbar" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100" aria-label="Ocupación ${pct}%">
       <div class="nap-occ-bar ${cls}" style="width:${pct}%"></div>
     </div>
-    <span class="nap-occ-label">${nap.occupiedPorts}/${nap.totalPorts} puertos · ${pct}%</span>`;
+    <span class="nap-occ-label">${nap.occupiedPorts}/${nap.totalPorts} ocupados · ${free} libre${free === 1 ? '' : 's'} · ${pct}%</span>`;
 }
 
 // Renderiza la lista de tarjetas NAP.
 function _renderNapCards(naps, scope) {
-  const hasCoords = !!_napPanelState.coords;
-
-  // Si hay coordenadas, ordenar por distancia ascendente.
-  const sorted = hasCoords
-    ? [...naps].sort((a, b) => _napHaversineMeters(
-        _napPanelState.coords.latitude, _napPanelState.coords.longitude, a.latitude, a.longitude
-      ) - _napHaversineMeters(
-        _napPanelState.coords.latitude, _napPanelState.coords.longitude, b.latitude, b.longitude
-      ))
-    : naps;
+  // Orden por distancia ascendente. La API ya las devuelve ordenadas, pero se
+  // reordena por si la distancia se calculó localmente (Haversine).
+  const sorted = [...naps].sort((a, b) => {
+    const da = _napDistanceToNap(a);
+    const db = _napDistanceToNap(b);
+    if (da === null && db === null) return 0;
+    if (da === null) return 1;
+    if (db === null) return -1;
+    return da - db;
+  });
 
   const slot = scope.querySelector('[data-slot="nap-cards"]');
   if (!slot) return;
@@ -618,10 +625,22 @@ async function _renderGponSummary(scope) {
     const occ = nap ? `${nap.occupiedPorts}/${nap.totalPorts}` : '—';
 
     // Puerto libre sugerido: primer puerto con occupied=false.
+    // Si la operadora no expone el detalle puerto a puerto, se informa el
+    // número de puertos libres que sí viene en el listado de NAPs.
     const freePort = data.ports ? data.ports.find(p => !p.occupied) : null;
-    const freeTxt = freePort
-      ? `Puerto ${pad(freePort.portNumber)} (libre)`
-      : 'Sin puertos libres disponibles';
+    let freeTxt;
+    if (freePort) {
+      freeTxt = `Puerto ${pad(freePort.portNumber)} (libre)`;
+    } else if (data.detailAvailable === false) {
+      const libres = nap
+        ? (nap.freePorts !== undefined ? nap.freePorts : Math.max(0, nap.totalPorts - nap.occupiedPorts))
+        : null;
+      freeTxt = libres === null
+        ? 'Detalle por puerto no disponible'
+        : `${libres} puerto${libres === 1 ? '' : 's'} libre${libres === 1 ? '' : 's'} (sin detalle por puerto)`;
+    } else {
+      freeTxt = 'Sin puertos libres disponibles';
+    }
 
     // TODO: a futuro -> enviar selección a API GPON Xtreme (POST .../assign-nap)
 
@@ -650,12 +669,45 @@ async function _renderGponSummary(scope) {
   }
 }
 
-// Conecta los botones del panel NAP: GPS, ver puertos, selección GPON.
-function _wireNapPanel(scope, naps) {
-  // Guardamos los datos para acceso en el bloque resumen.
-  scope._napData = naps;
+// Consulta las NAPs cercanas a la coordenada capturada y pinta las tarjetas.
+// La API de operadora (TEC) indexa por lat/lng, así que sin coordenada no hay
+// nada que pedir: se muestra el aviso en vez de una lista vacía.
+async function _napFetchAndRender(scope) {
+  const slot = scope.querySelector('[data-slot="nap-cards"]');
+  if (!slot) return;
+  const coords = _napPanelState.coords;
 
-  // --- Botón "Usar mi ubicación" ---
+  if (!coords) {
+    slot.innerHTML = `<div class="detail-empty">Captura tu ubicación (GPS o lat/lng manual) para buscar las NAPs del sector.</div>`;
+    return;
+  }
+
+  slot.innerHTML = `<div class="detail-loading">Buscando NAPs cercanas…</div>`;
+  try {
+    const naps = await WifixAPI.getNearbyNaps(coords);
+    _napPanelState.naps = naps || [];
+    scope._napData = _napPanelState.naps;
+
+    if (_napPanelState.naps.length === 0) {
+      slot.innerHTML = `<div class="detail-empty">No hay NAPs registradas cerca de esta coordenada.</div>`;
+      return;
+    }
+    // Si la NAP seleccionada ya no está en el resultado, se limpia la selección.
+    if (_napPanelState.selectedNap &&
+        !_napPanelState.naps.some(n => n.napCode === _napPanelState.selectedNap)) {
+      _napPanelState.selectedNap = null;
+      await _renderGponSummary(scope);
+    }
+    _renderNapCards(_napPanelState.naps, scope);
+    _wireNapCardButtons(scope, _napPanelState.naps);
+  } catch (err) {
+    console.error('[Wifix] NAPs cercanas', err);
+    slot.innerHTML = `<div class="detail-error">${escapeHtml(err.message || 'No se pudieron consultar las NAPs.')}</div>`;
+  }
+}
+
+// Conecta los botones del panel NAP: GPS, coordenadas manuales, selección GPON.
+function _wireNapPanel(scope) {
   const gpsBtn = scope.querySelector('[data-action="nap-gps"]');
   const gpsStatus = scope.querySelector('[data-slot="nap-gps-status"]');
   const latInput = scope.querySelector('[data-field="nap-lat"]');
@@ -667,9 +719,7 @@ function _wireNapPanel(scope, naps) {
     lngInput.value = lng;
     gpsStatus.textContent = `Ubicación capturada (precisión ±${acc != null ? acc.toFixed(0) : '?'}m)`;
     gpsStatus.className = 'nap-gps-status ok';
-    // Redibujar tarjetas con distancias calculadas.
-    _renderNapCards(naps, scope);
-    _wireNapCardButtons(scope, naps);
+    _napFetchAndRender(scope);
   }
 
   gpsBtn.addEventListener('click', async () => {
@@ -689,7 +739,7 @@ function _wireNapPanel(scope, naps) {
     }
   });
 
-  // Ingreso manual: recalcular al cambiar lat o lng.
+  // Ingreso manual: reconsultar al cambiar lat o lng.
   function onManualCoords() {
     const lat = parseFloat(latInput.value);
     const lng = parseFloat(lngInput.value);
@@ -697,14 +747,10 @@ function _wireNapPanel(scope, naps) {
     _napPanelState.coords = { latitude: lat, longitude: lng, accuracy: null };
     gpsStatus.textContent = 'Coordenadas ingresadas manualmente.';
     gpsStatus.className = 'nap-gps-status ok';
-    _renderNapCards(naps, scope);
-    _wireNapCardButtons(scope, naps);
+    _napFetchAndRender(scope);
   }
   latInput.addEventListener('change', onManualCoords);
   lngInput.addEventListener('change', onManualCoords);
-
-  // Botones de tarjetas.
-  _wireNapCardButtons(scope, naps);
 }
 
 function _wireNapCardButtons(scope, naps) {
@@ -727,7 +773,8 @@ function _wireNapCardButtons(scope, naps) {
 }
 
 // Renderiza el panel NAP completo (devuelve HTML string + activa lógica tras inserción).
-function renderNapPanel(naps) {
+// Las NAPs no se piden aquí: se consultan cuando hay coordenada (ver _napFetchAndRender).
+function renderNapPanel() {
   // Generar taskId una sola vez por apertura (si ya hay uno no lo regeneramos).
   if (!_napPanelState.taskId) {
     _napPanelState.taskId = _napGenTaskId();
@@ -736,10 +783,6 @@ function renderNapPanel(naps) {
 
   const taskId = _napPanelState.taskId;
   const fechaHora = formatDate(_napPanelState.openedAt);
-
-  if (!naps || naps.length === 0) {
-    return `<div class="detail-empty">No hay NAPs en el sector.</div>`;
-  }
 
   return `
     <div class="nap-panel" data-panel="nap-gpon">
@@ -779,7 +822,9 @@ function renderNapPanel(naps) {
 
       <!-- 3) Tarjetas de NAPs -->
       <div class="nap-section-title">NAPs disponibles en el sector</div>
-      <div data-slot="nap-cards"></div>
+      <div data-slot="nap-cards">
+        <div class="detail-empty">Captura tu ubicación (GPS o lat/lng manual) para buscar las NAPs del sector.</div>
+      </div>
 
       <!-- 4) Bloque resumen GPON -->
       <div data-slot="gpon-summary" hidden></div>
@@ -787,14 +832,13 @@ function renderNapPanel(naps) {
     </div>`;
 }
 
-// Wrapper que carga NAPs y arma el panel completo (usado en SERVICIO_ITEMS.load).
-async function loadNapPanel(cuenta) {
-  const naps = await WifixAPI.getNearbyNaps(cuenta);
-  // Guardar en estado para que _bootNapPanel pueda acceder sin re-fetch.
-  _napPanelState.naps = naps;
-  // Resetear selectedNap al abrir (pero mantener coords y taskId si ya están).
+// Wrapper que arma el panel completo (usado en SERVICIO_ITEMS.load).
+// La consulta a la operadora ocurre cuando el técnico captura la coordenada.
+async function loadNapPanel() {
+  // Resetear selección y resultados al abrir (se mantienen coords y taskId).
   _napPanelState.selectedNap = null;
-  return renderNapPanel(naps);
+  _napPanelState.naps = [];
+  return renderNapPanel();
 }
 
 // Al terminar de insertar el HTML del panel, activa la lógica interactiva.
@@ -802,18 +846,18 @@ async function loadNapPanel(cuenta) {
 function _bootNapPanel(body) {
   const panel = body.querySelector('[data-panel="nap-gpon"]');
   if (!panel) return;
-  const naps = _napPanelState.naps;
-  _renderNapCards(naps, panel);
-  _wireNapPanel(panel, naps);
-}
-
-// Función heredada — se mantiene para backward-compat con cualquier llamada externa.
-function renderNapsList(naps) {
-  if (!naps || naps.length === 0) return `<div class="detail-empty">No hay NAPs cercanas.</div>`;
-  return renderNapPanel(naps);
+  _wireNapPanel(panel);
+  // Si ya había una coordenada de una apertura anterior, se reconsulta sola.
+  if (_napPanelState.coords) _napFetchAndRender(panel);
 }
 
 function renderPortsTable(napPorts) {
+  // La API de operadora aún no expone el detalle cliente por cliente:
+  // en ese caso se muestra el aviso en vez de una rejilla vacía.
+  if (!napPorts.ports || napPorts.ports.length === 0) {
+    const note = napPorts.note || 'No hay detalle de puertos para esta NAP.';
+    return `<div class="detail-empty port-note">${escapeHtml(note)}</div>`;
+  }
   return `
     <div class="port-grid">
       ${napPorts.ports.map(p => `
@@ -827,23 +871,717 @@ function renderPortsTable(napPorts) {
     </div>`;
 }
 
-function renderMetrics(m) {
-  const tech = m.technology;
-  const rxTx = m.signalLevels
-    ? `<div class="mini-row"><span class="mr-label">RX / TX</span><span class="mr-value">${m.signalLevels.rxDbm} dBm / ${m.signalLevels.txDbm} dBm</span></div>`
-    : '';
-  const snr = m.signalToNoiseDb !== undefined
-    ? `<div class="mini-row"><span class="mr-label">SNR (HFC)</span><span class="mr-value">${m.signalToNoiseDb} dB</span></div>` : '';
-  const fec = m.fecCorrectedPercent !== undefined
-    ? `<div class="mini-row"><span class="mr-label">FEC corregidos</span><span class="mr-value">${m.fecCorrectedPercent}%</span></div>
-       <div class="mini-row"><span class="mr-label">FEC sin corregir</span><span class="mr-value">${m.fecUncorrectedPercent}%</span></div>` : '';
+// ============================================================================
+// ISP Monitor (campos 9-13) — estado del equipo/red, señal a ruido, FEC y
+// caídas de las últimas 24 horas.
+//
+// La API de operadora indexa por SERIAL GPON (fibra) o MAC del cablemódem
+// (HFC), no por número de cuenta: el técnico escanea o escribe el identificador
+// del equipo y desde ahí se consultan los 7 endpoints en una sola llamada al
+// backend (/terminals/:id/diagnostics).
+// ============================================================================
+
+// Estado del panel por cuenta abierta.
+let _ispState = { id: null, data: null };
+
+/** Clave de localStorage donde se recuerda el equipo consultado por cuenta. */
+function _ispStorageKey(cuenta) {
+  return `wifix_terminal_id:${cuenta}`;
+}
+function _ispRememberId(cuenta, id) {
+  try { localStorage.setItem(_ispStorageKey(cuenta), id); } catch (_) { /* bloqueado */ }
+}
+function _ispRecallId(cuenta) {
+  try { return localStorage.getItem(_ispStorageKey(cuenta)) || ''; } catch (_) { return ''; }
+}
+
+// --- Formato ---------------------------------------------------------------
+
+/** Número con como máximo `dec` decimales y sin ceros sobrantes. */
+function _fmtNum(v, dec = 2) {
+  if (v === null || v === undefined || !isFinite(v)) return '—';
+  return String(Math.round(v * Math.pow(10, dec)) / Math.pow(10, dec));
+}
+
+/** "HH:mm" de un instante ISO; cadena vacía si no se puede parsear. */
+function _fmtHour(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return String(iso).slice(0, 5);
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+/** Etiqueta legible para el nombre de serie que devuelva la operadora. */
+const _ISP_KEY_LABELS = {
+  online: 'En línea', estado: 'Estado', status: 'Estado', up: 'En línea',
+  snrdown: 'Downstream', down: 'Downstream', downstream: 'Downstream',
+  snrup: 'Upstream', upstream: 'Upstream',
+  snr: 'SNR', mer: 'MER',
+  terminalsonline: 'Equipos en línea',
+  corrected: 'Corregidos', corregidos: 'Corregidos',
+  errors: 'Errores',
+  uncorrected: 'Sin corregir', uncorrectables: 'Sin corregir', sincorregir: 'Sin corregir',
+};
+function _ispKeyLabel(key) {
+  const flat = String(key).replace(/[^a-z0-9]/gi, '').toLowerCase();
+  if (_ISP_KEY_LABELS[flat]) return _ISP_KEY_LABELS[flat];
+  // camelCase / snake_case → "Camel case"
+  const words = String(key).replace(/[_-]+/g, ' ').replace(/([a-z0-9])([A-Z])/g, '$1 $2');
+  return words.charAt(0).toUpperCase() + words.slice(1).toLowerCase();
+}
+
+// --- Identificador del equipo ---------------------------------------------
+
+// La etiqueta de un ONT trae varios códigos y solo dos sirven para ISP
+// Monitor: el SERIAL GPON (4 letras + 8 hex, p. ej. ZTEGD52E1A9B) y la MAC
+// (12 hex). El D-SN y el EN que también vienen impresos los rechaza la API
+// con "Invalid serial number".
+const _ISP_GPON_SN_RE = /^[A-Z]{4}[0-9A-F]{8}$/;
+const _ISP_MAC_RE = /^[0-9A-F]{12}$/;
+
+// Etiquetas impresas que preceden al código y hay que quitar antes de validar.
+const _ISP_LABEL_RE = /^(GPON\s*[- ]?\s*SN|PON\s*[- ]?\s*SN|HOST\s*[- ]?\s*SN|D\s*[- ]?\s*SN|MAC(\s*ADDRESS)?|EN|S\/?N|SN)\s*[:=]?\s*/;
+
+/** Limpia un código leído: mayúsculas, sin etiqueta, sin separadores. */
+function _ispCleanCode(raw) {
+  return String(raw || '')
+    .toUpperCase()
+    .trim()
+    .replace(_ISP_LABEL_RE, '')
+    .replace(/[\s:_-]/g, '');
+}
+
+/**
+ * Elige, entre los códigos leídos de una etiqueta, el que ISP Monitor acepta.
+ * Prioriza el serial GPON sobre la MAC (la mayoría del parque es fibra).
+ * Devuelve null si ninguno tiene forma válida.
+ */
+function _ispPickTerminalId(rawValues) {
+  const cleaned = (rawValues || []).map(_ispCleanCode).filter(Boolean);
+  const gpon = cleaned.find(c => _ISP_GPON_SN_RE.test(c));
+  if (gpon) return { id: gpon, kind: 'GPON' };
+  const mac = cleaned.find(c => _ISP_MAC_RE.test(c));
+  if (mac) return { id: mac, kind: 'MAC' };
+  return null;
+}
+
+/** true si el texto ya tiene forma de serial GPON o de MAC. */
+function _ispIdLooksValid(value) {
+  const c = _ispCleanCode(value);
+  return _ISP_GPON_SN_RE.test(c) || _ISP_MAC_RE.test(c);
+}
+
+/** Paleta por posición de serie, coherente con el resto de la app. */
+const _ISP_COLORS = ['#00e0ff', '#7aa2ff', '#ffb020', '#ff5c7a', '#37d67a'];
+
+// --- Gráficos SVG ----------------------------------------------------------
+
+let _chartIdSeq = 0;
+
+/**
+ * Gráfico de líneas con área, sin dependencias.
+ * `series` = [{ label, color, points: [{ t, v }] }]
+ */
+function renderLineChart(series, opts = {}) {
+  const usable = (series || []).filter(s => s.points.some(p => isFinite(p.v)));
+  if (usable.length === 0) {
+    return `<div class="detail-empty">Sin datos para graficar.</div>`;
+  }
+
+  const W = 320, H = 118;
+  const padL = 36, padR = 10, padT = 12, padB = 22;
+  const plotW = W - padL - padR;
+  const plotH = H - padT - padB;
+
+  let min = Infinity, max = -Infinity, maxLen = 0;
+  usable.forEach(s => {
+    maxLen = Math.max(maxLen, s.points.length);
+    s.points.forEach(p => {
+      if (!isFinite(p.v)) return;
+      if (p.v < min) min = p.v;
+      if (p.v > max) max = p.v;
+    });
+  });
+  if (opts.minZero && min > 0) min = 0;
+  // Margen del 8 % arriba y abajo; si la serie es plana se abre un rango mínimo.
+  if (min === max) { min -= 1; max += 1; }
+  const span = max - min;
+  min -= span * 0.08;
+  max += span * 0.08;
+
+  const x = i => padL + (maxLen <= 1 ? plotW / 2 : (i / (maxLen - 1)) * plotW);
+  const y = v => padT + plotH - ((v - min) / (max - min)) * plotH;
+
+  const gridY = [0, 0.5, 1].map(f => padT + plotH * f);
+  const grid = gridY.map(gy =>
+    `<line x1="${padL}" y1="${gy.toFixed(1)}" x2="${W - padR}" y2="${gy.toFixed(1)}" class="chart-grid"/>`
+  ).join('');
+
+  const yLabels = [
+    { v: max, gy: gridY[0] },
+    { v: (max + min) / 2, gy: gridY[1] },
+    { v: min, gy: gridY[2] },
+  ].map(l =>
+    `<text x="${padL - 5}" y="${(l.gy + 3).toFixed(1)}" class="chart-axis" text-anchor="end">${escapeHtml(_fmtNum(l.v, 1))}</text>`
+  ).join('');
+
+  const paths = usable.map((s, si) => {
+    const color = s.color || _ISP_COLORS[si % _ISP_COLORS.length];
+    const gradId = `chartGrad${++_chartIdSeq}`;
+    const pts = s.points
+      .map((p, i) => (isFinite(p.v) ? `${x(i).toFixed(1)},${y(p.v).toFixed(1)}` : null))
+      .filter(Boolean);
+    if (pts.length === 0) return '';
+    const area = `${padL},${padT + plotH} ${pts.join(' ')} ${x(s.points.length - 1).toFixed(1)},${padT + plotH}`;
+    return `
+      <defs>
+        <linearGradient id="${gradId}" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="${color}" stop-opacity="0.28"/>
+          <stop offset="100%" stop-color="${color}" stop-opacity="0"/>
+        </linearGradient>
+      </defs>
+      <polygon points="${area}" fill="url(#${gradId})"/>
+      <polyline points="${pts.join(' ')}" fill="none" stroke="${color}" stroke-width="1.8"
+        stroke-linejoin="round" stroke-linecap="round"/>`;
+  }).join('');
+
+  // Eje X: primera, media y última muestra con hora.
+  const stamps = usable[0].points;
+  const xTicks = [0, Math.floor((stamps.length - 1) / 2), stamps.length - 1]
+    .filter((v, i, arr) => arr.indexOf(v) === i && v >= 0)
+    .map(i => {
+      const label = _fmtHour(stamps[i] && stamps[i].t);
+      if (!label) return '';
+      const anchor = i === 0 ? 'start' : i === stamps.length - 1 ? 'end' : 'middle';
+      return `<text x="${x(i).toFixed(1)}" y="${H - 6}" class="chart-axis" text-anchor="${anchor}">${escapeHtml(label)}</text>`;
+    }).join('');
+
+  const legend = usable.map((s, si) => `
+    <span class="chart-legend-item">
+      <span class="chart-legend-dot" style="background:${s.color || _ISP_COLORS[si % _ISP_COLORS.length]}"></span>
+      ${escapeHtml(s.label)}
+    </span>`).join('');
+
   return `
-    <div class="mini-row"><span class="mr-label">Tecnología</span><span class="mr-value">${escapeHtml(tech)}</span></div>
-    ${rxTx}
-    ${snr}
-    ${fec}
-    <div class="mini-row"><span class="mr-label">Caídas 24h</span><span class="mr-value">${m.outagesLast24h}</span></div>
-    <div class="mini-row"><span class="mr-label">Tráfico in / out</span><span class="mr-value">${m.trafficMbpsIn} / ${m.trafficMbpsOut} Mbps</span></div>`;
+    <div class="chart-block">
+      ${opts.unit ? `<div class="chart-unit">${escapeHtml(opts.unit)}</div>` : ''}
+      <svg class="chart-svg" viewBox="0 0 ${W} ${H}" role="img"
+        aria-label="${escapeHtml(opts.ariaLabel || 'Gráfico de las últimas 24 horas')}">
+        ${grid}${yLabels}${paths}${xTicks}
+      </svg>
+      <div class="chart-legend">${legend}</div>
+    </div>`;
+}
+
+/**
+ * Agrupa las muestras en `buckets` celdas. ISP Monitor manda 288 muestras
+ * (una cada 5 min): pintadas de a una quedarían de 1 px en el celular.
+ * Un bucket se marca "caído" si CUALQUIER muestra suya lo estuvo — nunca se
+ * esconde una caída corta.
+ */
+function _ispBucketStatus(points, key, buckets) {
+  if (points.length <= buckets) {
+    return points.map(p => {
+      const v = p.values ? p.values[key] : undefined;
+      return {
+        state: v === undefined ? 'unknown' : v > 0 ? 'up' : 'down',
+        from: p.t,
+        to: p.t,
+      };
+    });
+  }
+  const size = Math.ceil(points.length / buckets);
+  const out = [];
+  for (let i = 0; i < points.length; i += size) {
+    const slice = points.slice(i, i + size);
+    let anyDown = false, anyUp = false;
+    slice.forEach(p => {
+      const v = p.values ? p.values[key] : undefined;
+      if (v === undefined) return;
+      if (v > 0) anyUp = true; else anyDown = true;
+    });
+    out.push({
+      state: anyDown ? 'down' : anyUp ? 'up' : 'unknown',
+      from: slice[0].t,
+      to: slice[slice.length - 1].t,
+    });
+  }
+  return out;
+}
+
+/**
+ * Barra de disponibilidad: una celda por tramo (verde = en línea,
+ * rojo = alguna caída). Más legible que una línea para una serie 0/1.
+ */
+function renderStatusBand(series, label) {
+  const points = (series && series.points) || [];
+  if (points.length === 0) return `<div class="detail-empty">Sin datos de estado.</div>`;
+  const key = (series.keys && series.keys[0]) || 'online';
+
+  const buckets = _ispBucketStatus(points, key, 48);
+  const cells = buckets.map(b => {
+    const stateText = b.state === 'up' ? 'En línea' : b.state === 'down' ? 'Caído' : 'Sin dato';
+    const range = b.from === b.to
+      ? _fmtHour(b.from)
+      : `${_fmtHour(b.from)}–${_fmtHour(b.to)}`;
+    return `<span class="band-cell ${b.state}" title="${escapeHtml(range)} · ${stateText}"></span>`;
+  }).join('');
+
+  return `
+    <div class="band-block">
+      <div class="band-label">${escapeHtml(label)}</div>
+      <div class="band-track">${cells}</div>
+      <div class="band-axis">
+        <span>${escapeHtml(_fmtHour(points[0].t))}</span>
+        <span>${escapeHtml(_fmtHour(points[points.length - 1].t))}</span>
+      </div>
+    </div>`;
+}
+
+// --- Lectura de las series -------------------------------------------------
+
+/** Convierte una serie normalizada del backend al formato del gráfico. */
+function _ispSeriesToChart(series, keys) {
+  if (!series || !series.points || series.points.length === 0) return [];
+  const useKeys = keys && keys.length ? keys : series.keys || [];
+  return useKeys.map((key, i) => ({
+    label: _ispKeyLabel(key),
+    color: _ISP_COLORS[i % _ISP_COLORS.length],
+    points: series.points.map(p => ({ t: p.t, v: p.values ? p.values[key] : undefined })),
+  }));
+}
+
+/**
+ * Nombre corto de un canal DOCSIS. La operadora manda
+ * "Logical Upstream Channel 0/1.1/0" y el nodo por separado ("2G-2 v").
+ */
+function _ispChannelLabel(channel) {
+  const desc = String(channel.label || '')
+    .replace(/^Logical\s+Upstream\s+Channel\s*/i, 'Canal up ')
+    .replace(/^Logical\s+Downstream\s+Channel\s*/i, 'Canal down ')
+    .trim();
+  const name = desc || (channel.ifIndex !== null ? `ifIndex ${channel.ifIndex}` : 'Canal');
+  return channel.network ? `${name} · ${channel.network}` : name;
+}
+
+/** Tarjeta con título y gráfico. */
+function _ispChartCard(title, lines, opts) {
+  if (!lines || lines.length === 0) return '';
+  return `
+    <div class="isp-chart-card">
+      <div class="isp-chart-title">${escapeHtml(title)}</div>
+      ${renderLineChart(lines, opts)}
+    </div>`;
+}
+
+/**
+ * Tarjetas de una serie, contemplando el formato multicanal de DOCSIS.
+ *
+ * - Canal con UNA métrica (SNR) → un solo gráfico con una línea por canal:
+ *   comparar canales entre sí es justamente lo que hace el técnico.
+ * - Canal con VARIAS métricas (FEC corregidos / sin corregir) → un gráfico por
+ *   canal, porque mezclar 2 métricas × N canales en uno solo no se lee.
+ */
+function _ispSeriesCards(series, scopeTitle, opts) {
+  if (!series) return '';
+  const channels = series.channels || [];
+
+  if (channels.length === 0) {
+    return _ispChartCard(scopeTitle, _ispSeriesToChart(series), opts);
+  }
+
+  const keyCount = (channels[0].keys || []).length;
+
+  if (keyCount <= 1) {
+    const lines = channels.map((channel, i) => {
+      const key = (channel.keys || [])[0];
+      return {
+        label: _ispChannelLabel(channel),
+        color: _ISP_COLORS[i % _ISP_COLORS.length],
+        points: (channel.points || []).map(p => ({ t: p.t, v: key && p.values ? p.values[key] : undefined })),
+      };
+    }).filter(line => line.points.length > 0);
+    return _ispChartCard(scopeTitle, lines, opts);
+  }
+
+  return channels.map(channel => {
+    const lines = (channel.keys || []).map((key, i) => ({
+      label: _ispKeyLabel(key),
+      color: _ISP_COLORS[i % _ISP_COLORS.length],
+      points: (channel.points || []).map(p => ({ t: p.t, v: p.values ? p.values[key] : undefined })),
+    }));
+    return _ispChartCard(`${scopeTitle} · ${_ispChannelLabel(channel)}`, lines, opts);
+  }).join('');
+}
+
+/** Caídas (transiciones a 0), muestras fuera de línea y % de uptime. */
+function _ispOutageStats(series) {
+  const points = (series && series.points) || [];
+  const key = (series && series.keys && series.keys[0]) || 'online';
+  let outages = 0, downSamples = 0, known = 0, previous = null;
+  points.forEach(p => {
+    const v = p.values ? p.values[key] : undefined;
+    if (v === undefined) return;
+    known++;
+    if (v <= 0) downSamples++;
+    if (previous !== null && previous > 0 && v <= 0) outages++;
+    previous = v;
+  });
+  return {
+    outages,
+    downSamples,
+    totalSamples: points.length,
+    uptimePercent: known === 0 ? 0 : ((known - downSamples) / known) * 100,
+  };
+}
+
+// --- Render del resultado --------------------------------------------------
+
+function _ispBadge(value, okText, failText) {
+  if (value === null || value === undefined) {
+    return `<span class="isp-badge unknown">Sin dato</span>`;
+  }
+  return value
+    ? `<span class="isp-badge ok">${escapeHtml(okText)}</span>`
+    : `<span class="isp-badge fail">${escapeHtml(failText)}</span>`;
+}
+
+/** Nombre legible de los períodos del historial que devuelve la operadora. */
+const _ISP_PERIOD_LABELS = {
+  lasthour: 'Última hora',
+  lastday: 'Último día',
+  lastweek: 'Última semana',
+  lastmonth: 'Último mes',
+};
+const _ISP_PERIOD_ORDER = ['lasthour', 'lastday', 'lastweek', 'lastmonth'];
+
+function _ispPeriodKey(period) {
+  return String(period || '').replace(/[^a-z]/gi, '').toLowerCase();
+}
+
+/**
+ * Historial de equipos que pasaron por el puerto (`terminals[]` de la API).
+ * Le dice al técnico si el equipo anterior del domicilio venía cayéndose.
+ */
+function renderIspHistory(history) {
+  if (!history || history.length === 0) return '';
+  const sorted = [...history].sort(
+    (a, b) => _ISP_PERIOD_ORDER.indexOf(_ispPeriodKey(a.period)) - _ISP_PERIOD_ORDER.indexOf(_ispPeriodKey(b.period)),
+  );
+  const rows = sorted.map(entry => {
+    const label = _ISP_PERIOD_LABELS[_ispPeriodKey(entry.period)] || entry.period;
+    const equipos = (entry.ids || []).map((id, i) => {
+      const status = (entry.statuses || [])[i];
+      const up = String(status || '').toLowerCase() === 'up';
+      const cls = status === undefined ? 'unknown' : up ? 'ok' : 'fail';
+      const text = status === undefined ? '—' : up ? 'en línea' : 'caído';
+      return `<span class="isp-hist-eq"><span class="mono">${escapeHtml(id)}</span>
+        <span class="isp-badge ${cls}">${escapeHtml(text)}</span></span>`;
+    }).join('');
+    const extra = [entry.drop, entry.events].filter(Boolean).join(' · ');
+    return `
+      <div class="isp-hist-row">
+        <span class="isp-hist-period">${escapeHtml(label)}</span>
+        <div class="isp-hist-equipos">${equipos || '<span class="isp-hist-empty">Sin equipos</span>'}</div>
+        ${extra ? `<span class="isp-hist-extra">${escapeHtml(extra)}</span>` : ''}
+      </div>`;
+  }).join('');
+  return `
+    <div class="isp-section-title">Equipos en este puerto</div>
+    <div class="isp-hist">${rows}</div>`;
+}
+
+function renderIspTerminalCard(terminal) {
+  if (!terminal || !terminal.found) {
+    return `
+      <div class="detail-empty port-note">
+        ISP Monitor no tiene datos para <strong>${escapeHtml(terminal ? terminal.id : '—')}</strong>.
+        El formato es válido, así que o el equipo no está aprovisionado, o el código
+        no es el que corresponde: en un ONT ZTE hay que usar el <strong>GPON SN</strong>,
+        no el D-SN ni el EN.
+      </div>`;
+  }
+
+  const event = terminal.event;
+  const eventRow = event && event.active
+    ? `<div class="isp-event alert">
+         <span class="isp-event-title">Evento asociado</span>
+         <span class="isp-event-desc">${escapeHtml(event.description || 'Evento activo en la red')}</span>
+       </div>`
+    : `<div class="isp-event">
+         <span class="isp-event-title">Evento asociado</span>
+         <span class="isp-event-desc">Sin eventos activos</span>
+       </div>`;
+
+  const nodo = (terminal.networkIds || []).join(', ');
+  const extra = (terminal.fields || [])
+    .filter(f => f.value !== null && f.value !== '')
+    .map(f => `
+      <div class="mini-row">
+        <span class="mr-label">${escapeHtml(_ispKeyLabel(f.key))}</span>
+        <span class="mr-value">${escapeHtml(String(f.value))}</span>
+      </div>`).join('');
+
+  return `
+    <div class="isp-status-row">
+      <div class="isp-status-cell">
+        <span class="isp-status-label">Equipo</span>
+        ${_ispBadge(terminal.online, 'En línea', 'Caído')}
+      </div>
+      <div class="isp-status-cell">
+        <span class="isp-status-label">Tecnología</span>
+        <span class="isp-badge tech">${escapeHtml(terminal.technology || '—')}</span>
+      </div>
+      <div class="isp-status-cell">
+        <span class="isp-status-label">Ciudad</span>
+        <span class="isp-badge tech">${escapeHtml(terminal.city || '—')}</span>
+      </div>
+    </div>
+    ${eventRow}
+    ${nodo ? `<div class="mini-row"><span class="mr-label">Nodo</span><span class="mr-value">${escapeHtml(nodo)}</span></div>` : ''}
+    ${extra}`;
+}
+
+/**
+ * Métricas DOCSIS (SNR y FEC) que la operadora solo publica para HFC.
+ * En fibra devuelve 204, así que se explica en vez de dejar el hueco.
+ */
+function _ispDocsisNote(technology) {
+  return `
+    <div class="detail-empty port-note">
+      ${technology === 'GPON'
+        ? 'Métrica DOCSIS: la operadora solo la publica para equipos HFC (cablemódem). Este equipo es GPON.'
+        : 'La operadora no devolvió datos de esta métrica para este equipo.'}
+    </div>`;
+}
+
+/** Series de una métrica en ambos ámbitos, o la nota si no hay datos. */
+function _ispMetricSection(title, data, technology, chartOpts) {
+  const cards = ['terminal', 'network'].map(scope => _ispSeriesCards(
+    data && data[scope],
+    scope === 'terminal' ? 'Equipo del cliente' : 'Red / nodo',
+    chartOpts,
+  )).join('');
+
+  return `
+    <div class="isp-section-title">${escapeHtml(title)}</div>
+    ${cards || _ispDocsisNote(technology)}`;
+}
+
+function renderIspDiagnostics(data) {
+  const terminal = data.terminal || {};
+  const statusTerminal = data.status && data.status.terminal;
+  const statusNetwork = data.status && data.status.network;
+  const stats = _ispOutageStats(statusTerminal);
+
+  // El endpoint de red devuelve cuántos equipos del nodo están en línea:
+  // se grafica como cantidad, no como barra de disponibilidad.
+  const networkChart = _ispSeriesToChart(statusNetwork);
+  const networkNow = statusNetwork && statusNetwork.points.length
+    ? statusNetwork.points[statusNetwork.points.length - 1].values[statusNetwork.keys[0]]
+    : null;
+
+  const errors = (data.errors || []).length
+    ? `<div class="isp-partial">Endpoints sin respuesta: ${
+        data.errors.map(e => escapeHtml(e.endpoint)).join(', ')
+      }. El resto de los datos sí se consultó.</div>`
+    : '';
+
+  const availability = statusTerminal && statusTerminal.points.length
+    ? `
+      <div class="isp-stats">
+        <div class="isp-stat">
+          <span class="isp-stat-value">${stats.outages}</span>
+          <span class="isp-stat-label">caídas del equipo</span>
+        </div>
+        <div class="isp-stat">
+          <span class="isp-stat-value">${_fmtNum(stats.uptimePercent, 1)}%</span>
+          <span class="isp-stat-label">en línea</span>
+        </div>
+        <div class="isp-stat">
+          <span class="isp-stat-value">${networkNow === null || networkNow === undefined ? '—' : networkNow}</span>
+          <span class="isp-stat-label">equipos en línea en el nodo</span>
+        </div>
+      </div>
+      ${renderStatusBand(statusTerminal, 'Equipo del cliente')}
+      ${_ispChartCard('Equipos en línea en el nodo', networkChart,
+        { minZero: true, ariaLabel: 'Equipos en línea en el nodo, últimas 24 horas' })}`
+    : `<div class="detail-empty">La operadora no devolvió el histórico de estado de este equipo.</div>`;
+
+  return `
+    <div class="isp-results">
+      ${renderIspTerminalCard(terminal)}
+      ${errors}
+
+      ${terminal.found ? `<div class="isp-section-title">Disponibilidad — últimas 24 h</div>${availability}` : ''}
+
+      ${terminal.found ? _ispMetricSection('Señal a ruido — 24 h (DOCSIS)', data.snr, terminal.technology,
+        { unit: 'dB', ariaLabel: 'Señal a ruido de las últimas 24 horas' }) : ''}
+
+      ${terminal.found ? _ispMetricSection('Errores FEC corregidos y sin corregir — 24 h (DOCSIS)', data.codewords, terminal.technology,
+        { minZero: true, ariaLabel: 'Errores FEC de las últimas 24 horas' }) : ''}
+
+      ${terminal.found ? renderIspHistory(terminal.history) : ''}
+
+      <div class="isp-footnote">Consultado ${escapeHtml(formatDate(data.fetchedAt))} · ISP Monitor</div>
+      <div class="isp-footnote">Tráfico del cliente (campo 13): pendiente de endpoint en la API de operadora.</div>
+    </div>`;
+}
+
+// --- Panel -----------------------------------------------------------------
+
+function renderIspPanel(cuenta) {
+  const remembered = _ispRecallId(cuenta);
+  const canScan = serialScannerAvailable();
+  return `
+    <div class="isp-panel" data-panel="isp-monitor">
+      <p class="isp-hint">
+        ISP Monitor consulta por <strong>serial GPON</strong> (fibra) o
+        <strong>MAC del cablemódem</strong> (HFC), no por número de cuenta.
+      </p>
+      <details class="isp-labels">
+        <summary>¿Cuál de los códigos de la etiqueta?</summary>
+        <ul>
+          <li><strong>ONT ZTE</strong> (todas) — GPON SN</li>
+          <li><strong>ONT Huawei OptiXstar</strong>, ONU B2000, decos, MTA — SN</li>
+          <li><strong>ONU300G / ONU HUR</strong> — PON SN</li>
+          <li><strong>Decodificador HD</strong> — HOST SN</li>
+          <li><strong>Cablemódem HFC</strong> — MAC</li>
+        </ul>
+        <p>El <strong>D-SN</strong> y el <strong>EN</strong> que también vienen impresos no sirven acá: la operadora los rechaza.</p>
+      </details>
+      <label class="form-row">
+        <span class="form-label">Serial GPON o MAC del cablemódem</span>
+        <input type="text" data-field="terminalId" class="isp-input" inputmode="latin"
+          autocapitalize="characters" autocomplete="off" spellcheck="false"
+          placeholder="ZTEGC1234567 · A4B87E112233" value="${escapeHtml(remembered)}">
+      </label>
+      <div class="isp-actions">
+        ${canScan ? `<button type="button" class="add-row-btn" data-action="isp-scan">Escanear</button>` : ''}
+        <button type="button" class="save-btn isp-consult-btn" data-action="isp-consult">Consultar</button>
+      </div>
+      <div class="isp-feedback" data-slot="isp-feedback" role="alert" aria-live="polite"></div>
+      <div data-slot="isp-results"></div>
+    </div>`;
+}
+
+/** Activa el panel de ISP Monitor una vez insertado en el DOM. */
+function _bootIspPanel(body, cuenta) {
+  const panel = body.querySelector('[data-panel="isp-monitor"]');
+  if (!panel) return;
+
+  const input = panel.querySelector('[data-field="terminalId"]');
+  const feedback = panel.querySelector('[data-slot="isp-feedback"]');
+  const results = panel.querySelector('[data-slot="isp-results"]');
+  const consultBtn = panel.querySelector('[data-action="isp-consult"]');
+  const scanBtn = panel.querySelector('[data-action="isp-scan"]');
+
+  function setFeedback(message, kind) {
+    feedback.textContent = message || '';
+    feedback.className = `isp-feedback${kind ? ' ' + kind : ''}`;
+  }
+
+  async function consult() {
+    const id = (input.value || '').trim();
+    if (!id) {
+      setFeedback('Ingresá o escaneá el serial GPON o la MAC del cablemódem.', 'error');
+      input.focus();
+      return;
+    }
+    consultBtn.disabled = true;
+    consultBtn.textContent = 'Consultando…';
+    setFeedback('');
+    results.innerHTML = `<div class="detail-loading">Consultando ISP Monitor…</div>`;
+    try {
+      const data = await WifixAPI.getTerminalDiagnostics(id);
+      _ispState = { id: id, data: data };
+      _ispRememberId(cuenta, id);
+      results.innerHTML = renderIspDiagnostics(data);
+    } catch (err) {
+      console.error('[Wifix] ISP Monitor', err);
+      results.innerHTML = '';
+      setFeedback(err.message || 'No se pudo consultar ISP Monitor.', 'error');
+    } finally {
+      consultBtn.disabled = false;
+      consultBtn.textContent = 'Consultar';
+    }
+  }
+
+  // Aviso no bloqueante: la validación de verdad la hace la operadora, acá
+  // solo se adelanta el caso típico de haber escaneado el D-SN.
+  function checkIdShape() {
+    const value = (input.value || '').trim();
+    if (!value || _ispIdLooksValid(value)) {
+      if (feedback.classList.contains('shape-hint')) setFeedback('');
+      return;
+    }
+    setFeedback(
+      'Ese código no parece un serial GPON (4 letras + 8 caracteres) ni una MAC. ¿Estás usando el D-SN?',
+      'warn',
+    );
+    feedback.classList.add('shape-hint');
+  }
+
+  consultBtn.addEventListener('click', consult);
+  input.addEventListener('input', checkIdShape);
+  input.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter') { ev.preventDefault(); consult(); }
+  });
+  checkIdShape();
+
+  if (scanBtn) {
+    scanBtn.addEventListener('click', async () => {
+      scanBtn.disabled = true;
+      scanBtn.textContent = 'Leyendo…';
+      setFeedback('');
+      try {
+        const rawValues = await window.WifixNative.serialScanner.scanBarcodes();
+        if (!rawValues || rawValues.length === 0) {
+          setFeedback('No se detectó ningún código. Probá de nuevo o escribilo a mano.', 'warn');
+        } else {
+          // La etiqueta trae varios códigos (GPON SN, MAC, D-SN, EN): se elige
+          // el único que ISP Monitor acepta.
+          const picked = _ispPickTerminalId(rawValues);
+          if (picked) {
+            input.value = picked.id;
+            checkIdShape();
+            setFeedback(
+              picked.kind === 'GPON'
+                ? `Serial GPON detectado: ${picked.id}`
+                : `MAC detectada: ${picked.id}`,
+              'ok',
+            );
+          } else {
+            // Mejor esfuerzo con el extractor genérico, para no dejar al
+            // técnico sin nada si la etiqueta usa otro formato.
+            const result = extractSerial(rawValues, '');
+            if (result.serial) {
+              input.value = result.serial;
+              checkIdShape();
+              setFeedback(
+                `Se leyó ${result.serial}, pero no tiene forma de serial GPON ni de MAC. ` +
+                  'Revisá que no sea el D-SN ni el EN.',
+                'warn',
+              );
+            } else {
+              setFeedback('No se pudo interpretar el código leído.', 'warn');
+            }
+          }
+        }
+      } catch (err) {
+        console.error('[Wifix] isp scanBarcodes', err);
+        setFeedback('Error al escanear.', 'error');
+      } finally {
+        scanBtn.disabled = false;
+        scanBtn.textContent = 'Escanear';
+      }
+    });
+  }
+
+  // Si ya se consultó este equipo en esta sesión, se repinta sin volver a pedir.
+  if (_ispState.data && _ispState.id === (input.value || '').trim()) {
+    results.innerHTML = renderIspDiagnostics(_ispState.data);
+  }
 }
 
 function renderEventsList(events) {
@@ -888,12 +1626,12 @@ function renderHistorySummary(history) {
 }
 
 const SERVICIO_ITEMS = [
-  { id: 'naps',    icon: SERVICIO_ICONS.nap,     title: 'NAPs y seleccion GPON Xtreme',
-    load: (cuenta) => loadNapPanel(cuenta) },
+  { id: 'naps',    icon: SERVICIO_ICONS.nap,     title: 'NAPs cercanas y seleccion GPON Xtreme',
+    load: () => loadNapPanel() },
   { id: 'status',  icon: SERVICIO_ICONS.user,    title: 'Status del cliente por contrato/cuenta',
     load: (cuenta) => WifixAPI.getContractStatus(cuenta).then(c => renderStatusFromContract(c, cuenta)) },
-  { id: 'metrics', icon: SERVICIO_ICONS.metrics, title: 'Métricas de red (RX/TX, SNR, tráfico)',
-    load: (cuenta) => WifixAPI.getNetworkMetrics(cuenta).then(renderMetrics) },
+  { id: 'isp',     icon: SERVICIO_ICONS.metrics, title: 'ISP Monitor — señal, SNR, FEC y caídas 24 h',
+    load: (cuenta) => renderIspPanel(cuenta) },
   { id: 'events',  icon: SERVICIO_ICONS.alert,   title: 'Daños (eventos) en el nodo',
     load: (cuenta) => WifixAPI.getNodeEvents(cuenta).then(renderEventsList) },
   { id: 'unsat',   icon: SERVICIO_ICONS.note,    title: 'Tareas insatisfactorias (cierre)',
@@ -946,6 +1684,8 @@ function openDatosServicio() {
           body.dataset.loaded = '1';
           if (id === 'naps') {
             _bootNapPanel(body);
+          } else if (id === 'isp') {
+            _bootIspPanel(body, cuenta);
           } else {
             wireNapPortsButtons(body);
           }
