@@ -125,15 +125,16 @@ check('renderIspPanel devuelve HTML balanceado', balanced(panelHtml) === null, b
 check('renderIspPanel incluye el input de serial', panelHtml.includes('data-field="terminalId"'));
 check('renderIspPanel guía qué código escanear', panelHtml.includes('GPON SN') && panelHtml.includes('D-SN'));
 
-// --- Payload real: es exactamente lo que devolvió el backend contra la API
-// de operadora para el ONT ZTE activo ZTEGD3F9BBE5 (Quito, nodo 9198), con
-// las series recortadas a unas pocas muestras.
+// --- Payload real: es exactamente lo que devolvió el backend contra la API de
+// operadora para el ONT ZTE activo ZTEGD3F9BBE5 (Quito, red de acceso 9198),
+// con las series recortadas a unas pocas muestras. Al ser GPON, el backend ya
+// no consulta las cuatro series DOCSIS: llegan en `skipped`.
 function realFixture() {
   const stamps = Array.from({ length: 288 }, (_, i) =>
     new Date(1787683133000 + i * 300000).toISOString());
-  const emptySeries = (scope, metric) => ({
-    id: 'ZTEGD3F9BBE5', scope, metric, keys: [], points: [], recognized: true,
-    raw: null, fetchedAt: '2026-08-26T18:38:30.792Z',
+  const docsisSkip = (scope, metric) => ({
+    endpoint: `${scope}/${metric}`,
+    reason: 'Métrica DOCSIS: la operadora solo la publica para HFC. Este equipo es GPON.',
   });
   return {
     id: 'ZTEGD3F9BBE5',
@@ -145,18 +146,16 @@ function realFixture() {
       city: 'Quito',
       networkIds: [9198],
       event: { active: false, description: null },
+      drop: { detected: false, description: null },
       history: [
         { period: 'LastMonth', ids: ['ZTEGD0BB8294', 'ZTEGD3F9BBE5'], statuses: ['down', 'up'], drop: null, events: null },
         { period: 'LastHour', ids: ['ZTEGD3F9BBE5'], statuses: ['up'], drop: null, events: null },
         { period: 'LastDay', ids: ['ZTEGD3F9BBE5'], statuses: ['up'], drop: null, events: null },
         { period: 'LastWeek', ids: ['ZTEGD3F9BBE5'], statuses: ['up'], drop: null, events: null },
       ],
-      fields: [
-        { key: 'device', path: 'device', value: 9919 },
-        { key: 'ifIndex', path: 'ifIndex', value: 285282307 },
-        { key: 'index', path: 'index', value: 11 },
-        { key: 'drop', path: 'drop', value: null },
-      ],
+      // `device`, `ifIndex` e `index` son internos del monitoreo: la operadora
+      // confirmó que no le sirven al técnico y el backend ya no los expone.
+      fields: [],
       raw: null,
       fetchedAt: '2026-08-26T18:38:30.792Z',
     },
@@ -173,10 +172,15 @@ function realFixture() {
         recognized: true, raw: null, fetchedAt: '2026-08-26T18:38:30.792Z',
       },
     },
-    // GPON: la operadora responde 204 en las métricas DOCSIS.
-    snr: { terminal: emptySeries('terminal', 'snr'), network: emptySeries('network', 'snr') },
-    codewords: { terminal: emptySeries('terminal', 'codewords'), network: emptySeries('network', 'codewords') },
+    // GPON: las métricas DOCSIS ni se consultan.
+    snr: { terminal: null, network: null },
+    codewords: { terminal: null, network: null },
     errors: [],
+    skipped: [
+      docsisSkip('terminal', 'snr'), docsisSkip('network', 'snr'),
+      docsisSkip('terminal', 'codewords'), docsisSkip('network', 'codewords'),
+    ],
+    window: { hours: 24, until: '2026-08-26T18:38:30.792Z' },
     fetchedAt: '2026-08-26T18:38:30.792Z',
   };
 }
@@ -187,7 +191,8 @@ check('payload real: HTML balanceado', balanced(realHtml) === null, balanced(rea
 check('payload real: equipo en línea', realHtml.includes('isp-badge ok'));
 check('payload real: muestra tecnología y ciudad',
   realHtml.includes('GPON') && realHtml.includes('Quito'));
-check('payload real: muestra el nodo', realHtml.includes('9198'));
+check('payload real: muestra la red de acceso, no un "nodo"',
+  realHtml.includes('9198') && realHtml.includes('Puerto de OLT') && !realHtml.includes('>Nodo<'));
 check('payload real: cuenta 1 caída', /isp-stat-value">1</.test(realHtml));
 check('payload real: calcula el % en línea', /isp-stat-value">9[0-9](\.\d)?%</.test(realHtml),
   (realHtml.match(/isp-stat-value">[^<]*%/) || [])[0]);
@@ -195,15 +200,29 @@ check('payload real: agrupa 288 muestras en 48 celdas',
   (realHtml.match(/band-cell/g) || []).length === 48,
   String((realHtml.match(/band-cell/g) || []).length));
 check('payload real: la caída sobrevive al agrupado', realHtml.includes('band-cell down'));
-check('payload real: grafica los equipos del nodo',
-  realHtml.includes('Equipos en línea en el nodo'));
-check('payload real: explica por qué no hay DOCSIS en fibra',
-  realHtml.includes('solo la publica para equipos HFC'));
+check('payload real: grafica los equipos en línea de la red de acceso',
+  realHtml.includes('Equipos en línea · Puerto de OLT'));
+check('payload real: aclara que no es un porcentaje de la red',
+  realHtml.includes('no un porcentaje'));
+check('payload real: explica que DOCSIS no se consultó en fibra',
+  realHtml.includes('solo la publica para HFC') && realHtml.includes('No se consultó'));
+check('payload real: deja explícita la ventana de 24 h',
+  realHtml.includes('últimas 24 h contadas desde ese instante'));
 check('payload real: lista el historial del puerto',
   realHtml.includes('Último mes') && realHtml.includes('ZTEGD0BB8294'));
 check('payload real: sin "undefined" ni "NaN"',
   !/>\s*(undefined|NaN)\s*</.test(realHtml) && !realHtml.includes('NaN,'),
   (realHtml.match(/NaN[^"]{0,20}/) || [])[0]);
+
+// --- `drop`: la operadora confirmó que es el único campo extra relevante de la
+// ficha (informa si el monitoreo detectó una caída de red).
+const conCaida = realFixture();
+conCaida.terminal.drop = { detected: true, description: 'Caída detectada por el monitoreo' };
+const caidaHtml = ctx.renderIspDiagnostics(conCaida);
+check('drop detectado: se muestra como alerta',
+  caidaHtml.includes('Caída de red detectada') && caidaHtml.includes('isp-event alert'));
+check('drop sin detectar: no se muestra',
+  !realHtml.includes('Caída de red detectada'));
 
 // --- Cablemódem HFC: las series DOCSIS sí traen datos.
 const diagnostics = await WifixAPI.getTerminalDiagnostics('B4042​1E15ADC'.replace(/​/g, ''));

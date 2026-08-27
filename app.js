@@ -877,8 +877,18 @@ function renderPortsTable(napPorts) {
 //
 // La API de operadora indexa por SERIAL GPON (fibra) o MAC del cablemódem
 // (HFC), no por número de cuenta: el técnico escanea o escribe el identificador
-// del equipo y desde ahí se consultan los 7 endpoints en una sola llamada al
-// backend (/terminals/:id/diagnostics).
+// del equipo y desde ahí el backend consulta la operadora en una sola llamada
+// (/terminals/:id/diagnostics).
+//
+// El backend NO consulta todo siempre: pide la ficha, y según la tecnología
+// decide qué series valen la pena (en GPON no hay DOCSIS). Lo que no consultó
+// llega en `skipped` y se explica en pantalla. La operadora pidió expresamente
+// no consultar de más y no existe ambiente de pruebas: todo es producción.
+//
+// "Red de acceso" y no "nodo": la operadora aclaró que no existe el concepto de
+// nodo en estos datos. Se toman de una tarjeta de CMTS (HFC — puede cubrir un
+// ramal, un nodo o una combinación) o de un puerto de OLT (GPON — un hilo de
+// fibra).
 // ============================================================================
 
 // Estado del panel por cuenta abierta.
@@ -917,7 +927,7 @@ const _ISP_KEY_LABELS = {
   snrdown: 'Downstream', down: 'Downstream', downstream: 'Downstream',
   snrup: 'Upstream', upstream: 'Upstream',
   snr: 'SNR', mer: 'MER',
-  terminalsonline: 'Equipos en línea',
+  terminalsonline: 'Equipos en línea en la red',
   corrected: 'Corregidos', corregidos: 'Corregidos',
   errors: 'Errores',
   uncorrected: 'Sin corregir', uncorrectables: 'Sin corregir', sincorregir: 'Sin corregir',
@@ -969,6 +979,17 @@ function _ispPickTerminalId(rawValues) {
 function _ispIdLooksValid(value) {
   const c = _ispCleanCode(value);
   return _ISP_GPON_SN_RE.test(c) || _ISP_MAC_RE.test(c);
+}
+
+/**
+ * Cómo se llama la red a la que cuelga el equipo, según la tecnología.
+ * No es un "nodo": la operadora aclaró que esos datos salen de una tarjeta de
+ * CMTS (HFC) o de un puerto de OLT (GPON).
+ */
+function _ispNetworkLabel(technology) {
+  if (technology === 'GPON') return 'Puerto de OLT (hilo de fibra)';
+  if (technology === 'HFC') return 'Tarjeta de CMTS (ramal o nodo)';
+  return 'Red de acceso';
 }
 
 /** Paleta por posición de serie, coherente con el resto de la app. */
@@ -1214,25 +1235,49 @@ function _ispSeriesCards(series, scopeTitle, opts) {
   }).join('');
 }
 
-/** Caídas (transiciones a 0), muestras fuera de línea y % de uptime. */
+/**
+ * Caídas (transiciones a 0), muestras fuera de línea y % de uptime.
+ *
+ * La ventana es siempre de 24 h, pero la cantidad de muestras varía según el
+ * equipo (la operadora devolvió entre 122 y 292 en las pruebas). Contar
+ * muestras sesgaría el porcentaje cuando el muestreo es irregular, así que cada
+ * muestra pesa lo que dura: desde su instante hasta el de la siguiente. Si los
+ * instantes no se pueden leer, se cae al conteo por muestra.
+ */
 function _ispOutageStats(series) {
   const points = (series && series.points) || [];
   const key = (series && series.keys && series.keys[0]) || 'online';
+
+  const stamps = points.map(p => new Date(p.t).getTime());
+  const gaps = [];
+  for (let i = 1; i < stamps.length; i++) {
+    const gap = stamps[i] - stamps[i - 1];
+    if (isFinite(gap) && gap > 0) gaps.push(gap);
+  }
+  // La última muestra no tiene siguiente: se le da la duración típica.
+  const sorted = [...gaps].sort((a, b) => a - b);
+  const typicalGap = sorted.length ? sorted[Math.floor(sorted.length / 2)] : 0;
+  const weighted = typicalGap > 0;
+
   let outages = 0, downSamples = 0, known = 0, previous = null;
-  points.forEach(p => {
+  let knownMs = 0, downMs = 0;
+  points.forEach((p, i) => {
     const v = p.values ? p.values[key] : undefined;
     if (v === undefined) return;
     known++;
-    if (v <= 0) downSamples++;
+    const span = i + 1 < stamps.length ? stamps[i + 1] - stamps[i] : typicalGap;
+    const weight = isFinite(span) && span > 0 ? span : typicalGap;
+    knownMs += weight;
+    if (v <= 0) { downSamples++; downMs += weight; }
     if (previous !== null && previous > 0 && v <= 0) outages++;
     previous = v;
   });
-  return {
-    outages,
-    downSamples,
-    totalSamples: points.length,
-    uptimePercent: known === 0 ? 0 : ((known - downSamples) / known) * 100,
-  };
+
+  const uptimePercent = weighted && knownMs > 0
+    ? ((knownMs - downMs) / knownMs) * 100
+    : known === 0 ? 0 : ((known - downSamples) / known) * 100;
+
+  return { outages, downSamples, totalSamples: points.length, uptimePercent };
 }
 
 // --- Render del resultado --------------------------------------------------
@@ -1313,7 +1358,17 @@ function renderIspTerminalCard(terminal) {
          <span class="isp-event-desc">Sin eventos activos</span>
        </div>`;
 
-  const nodo = (terminal.networkIds || []).join(', ');
+  // `drop`: el monitoreo de la operadora detectó una caída de red. Es el único
+  // campo extra de la ficha que la operadora confirmó relevante.
+  const drop = terminal.drop || { detected: false, description: null };
+  const dropRow = drop.detected
+    ? `<div class="isp-event alert">
+         <span class="isp-event-title">Caída de red detectada</span>
+         <span class="isp-event-desc">${escapeHtml(drop.description || 'El monitoreo registró una caída.')}</span>
+       </div>`
+    : '';
+
+  const red = (terminal.networkIds || []).join(', ');
   const extra = (terminal.fields || [])
     .filter(f => f.value !== null && f.value !== '')
     .map(f => `
@@ -1338,15 +1393,24 @@ function renderIspTerminalCard(terminal) {
       </div>
     </div>
     ${eventRow}
-    ${nodo ? `<div class="mini-row"><span class="mr-label">Nodo</span><span class="mr-value">${escapeHtml(nodo)}</span></div>` : ''}
+    ${dropRow}
+    ${red ? `<div class="mini-row"><span class="mr-label">${escapeHtml(_ispNetworkLabel(terminal.technology))}</span><span class="mr-value">${escapeHtml(red)}</span></div>` : ''}
     ${extra}`;
 }
 
 /**
- * Métricas DOCSIS (SNR y FEC) que la operadora solo publica para HFC.
- * En fibra devuelve 204, así que se explica en vez de dejar el hueco.
+ * Nota para una métrica sin gráfico. Si el backend decidió NO consultarla
+ * (`skipped`), se muestra su motivo: es una decisión deliberada para no
+ * castigar la API de la operadora, no un dato faltante.
  */
-function _ispDocsisNote(technology) {
+function _ispEmptyMetricNote(metric, technology, skipped) {
+  const reason = (skipped || [])
+    .filter(s => String(s.endpoint || '').endsWith('/' + metric))
+    .map(s => s.reason)
+    .find(Boolean);
+  if (reason) {
+    return `<div class="detail-empty port-note">${escapeHtml(reason)} No se consultó.</div>`;
+  }
   return `
     <div class="detail-empty port-note">
       ${technology === 'GPON'
@@ -1356,16 +1420,16 @@ function _ispDocsisNote(technology) {
 }
 
 /** Series de una métrica en ambos ámbitos, o la nota si no hay datos. */
-function _ispMetricSection(title, data, technology, chartOpts) {
+function _ispMetricSection(title, metric, data, terminal, skipped, chartOpts) {
   const cards = ['terminal', 'network'].map(scope => _ispSeriesCards(
     data && data[scope],
-    scope === 'terminal' ? 'Equipo del cliente' : 'Red / nodo',
+    scope === 'terminal' ? 'Equipo del cliente' : _ispNetworkLabel(terminal.technology),
     chartOpts,
   )).join('');
 
   return `
     <div class="isp-section-title">${escapeHtml(title)}</div>
-    ${cards || _ispDocsisNote(technology)}`;
+    ${cards || _ispEmptyMetricNote(metric, terminal.technology, skipped)}`;
 }
 
 function renderIspDiagnostics(data) {
@@ -1374,8 +1438,14 @@ function renderIspDiagnostics(data) {
   const statusNetwork = data.status && data.status.network;
   const stats = _ispOutageStats(statusTerminal);
 
-  // El endpoint de red devuelve cuántos equipos del nodo están en línea:
-  // se grafica como cantidad, no como barra de disponibilidad.
+  const skipped = data.skipped || [];
+  const redLabel = _ispNetworkLabel(terminal.technology);
+
+  // El endpoint de red devuelve cuántos equipos de esa red están en línea: se
+  // grafica como cantidad, no como porcentaje. La operadora no expone el total
+  // de la red, así que un "% de la red en línea" no se puede calcular; lo que
+  // sirve al técnico es el escalón (si cae de golpe, el problema no es del
+  // domicilio).
   const networkChart = _ispSeriesToChart(statusNetwork);
   const networkNow = statusNetwork && statusNetwork.points.length
     ? statusNetwork.points[statusNetwork.points.length - 1].values[statusNetwork.keys[0]]
@@ -1400,12 +1470,17 @@ function renderIspDiagnostics(data) {
         </div>
         <div class="isp-stat">
           <span class="isp-stat-value">${networkNow === null || networkNow === undefined ? '—' : networkNow}</span>
-          <span class="isp-stat-label">equipos en línea en el nodo</span>
+          <span class="isp-stat-label">equipos en línea en la misma red</span>
         </div>
       </div>
       ${renderStatusBand(statusTerminal, 'Equipo del cliente')}
-      ${_ispChartCard('Equipos en línea en el nodo', networkChart,
-        { minZero: true, ariaLabel: 'Equipos en línea en el nodo, últimas 24 horas' })}`
+      ${_ispChartCard(`Equipos en línea · ${redLabel}`, networkChart,
+        { minZero: true, ariaLabel: 'Equipos en línea en la misma red de acceso, últimas 24 horas' })}
+      <p class="isp-hint">
+        Es la cantidad de equipos en línea en ${escapeHtml(redLabel.toLowerCase())},
+        no un porcentaje: la operadora no publica el total de la red. Lo que
+        importa es el escalón — si cae de golpe, el problema no es del domicilio.
+      </p>`
     : `<div class="detail-empty">La operadora no devolvió el histórico de estado de este equipo.</div>`;
 
   return `
@@ -1415,15 +1490,18 @@ function renderIspDiagnostics(data) {
 
       ${terminal.found ? `<div class="isp-section-title">Disponibilidad — últimas 24 h</div>${availability}` : ''}
 
-      ${terminal.found ? _ispMetricSection('Señal a ruido — 24 h (DOCSIS)', data.snr, terminal.technology,
+      ${terminal.found ? _ispMetricSection('Señal a ruido — 24 h (DOCSIS)', 'snr', data.snr, terminal, skipped,
         { unit: 'dB', ariaLabel: 'Señal a ruido de las últimas 24 horas' }) : ''}
 
-      ${terminal.found ? _ispMetricSection('Errores FEC corregidos y sin corregir — 24 h (DOCSIS)', data.codewords, terminal.technology,
+      ${terminal.found ? _ispMetricSection('Errores FEC corregidos y sin corregir — 24 h (DOCSIS)', 'codewords', data.codewords, terminal, skipped,
         { minZero: true, ariaLabel: 'Errores FEC de las últimas 24 horas' }) : ''}
 
       ${terminal.found ? renderIspHistory(terminal.history) : ''}
 
-      <div class="isp-footnote">Consultado ${escapeHtml(formatDate(data.fetchedAt))} · ISP Monitor</div>
+      <div class="isp-footnote">
+        Consultado ${escapeHtml(formatDate(data.fetchedAt))} · ISP Monitor ·
+        las series cubren las últimas 24 h contadas desde ese instante.
+      </div>
       <div class="isp-footnote">Tráfico del cliente (campo 13): pendiente de endpoint en la API de operadora.</div>
     </div>`;
 }
@@ -1443,12 +1521,12 @@ function renderIspPanel(cuenta) {
         <summary>¿Cuál de los códigos de la etiqueta?</summary>
         <ul>
           <li><strong>ONT ZTE</strong> (todas) — GPON SN</li>
-          <li><strong>ONT Huawei OptiXstar</strong>, ONU B2000, decos, MTA — SN</li>
+          <li><strong>ONT Huawei OptiXstar</strong>, ONU B2000 — SN</li>
           <li><strong>ONU300G / ONU HUR</strong> — PON SN</li>
-          <li><strong>Decodificador HD</strong> — HOST SN</li>
           <li><strong>Cablemódem HFC</strong> — MAC</li>
         </ul>
         <p>El <strong>D-SN</strong> y el <strong>EN</strong> que también vienen impresos no sirven acá: la operadora los rechaza.</p>
+        <p><strong>Decodificadores, decos HD y MTA:</strong> la operadora no confirmó si se consultan por estos mismos endpoints. Se puede probar con su SN o HOST-SN, pero si responde "sin datos" no es un error de la app.</p>
       </details>
       <label class="form-row">
         <span class="form-label">Serial GPON o MAC del cablemódem</span>
