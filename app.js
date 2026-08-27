@@ -1710,7 +1710,11 @@ const SERVICIO_ITEMS = [
     load: (cuenta) => WifixAPI.getContractStatus(cuenta).then(c => renderStatusFromContract(c, cuenta)) },
   { id: 'isp',     icon: SERVICIO_ICONS.metrics, title: 'ISP Monitor — señal, SNR, FEC y caídas 24 h',
     load: (cuenta) => renderIspPanel(cuenta) },
-  { id: 'events',  icon: SERVICIO_ICONS.alert,   title: 'Daños (eventos) en el nodo',
+  // "Red de acceso" y no "nodo", igual que en el panel de ISP Monitor: la
+  // operadora aclaró que ese concepto no existe (los datos salen de tarjetas de
+  // CMTS o de puertos de OLT). El endpoint sigue llamándose `node-events`
+  // porque es el contrato publicado; lo que cambia es lo que lee el técnico.
+  { id: 'events',  icon: SERVICIO_ICONS.alert,   title: 'Daños (eventos) en la red de acceso',
     load: (cuenta) => WifixAPI.getNodeEvents(cuenta).then(renderEventsList) },
   { id: 'unsat',   icon: SERVICIO_ICONS.note,    title: 'Tareas insatisfactorias (cierre)',
     load: (cuenta) => WifixAPI.getUnsatisfactoryTasks(cuenta).then(renderTasksList) },

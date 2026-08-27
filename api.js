@@ -231,7 +231,7 @@
   // --- ISP Monitor: ficha del terminal y series de 24 h -------------------
   // Los mocks replican la forma que ya devuelve el backend con la API real:
   // 288 muestras de 5 minutos, `online` para el terminal y `terminalsOnline`
-  // (cantidad de equipos del nodo) para la red.
+  // (cantidad de equipos de la misma red de acceso) para la red.
   function mockStamps(n, stepMs) {
     const now = Date.now();
     const out = [];
@@ -248,7 +248,7 @@
       if (metric === 'status') {
         if (scope === 'network') {
           keys = ['terminalsOnline'];
-          // El nodo pierde un par de equipos en la madrugada.
+          // La red de acceso pierde un par de equipos en la madrugada.
           const dip = i > 60 && i < 78 ? 2 : 0;
           return { t: t, values: { terminalsOnline: 18 - dip } };
         }
@@ -357,7 +357,7 @@
   }
   function mockNodeEvents() {
     return [
-      { type: 'Mantenimiento de nodo', description: 'Reset general y validación.', status: 'RESUELTO', occurredAt: nowIso() },
+      { type: 'Mantenimiento de red', description: 'Reset general y validación.', status: 'RESUELTO', occurredAt: nowIso() },
     ];
   }
   function mockLanDevices() {
