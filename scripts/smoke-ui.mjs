@@ -334,6 +334,44 @@ check('acepta MAC con separadores', ctx._ispIdLooksValid('3C:F9:F0:3C:DD:39'));
 check('rechaza el D-SN', !ctx._ispIdLooksValid('ZTE0QPBQ2J00956'));
 check('rechaza el EN', !ctx._ispIdLooksValid('0QPBQ2J00690'));
 
+console.log('\n== Identificador leído por foto (OCR) ==');
+// El OCR devuelve LÍNEAS, no valores limpios: hay que tokenizar y priorizar
+// el código que viene detrás de su etiqueta impresa.
+const ocrLines = [
+  'ZXHN G1611',
+  'EN:0QPBQ2J00690',
+  'MAC:3C-F9-F0-3C-DD-39',
+  'GPON SN:ZTEGD52E1A9B',
+  'D-SN:ZTE0QPBQ2J00956',
+];
+const fromPhoto = ctx._ispPickTerminalIdFromText(ocrLines);
+check('elige el GPON SN de la etiqueta fotografiada',
+  fromPhoto && fromPhoto.id === 'ZTEGD52E1A9B' && fromPhoto.kind === 'GPON',
+  JSON.stringify(fromPhoto));
+check('marca que venía con su etiqueta', fromPhoto && fromPhoto.labeled === true);
+check('no lo da por reparado si validó tal cual', fromPhoto && fromPhoto.repaired === false);
+
+check('etiqueta sola y valor en el renglón siguiente',
+  ctx._ispPickTerminalIdFromText(['GPON SN:', 'ZTEGD52E1A9B']).id === 'ZTEGD52E1A9B');
+check('sin GPON SN cae a la MAC y la limpia',
+  ctx._ispPickTerminalIdFromText(['MAC:3C-F9-F0-3C-DD-39']).id === '3CF9F03CDD39');
+check('descarta el D-SN aunque sea lo único con forma larga',
+  ctx._ispPickTerminalIdFromText(['D-SN:ZTE0QPBQ2J00956']) === null);
+check('el EN no se cuela como MAC ni suelto',
+  ctx._ispPickTerminalIdFromText(['EN:123456789012', 'D-SN:ZTE0QPBQ2J00956']) === null);
+check('dos códigos en un mismo renglón no se pegan',
+  ctx._ispPickTerminalIdFromText(['SN: HWTC90507FAA MAC: 3CF9F03CDD39']).id === 'HWTC90507FAA');
+check('texto sin códigos devuelve null',
+  ctx._ispPickTerminalIdFromText(['ZXHN G1611', 'HECHO EN CHINA', '100-240V']) === null);
+check('entrada vacía no rompe',
+  ctx._ispPickTerminalIdFromText([]) === null && ctx._ispPickTerminalIdFromText(null) === null);
+
+// Confusiones típicas del OCR: solo se remapean letras que NO son hex válido.
+check('corrige O por 0 en la cola hex y lo marca',
+  ctx._ispPickTerminalIdFromText(['GPON SN:ZTEGD52E1A9O'] ).repaired === true);
+check('B se respeta porque es hex válido',
+  ctx._ispPickTerminalIdFromText(['GPON SN:ZTEGD52E1A9B']).id === 'ZTEGD52E1A9B');
+
 console.log('\n== Gráficos ==');
 const flat = ctx.renderLineChart([
   { label: 'Plano', points: Array.from({ length: 5 }, () => ({ t: '2026-08-26T10:00:00Z', v: 7 })) },

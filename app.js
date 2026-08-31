@@ -981,6 +981,111 @@ function _ispIdLooksValid(value) {
   return _ISP_GPON_SN_RE.test(c) || _ISP_MAC_RE.test(c);
 }
 
+// --- Lectura por foto (OCR) ------------------------------------------------
+//
+// El OCR devuelve LÍNEAS de texto, no valores limpios como el barcode: puede
+// venir "GPON SN: ZTEGD4B47E30", la etiqueta sola con el valor en el renglón
+// siguiente, o dos códigos en la misma línea. Por eso no se puede pasar la
+// línea entera por _ispCleanCode (juntaría dos códigos en uno): primero se
+// parte en tokens y se prioriza el que viene detrás de su etiqueta impresa.
+
+/** Etiqueta impresa buscada en cualquier parte del texto, no solo al inicio. */
+const _ISP_LABEL_ANYWHERE_RE =
+  /(GPON\s*[- ]?\s*SN|PON\s*[- ]?\s*SN|HOST\s*[- ]?\s*SN|D\s*[- ]?\s*SN|MAC(?:\s*ADDRESS)?|EN|S\/?N|SN)\s*[:=]?\s*/g;
+
+/** Etiquetas cuyo valor NO sirve para ISP Monitor: la operadora los rechaza. */
+const _ISP_LABEL_REJECTED = /^(D\s*[- ]?\s*SN|EN)$/;
+
+/** Token candidato dentro de una línea: alfanumérico con separadores típicos. */
+const _ISP_TOKEN_RE = /[0-9A-Z][0-9A-Z:_-]{8,}[0-9A-Z]/g;
+
+/**
+ * Corrige confusiones típicas del OCR en la parte hexadecimal de un serial
+ * GPON (O→0, I/L→1, S→5, Z→2, G→6, Q→0). Solo se aplica cuando el token no
+ * validó tal cual; el resultado se marca para que el técnico lo verifique.
+ *
+ * Se remapean ÚNICAMENTE letras que no son hex válido. B es un dígito hex
+ * legítimo, así que aunque el OCR confunda 8 con B no se toca: corregirlo
+ * rompería seriales correctos como ZTEGD4B47E30.
+ */
+function _ispRepairHexTail(code) {
+  if (!/^[A-Z]{4}.{8}$/.test(code)) return null;
+  const map = { O: '0', Q: '0', I: '1', L: '1', S: '5', Z: '2', G: '6' };
+  const tail = code.slice(4).replace(/[OQILSZG]/g, (ch) => map[ch]);
+  const repaired = code.slice(0, 4) + tail;
+  return _ISP_GPON_SN_RE.test(repaired) ? repaired : null;
+}
+
+/**
+ * Extrae de las líneas del OCR el código que ISP Monitor acepta.
+ *
+ * Prioridad: valor detrás de su etiqueta (GPON SN / PON SN / SN / MAC) por
+ * encima de un token suelto con la forma correcta, porque el "EN" de 12
+ * dígitos tiene la misma forma que una MAC y solo la etiqueta los distingue.
+ *
+ * @param {string[]} lines Líneas devueltas por ocrFromImageBase64.
+ * @returns {{id: string, kind: 'GPON'|'MAC', labeled: boolean, repaired: boolean}|null}
+ */
+function _ispPickTerminalIdFromText(lines) {
+  const text = (lines || []).map((l) => String(l || '').toUpperCase()).join('\n');
+  if (!text.trim()) return null;
+
+  const labeled = []; // { label, code }
+  const loose = []; // code
+
+  // (a) Valores precedidos por su etiqueta. El valor puede estar en la misma
+  //     línea o en la siguiente, cuando la etiqueta quedó sola en un renglón.
+  _ISP_LABEL_ANYWHERE_RE.lastIndex = 0;
+  let m;
+  while ((m = _ISP_LABEL_ANYWHERE_RE.exec(text)) !== null) {
+    const label = m[1].replace(/\s+/g, ' ').trim();
+    const rest = text.slice(m.index + m[0].length);
+    const value = /^[\s\n]*([0-9A-Z][0-9A-Z:_-]{8,})/.exec(rest);
+    if (value) labeled.push({ label: label, code: _ispCleanCode(value[1]) });
+  }
+
+  // (b) Todos los tokens sueltos, por si la etiqueta no se leyó.
+  for (const line of text.split('\n')) {
+    _ISP_TOKEN_RE.lastIndex = 0;
+    let t;
+    while ((t = _ISP_TOKEN_RE.exec(line)) !== null) {
+      const code = _ispCleanCode(t[0]);
+      if (code) loose.push(code);
+    }
+  }
+
+  const usable = labeled.filter((x) => !_ISP_LABEL_REJECTED.test(x.label));
+
+  // Un código leído detrás de D-SN o EN queda descartado también como token
+  // suelto: si no, el EN (12 dígitos) se colaría con forma de MAC.
+  const rejected = new Set(
+    labeled.filter((x) => _ISP_LABEL_REJECTED.test(x.label)).map((x) => x.code),
+  );
+  const freeCodes = loose.filter((c) => !rejected.has(c));
+
+  // 1) GPON con etiqueta · 2) GPON suelto · 3) MAC con etiqueta · 4) MAC suelta
+  const gponLabeled = usable.find((x) => _ISP_GPON_SN_RE.test(x.code));
+  if (gponLabeled) return { id: gponLabeled.code, kind: 'GPON', labeled: true, repaired: false };
+
+  const gponLoose = freeCodes.find((c) => _ISP_GPON_SN_RE.test(c));
+  if (gponLoose) return { id: gponLoose, kind: 'GPON', labeled: false, repaired: false };
+
+  const macLabeled = usable.find((x) => _ISP_MAC_RE.test(x.code));
+  if (macLabeled) return { id: macLabeled.code, kind: 'MAC', labeled: true, repaired: false };
+
+  const macLoose = freeCodes.find((c) => _ISP_MAC_RE.test(c));
+  if (macLoose) return { id: macLoose, kind: 'MAC', labeled: false, repaired: false };
+
+  // 5) Último recurso: reparar confusiones del OCR sobre un token con forma de
+  //    serial GPON. Se devuelve marcado para avisar que hay que verificarlo.
+  for (const c of usable.map((x) => x.code).concat(freeCodes)) {
+    const repaired = _ispRepairHexTail(c);
+    if (repaired) return { id: repaired, kind: 'GPON', labeled: false, repaired: true };
+  }
+
+  return null;
+}
+
 /**
  * Cómo se llama la red a la que cuelga el equipo, según la tecnología.
  * No es un "nodo": la operadora aclaró que esos datos salen de una tarjeta de
@@ -1536,8 +1641,11 @@ function renderIspPanel(cuenta) {
       </label>
       <div class="isp-actions">
         ${canScan ? `<button type="button" class="add-row-btn" data-action="isp-scan">Escanear</button>` : ''}
+        ${canScan ? `<button type="button" class="add-row-btn" data-action="isp-photo">Tomar foto</button>` : ''}
         <button type="button" class="save-btn isp-consult-btn" data-action="isp-consult">Consultar</button>
       </div>
+      ${canScan ? `<input type="file" accept="image/*" capture="environment"
+        data-slot="isp-photo-input" style="display:none" aria-hidden="true" tabindex="-1">` : ''}
       <div class="isp-feedback" data-slot="isp-feedback" role="alert" aria-live="polite"></div>
       <div data-slot="isp-results"></div>
     </div>`;
@@ -1553,6 +1661,8 @@ function _bootIspPanel(body, cuenta) {
   const results = panel.querySelector('[data-slot="isp-results"]');
   const consultBtn = panel.querySelector('[data-action="isp-consult"]');
   const scanBtn = panel.querySelector('[data-action="isp-scan"]');
+  const photoBtn = panel.querySelector('[data-action="isp-photo"]');
+  const photoInput = panel.querySelector('[data-slot="isp-photo-input"]');
 
   function setFeedback(message, kind) {
     feedback.textContent = message || '';
@@ -1607,6 +1717,28 @@ function _bootIspPanel(body, cuenta) {
   });
   checkIdShape();
 
+  // Aplica al input el código elegido, venga del barcode o de la foto.
+  function applyPicked(picked, source) {
+    input.value = picked.id;
+    checkIdShape();
+    const what = picked.kind === 'GPON' ? 'Serial GPON' : 'MAC';
+    if (picked.repaired) {
+      setFeedback(
+        `${what} leído de la foto: ${picked.id}. El OCR corrigió caracteres dudosos ` +
+          '(O/0, I/1, S/5): verificá contra la etiqueta antes de consultar.',
+        'warn',
+      );
+    } else if (source === 'photo' && picked.labeled === false) {
+      setFeedback(
+        `${what} detectado: ${picked.id}. No se leyó la etiqueta que lo acompaña, ` +
+          'así que revisá que no sea el D-SN ni el EN.',
+        'warn',
+      );
+    } else {
+      setFeedback(`${what} detectado: ${picked.id}`, 'ok');
+    }
+  }
+
   if (scanBtn) {
     scanBtn.addEventListener('click', async () => {
       scanBtn.disabled = true;
@@ -1615,20 +1747,13 @@ function _bootIspPanel(body, cuenta) {
       try {
         const rawValues = await window.WifixNative.serialScanner.scanBarcodes();
         if (!rawValues || rawValues.length === 0) {
-          setFeedback('No se detectó ningún código. Probá de nuevo o escribilo a mano.', 'warn');
+          setFeedback('No se detectó ningún código. Probá con "Tomar foto" o escribilo a mano.', 'warn');
         } else {
           // La etiqueta trae varios códigos (GPON SN, MAC, D-SN, EN): se elige
           // el único que ISP Monitor acepta.
           const picked = _ispPickTerminalId(rawValues);
           if (picked) {
-            input.value = picked.id;
-            checkIdShape();
-            setFeedback(
-              picked.kind === 'GPON'
-                ? `Serial GPON detectado: ${picked.id}`
-                : `MAC detectada: ${picked.id}`,
-              'ok',
-            );
+            applyPicked(picked, 'barcode');
           } else {
             // Mejor esfuerzo con el extractor genérico, para no dejar al
             // técnico sin nada si la etiqueta usa otro formato.
@@ -1654,6 +1779,96 @@ function _bootIspPanel(body, cuenta) {
         scanBtn.textContent = 'Escanear';
       }
     });
+  }
+
+  // ---- "Tomar foto": OCR sobre la etiqueta ----------------------------------
+  //
+  // Misma idea que en Equipos Retirados: se saca una foto y ML Kit lee el texto
+  // on-device. La diferencia es qué se busca en ese texto — acá solo sirven el
+  // serial GPON y la MAC, así que se usa _ispPickTerminalIdFromText en vez de
+  // extractSerial (que trabaja por modelo de equipo).
+  //
+  // En el APK se usa la cámara nativa; si no está, se cae al <input type="file"
+  // capture="environment">, que en Android abre igual la cámara.
+  if (photoBtn) {
+    const useNativeCamera = !!(window.WifixNative && typeof window.WifixNative.takePhoto === 'function');
+
+    async function readLabelFromBase64(base64) {
+      photoBtn.textContent = 'Leyendo la foto…';
+      const lines = await window.WifixNative.serialScanner.ocrFromImageBase64(base64);
+      if (!lines || lines.length === 0) {
+        setFeedback(
+          'No se encontró texto en la foto. Acercá la cámara a la etiqueta, ' +
+            'enfocá y evitá el reflejo del plástico.',
+          'warn',
+        );
+        return;
+      }
+      const picked = _ispPickTerminalIdFromText(lines);
+      if (!picked) {
+        setFeedback(
+          'Se leyó texto, pero ningún código con forma de serial GPON ni de MAC. ' +
+            'Probá con "Escanear" o escribilo a mano.',
+          'warn',
+        );
+        return;
+      }
+      applyPicked(picked, 'photo');
+    }
+
+    function resetPhotoBtn() {
+      photoBtn.disabled = false;
+      photoBtn.textContent = 'Tomar foto';
+    }
+
+    if (useNativeCamera) {
+      photoBtn.addEventListener('click', async () => {
+        photoBtn.disabled = true;
+        photoBtn.textContent = 'Abriendo cámara…';
+        setFeedback('');
+        try {
+          const dataUrl = await window.WifixNative.takePhoto();
+          if (!dataUrl) {
+            // Cancelado por el técnico o permiso denegado.
+            setFeedback('No se tomó ninguna foto.', 'warn');
+            return;
+          }
+          await readLabelFromBase64(dataUrl.split(',').pop());
+        } catch (err) {
+          console.error('[Wifix] isp takePhoto/OCR', err);
+          setFeedback('No se pudo procesar la foto.', 'error');
+        } finally {
+          resetPhotoBtn();
+        }
+      });
+    } else if (photoInput) {
+      photoBtn.addEventListener('click', () => { photoInput.click(); });
+
+      photoInput.addEventListener('change', async () => {
+        const file = photoInput.files && photoInput.files[0];
+        if (!file) return;
+        photoBtn.disabled = true;
+        setFeedback('');
+        try {
+          const base64 = await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => {
+              const result = reader.result;
+              resolve(typeof result === 'string' ? result.split(',').pop() : '');
+            };
+            reader.onerror = reject;
+            reader.readAsDataURL(file);
+          });
+          await readLabelFromBase64(base64);
+        } catch (err) {
+          console.error('[Wifix] isp OCR desde archivo', err);
+          setFeedback('No se pudo procesar la foto.', 'error');
+        } finally {
+          resetPhotoBtn();
+          photoInput.value = '';
+        }
+      });
+    }
   }
 
   // Si ya se consultó este equipo en esta sesión, se repinta sin volver a pedir.
