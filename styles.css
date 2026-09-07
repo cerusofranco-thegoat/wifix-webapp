@@ -3363,3 +3363,350 @@ body.console-fullscreen-open { overflow: hidden; }
 
 /* Aviso cuando la operadora no expone el detalle puerto a puerto. */
 .port-note { text-align: left; line-height: 1.5; }
+
+/* ==========================================================================
+ * Integración con la operadora (FSM) — marca, avisos, radio de búsqueda,
+ * estados de puertos y notas de cierre bajo demanda.
+ * App de campo: el área táctil mínima es 44 px (se usa con guantes).
+ * ========================================================================*/
+
+/* ---- Control de radio y cantidad de filas del panel NAP -----------------*/
+.nap-radius-control {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 8px 0 4px;
+}
+.nap-radius-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.nap-radius-label,
+.nap-rows-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: rgba(190, 218, 255, 0.85);
+}
+.nap-radius-btn {
+  min-height: 44px;
+  min-width: 60px;
+  padding: 6px 12px;
+  border-radius: 10px;
+  font-family: 'Orbitron', sans-serif;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  color: rgba(180, 210, 255, 0.8);
+  background: rgba(0, 224, 255, 0.05);
+  border: 1px solid rgba(0, 224, 255, 0.2);
+  cursor: pointer;
+}
+.nap-radius-btn:hover { background: rgba(0, 224, 255, 0.1); }
+.nap-radius-btn:focus-visible {
+  outline: 2px solid rgba(0, 224, 255, 0.8);
+  outline-offset: 2px;
+}
+.nap-radius-btn.is-active {
+  background: rgba(0, 224, 255, 0.18);
+  border-color: rgba(0, 224, 255, 0.6);
+  color: #d6f6ff;
+}
+.nap-rows-select {
+  min-height: 44px;
+  padding: 6px 10px;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(0, 224, 255, 0.2);
+  color: #e8f1ff;
+  font-family: 'Orbitron', sans-serif;
+  font-size: 12px;
+}
+.nap-search-btn {
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+}
+.nap-search-btn:focus-visible {
+  outline: 2px solid rgba(0, 224, 255, 0.8);
+  outline-offset: 2px;
+}
+.nap-rows-select:focus-visible {
+  outline: 2px solid rgba(0, 224, 255, 0.8);
+  outline-offset: 2px;
+}
+
+/* ---- Aviso de resultado degradado (no oculta los resultados) ------------*/
+.nap-degraded-note {
+  margin: 6px 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: #ffcf80;
+  background: rgba(210, 153, 34, 0.1);
+  border: 1px solid rgba(210, 153, 34, 0.35);
+}
+
+/* ---- Red de acceso de la NAP (nunca "nodo") ----------------------------*/
+.nap-network-name {
+  display: block;
+  font-size: 10.5px;
+  color: rgba(180, 210, 255, 0.75);
+  letter-spacing: 0.3px;
+  margin-top: 2px;
+}
+.nap-network-key {
+  display: inline-block;
+  margin-right: 6px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.9px;
+  text-transform: uppercase;
+  color: rgba(180, 210, 255, 0.5);
+}
+
+/* ---- Tercer estado del puerto: ocupado sin estado consultado ------------*/
+.port-cell.busy.pending {
+  background: rgba(180, 210, 255, 0.1);
+  border: 1px dashed rgba(180, 210, 255, 0.45);
+  color: rgba(220, 235, 255, 0.85);
+}
+.port-legend .dot.pending {
+  background: transparent;
+  border: 1px dashed rgba(180, 210, 255, 0.7);
+}
+.port-legend span { display: inline-flex; align-items: center; }
+
+/* ---- Consulta de estados bajo demanda ----------------------------------*/
+.port-status-actions {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.port-status-btn {
+  min-height: 44px;
+  align-self: flex-start;
+  padding: 10px 14px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: #00e0ff;
+  background: rgba(0, 224, 255, 0.08);
+  border: 1px solid rgba(0, 224, 255, 0.45);
+  cursor: pointer;
+}
+.port-status-btn:hover { background: rgba(0, 224, 255, 0.16); }
+.port-status-btn:disabled { opacity: 0.7; cursor: default; }
+.port-status-btn:focus-visible {
+  outline: 2px solid rgba(0, 224, 255, 0.8);
+  outline-offset: 2px;
+}
+.port-status-note {
+  font-size: 10.5px;
+  line-height: 1.45;
+  color: rgba(190, 218, 255, 0.85);
+}
+.port-status-note.ok    { color: #6fffc4; }
+.port-status-note.warn  { color: #ffcf80; }
+.port-status-note.error { color: #ff7a7a; }
+
+/* ---- Estados de contrato ampliados (5 + desconocido) -------------------*/
+.status-tile.fail .st-value  { color: #ff8a8a; }
+.status-tile.info .st-value  { color: #b3a5ff; }
+.status-tile.muted .st-value { color: rgba(220, 235, 255, 0.6); }
+.status-tile .st-sub {
+  display: block;
+  margin-top: 3px;
+  font-size: 10px;
+  letter-spacing: 0.4px;
+  color: rgba(180, 210, 255, 0.65);
+}
+
+/* ---- Avisos no bloqueantes y notas del backend -------------------------*/
+.detail-warning {
+  padding: 12px;
+  margin: 6px 0;
+  border-radius: 10px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  text-align: left;
+  color: #ffcf80;
+  background: rgba(210, 153, 34, 0.1);
+  border: 1px solid rgba(210, 153, 34, 0.4);
+}
+.detail-note {
+  padding: 10px 12px;
+  margin: 6px 0;
+  border-radius: 10px;
+  font-size: 11px;
+  line-height: 1.5;
+  text-align: left;
+  color: rgba(180, 210, 255, 0.8);
+  background: rgba(0, 224, 255, 0.05);
+  border: 1px dashed rgba(0, 224, 255, 0.28);
+}
+.integration-warning {
+  position: relative;
+  z-index: 1;
+  margin: 0 22px 10px;
+}
+.form-note {
+  margin: 8px 0 0;
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: rgba(180, 210, 255, 0.65);
+}
+
+/* ---- Chip de marca (realm) junto al chip de cuenta ---------------------*/
+.brand-chip-slot { position: relative; display: inline-flex; }
+.brand-chip {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: rgba(106, 92, 255, 0.12);
+  border: 1px solid rgba(106, 92, 255, 0.4);
+  color: #b3a5ff;
+}
+.brand-chip-label {
+  font-size: 8.5px;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  opacity: 0.75;
+}
+.brand-chip-value {
+  font-family: 'Orbitron', sans-serif;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+}
+.brand-chip.selectable {
+  min-height: 44px;
+  justify-content: center;
+  cursor: pointer;
+}
+.brand-chip.selectable:hover { background: rgba(106, 92, 255, 0.24); }
+.brand-chip.selectable:focus-visible {
+  outline: 2px solid rgba(106, 92, 255, 0.9);
+  outline-offset: 2px;
+}
+.brand-chip.selectable .brand-chip-value::after {
+  content: ' ▾';
+  font-size: 9px;
+  opacity: 0.8;
+}
+.brand-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 10;
+  min-width: 140px;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border-radius: 12px;
+  background: rgba(8, 14, 30, 0.97);
+  border: 1px solid rgba(106, 92, 255, 0.45);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.5);
+}
+.brand-menu-item {
+  min-height: 44px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  text-align: left;
+  font-family: 'Orbitron', sans-serif;
+  font-size: 11px;
+  letter-spacing: 0.8px;
+  color: #e8f1ff;
+  background: transparent;
+  border: 1px solid transparent;
+  cursor: pointer;
+}
+.brand-menu-item:hover { background: rgba(106, 92, 255, 0.18); }
+.brand-menu-item.is-active {
+  border-color: rgba(106, 92, 255, 0.6);
+  color: #b3a5ff;
+}
+.brand-menu-item:focus-visible {
+  outline: 2px solid rgba(106, 92, 255, 0.9);
+  outline-offset: 2px;
+}
+
+/* ---- Campos todavía simulados (no vienen de la operadora) --------------*/
+.source-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 8.5px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  color: rgba(180, 210, 255, 0.85);
+  background: rgba(180, 210, 255, 0.12);
+  border: 1px solid rgba(180, 210, 255, 0.3);
+  vertical-align: middle;
+}
+
+/* ---- Notas de cierre bajo demanda -------------------------------------*/
+.task-notes-btn {
+  min-height: 44px;
+  margin-top: 8px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: #00e0ff;
+  background: transparent;
+  border: 1px dashed rgba(0, 224, 255, 0.4);
+  cursor: pointer;
+}
+.task-notes-btn:hover { background: rgba(0, 224, 255, 0.07); }
+.task-notes-btn:disabled { opacity: 0.7; cursor: default; }
+.task-notes-btn:focus-visible {
+  outline: 2px solid rgba(0, 224, 255, 0.8);
+  outline-offset: 2px;
+}
+.task-notes-slot { margin-top: 6px; }
+.task-notes-slot.hidden { display: none; }
+.task-notes-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.task-note {
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(0, 224, 255, 0.04);
+  border: 1px solid rgba(0, 224, 255, 0.14);
+}
+.task-note-date {
+  display: block;
+  font-family: 'Orbitron', sans-serif;
+  font-size: 9.5px;
+  letter-spacing: 0.6px;
+  color: #00e0ff;
+  margin-bottom: 3px;
+}
+.task-note-text {
+  display: block;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: rgba(240, 246, 255, 0.9);
+}

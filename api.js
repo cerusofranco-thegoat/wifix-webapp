@@ -33,6 +33,10 @@
   const API_BASE_URL = defaultBaseUrl();
   const TOKEN_STORAGE_KEY = 'wifix_token';
   const USER_STORAGE_KEY = 'wifix_user';
+  // Marca (realm) de la operadora. null = usar el default del backend.
+  const BRAND_STORAGE_KEY = 'wifix_fsm_brand';
+  // Tope de cuentas por llamada a /accounts/status-batch (contrato §7).
+  const STATUS_BATCH_LIMIT = 12;
 
   // ---------------------------------------------------------------------------
   // Datos de catálogo mock — alineados con SPEC §8 (mismos nombres y códigos).
@@ -132,16 +136,60 @@
     } catch (_) { /* localStorage bloqueado */ }
   }
 
+  // --- Marca / realm de la operadora (header X-Wifix-Brand) ---------------
+  // Un solo punto de verdad: la marca NO se pasa como argumento a las
+  // funciones de WifixAPI, viaja siempre como header desde fetchJson.
+  function getBrand() {
+    try { return localStorage.getItem(BRAND_STORAGE_KEY); } catch (_) { return null; }
+  }
+  function setBrand(brand) {
+    try {
+      if (brand) localStorage.setItem(BRAND_STORAGE_KEY, String(brand));
+      else localStorage.removeItem(BRAND_STORAGE_KEY);
+    } catch (_) { /* localStorage bloqueado, no se persiste */ }
+  }
+
   function emitUnauthorized() {
     try {
       window.dispatchEvent(new CustomEvent('wifix:unauthorized'));
     } catch (_) { /* ignore */ }
   }
 
-  async function fetchJson(method, path, body) {
+  // UPSTREAM_AUTH_ERROR (HTTP 503): problema administrativo del servidor
+  // (token de la operadora ausente/vencido/rechazado). NO cierra sesión, NO
+  // limpia el token de Wifix, NO recarga la app: solo avisa a la UI para que
+  // pinte un banner en el panel afectado. Ver contrato §1.
+  function emitIntegrationUnavailable(meta, message) {
+    try {
+      const m = meta || {};
+      window.dispatchEvent(new CustomEvent('wifix:integration-unavailable', {
+        detail: {
+          integration: m.integration || 'FSM',
+          brand: m.brand !== undefined && m.brand !== null ? m.brand : getBrand(),
+          reason: m.reason || null,
+          message: message || null,
+        },
+      }));
+    } catch (_) { /* ignore */ }
+  }
+
+  // `GET /naps/nearby` devuelve un array desnudo, así que el bloque `degraded`
+  // viaja en el header X-Wifix-Degraded (JSON URL-encoded). Ver contrato §5.
+  function readDegradedHeader(res) {
+    try {
+      const raw = res && res.headers && res.headers.get ? res.headers.get('X-Wifix-Degraded') : null;
+      if (!raw) return null;
+      return JSON.parse(decodeURIComponent(raw));
+    } catch (_) { return null; }
+  }
+
+  // opts.withMeta === true -> devuelve { data, degraded } en vez de data.
+  async function fetchJson(method, path, body, opts) {
     const init = { method, headers: { 'Content-Type': 'application/json' } };
     const token = getToken();
     if (token) init.headers['Authorization'] = 'Bearer ' + token;
+    const brand = getBrand();
+    if (brand) init.headers['X-Wifix-Brand'] = brand;
     if (body !== undefined) init.body = JSON.stringify(body);
     const res = await fetch(API_BASE_URL + path, init);
     const data = await res.json().catch(function () { return null; });
@@ -156,76 +204,207 @@
       const err = new Error(msg);
       err.code = code;
       err.details = data && data.details;
+      if (code === 'UPSTREAM_AUTH_ERROR') {
+        err.meta = data && data.meta;
+        emitIntegrationUnavailable(data && data.meta, msg);
+      }
       throw err;
     }
+    if (opts && opts.withMeta === true) {
+      return { data: data, degraded: readDegradedHeader(res) };
+    }
     return data;
+  }
+
+  // Las rutas de visitas/tareas pasaron de array desnudo a { items, ... }.
+  // Se normaliza acá para que app.js vea siempre un objeto (contrato §10/§11).
+  function asItemsEnvelope(result) {
+    if (Array.isArray(result)) return { items: result, totalOrders: result.length };
+    if (result && Array.isArray(result.items)) return result;
+    return { items: [], totalOrders: 0 };
   }
 
   // ---------------------------------------------------------------------------
   // Catálogos mock fallback para client-profile (al usar mock antes del login).
   // ---------------------------------------------------------------------------
+  // Marca mock: la del selector si el técnico eligió una, si no la default.
+  function mockBrand() {
+    return getBrand() || 'telenews';
+  }
+  function mockWorkOrderId(seed) {
+    return 'ORDER/' + (424900 + (seed || 0)) + '/2026';
+  }
   function mockClientProfile(accountNumber) {
     return {
       accountNumber: accountNumber,
       fullName: 'Cliente Mock Apellido Apellido',
       address: 'Av. Amazonas N1234, Quito',
       phones: ['0991234567', '022345678'],
+      email: 'cliente.mock@example.com',
       planName: 'Wifix Hogar 200',
       contractedDownloadMbps: 200,
       contractedUploadMbps: 100,
+      latitude: -2.247946,
+      longitude: -79.904161,
+      // Plan y velocidad siguen simulados hasta que exista API de Comarch.
+      sources: {
+        fullName: 'FSM', address: 'FSM', phones: 'FSM', email: 'FSM',
+        latitude: 'FSM', longitude: 'FSM',
+        planName: 'MOCK', contractedDownloadMbps: 'MOCK', contractedUploadMbps: 'MOCK',
+      },
     };
   }
   function mockContractStatus(accountNumber) {
     return {
       clientName: 'Cliente Mock Apellido Apellido',
       accounts: [
-        { accountNumber: accountNumber, contractId: 'CTR-' + accountNumber, status: 'ACTIVA' },
+        {
+          accountNumber: accountNumber,
+          contractId: null,            // FSM no expone contrato (contrato §4, ⚠1)
+          status: 'ACTIVA',
+          statusCode: 'A',
+          statusDescription: 'Activo',
+          lastWorkOrder: mockWorkOrderId(0),
+        },
       ],
+      brand: mockBrand(),
+    };
+  }
+  // Estado de la integración. No toca la operadora: es información local.
+  function mockFsmHealth() {
+    const in24h = new Date(Date.now() + 86400000).toISOString();
+    return {
+      mode: 'mock',
+      defaultBrand: 'telenews',
+      brands: [
+        { brand: 'telenews', available: true, reason: null, tokenSource: 'STATIC', expiresAt: in24h, expiresInSeconds: 86400 },
+        { brand: 'seteinfo', available: true, reason: null, tokenSource: 'STATIC', expiresAt: in24h, expiresInSeconds: 86400 },
+      ],
+      napsPrimarySource: 'tec',
+    };
+  }
+  // Estados por cuenta (campo 8, paso 2). Determinista por número de cuenta
+  // para que la rejilla de puertos no "baile" entre consultas.
+  const MOCK_STATUS_TABLE = [
+    { statusCode: 'A', status: 'ACTIVA', statusDescription: 'Activo' },
+    { statusCode: 'S', status: 'SUSPENDIDA', statusDescription: 'Suspendido' },
+    { statusCode: 'T', status: 'TERMINADA', statusDescription: 'Terminado' },
+    { statusCode: 'P', status: 'PENDIENTE', statusDescription: 'Pendiente' },
+  ];
+  function mockStatusBatch(accounts) {
+    const list = accounts || [];
+    const items = list.map(function (acc, i) {
+      const digits = String(acc).replace(/\D/g, '');
+      const seed = digits ? Number(digits.slice(-2)) : i;
+      // Una de cada seis cuentas simula un fallo aislado: el lote NO se cae.
+      if (seed % 6 === 5) {
+        return {
+          accountNumber: String(acc), status: null, statusCode: null, statusDescription: null,
+          error: 'FSM no devolvió estado para esta cuenta.',
+        };
+      }
+      const row = MOCK_STATUS_TABLE[seed % MOCK_STATUS_TABLE.length];
+      return {
+        accountNumber: String(acc),
+        status: row.status,
+        statusCode: row.statusCode,
+        statusDescription: row.statusDescription,
+        error: null,
+      };
+    });
+    const failed = items.filter(function (it) { return it.error; }).length;
+    return {
+      brand: mockBrand(),
+      items: items,
+      requested: items.length,
+      resolved: items.length - failed,
+      failed: failed,
     };
   }
   // Genera NAPs mock alrededor de una coordenada, con la misma forma que
   // devuelve la API de operadora (/api/tec/naps/{lat},{lng}).
-  function mockNearbyNaps(coords) {
+  function mockNearbyNaps(coords, opts) {
     const lat = coords && isFinite(coords.latitude) ? coords.latitude : -0.1800;
     const lng = coords && isFinite(coords.longitude) ? coords.longitude : -78.4680;
+    const o = opts || {};
+    const meters = isFinite(o.meters) ? Number(o.meters) : 100;
+    const maxRows = isFinite(o.maxRows) ? Number(o.maxRows) : 5;
     const offsets = [
       [20, 0.6], [47, 2.1], [61, 3.4], [73, 4.8], [92, 1.2], [113, 5.6],
+      [148, 2.7], [186, 0.2], [231, 4.1], [289, 3.0], [344, 5.1], [412, 1.7],
     ];
-    const used = [4, 3, 2, 0, 2, 1];
-    return offsets.map(function (pair, i) {
-      const meters = pair[0];
+    const used = [4, 3, 2, 0, 2, 1, 6, 8, 5, 0, 3, 7];
+    const all = offsets.map(function (pair, i) {
+      const dist = pair[0];
       const bearing = pair[1];
-      const dLat = (meters * Math.cos(bearing)) / 111320;
-      const dLng = (meters * Math.sin(bearing)) / (111320 * Math.cos(lat * Math.PI / 180));
+      const dLat = (dist * Math.cos(bearing)) / 111320;
+      const dLng = (dist * Math.sin(bearing)) / (111320 * Math.cos(lat * Math.PI / 180));
       const total = i % 2 === 0 ? 8 : 16;
       return {
+        napId: 11540 + i,
         napCode: 'NAP-' + (12 + i) + '-0' + ((i % 6) + 1),
+        networkName: 'OLT-GYE-0' + ((i % 4) + 1) + '/1/2',
         latitude: lat + dLat,
         longitude: lng + dLng,
-        distanceMeters: meters,
+        distanceMeters: dist,
         occupiedPorts: used[i],
         totalPorts: total,
         freePorts: total - used[i],
+        source: 'FSM',
       };
     });
+    // Devuelve TODAS las del radio: getNearbyNaps recorta a maxRows y así sabe
+    // si la lista quedó realmente truncada.
+    return all.filter(function (n) { return n.distanceMeters <= meters; });
   }
-  function mockNapPorts(napCode) {
-    const ports = Array.from({ length: 16 }, function (_, i) {
+  // Puertos de una NAP. `napRef` numérico = napId de FSM (detalle real);
+  // cualquier otro valor = código de NAP por el camino TEC, sin detalle.
+  function mockNapPorts(napRef) {
+    const ref = String(napRef);
+    if (!/^\d+$/.test(ref)) {
+      return {
+        napRef: ref,
+        napId: null,
+        napCode: ref,
+        ports: [],
+        detailAvailable: false,
+        note: 'El detalle puerto a puerto todavía no está expuesto por esta fuente.',
+        occupiedPorts: 0,
+        totalPorts: 0,
+        statusFanOut: { supported: false, pendingAccounts: 0, batchLimit: STATUS_BATCH_LIMIT },
+        source: 'TEC',
+      };
+    }
+    const base = Number(ref);
+    const total = 16;
+    const ports = [];
+    for (let i = 0; i < total; i++) {
       const occupied = i % 3 !== 0;
-      const port = { portNumber: i + 1, occupied: occupied };
-      if (occupied) {
-        port.clientAccountNumber = 'WX-' + (100000 + i);
-        port.clientStatus = i % 7 === 0 ? 'S' : 'A';
-      }
-      return port;
-    });
+      ports.push({
+        portNumber: i + 1,
+        occupied: occupied,
+        // El estado NO se consulta en este paso: llega null y statusPending.
+        clientAccountNumber: occupied ? String(35070000 + ((base * 7 + i * 13) % 900000)) : null,
+        equipmentId: occupied ? 'ZTEGD' + (base % 1000) + pad4(i + 1) : null,
+        clientStatus: null,
+        statusPending: occupied,
+      });
+    }
+    const occupiedPorts = ports.filter(function (p) { return p.occupied; }).length;
     return {
-      napCode: napCode,
+      napRef: ref,
+      napId: base,
+      napCode: 'NAP-' + ref,
       ports: ports,
       detailAvailable: true,
-      occupiedPorts: ports.filter(function (p) { return p.occupied; }).length,
-      totalPorts: ports.length,
+      occupiedPorts: occupiedPorts,
+      totalPorts: total,
+      statusFanOut: { supported: true, pendingAccounts: occupiedPorts, batchLimit: STATUS_BATCH_LIMIT },
+      source: 'FSM',
     };
+  }
+  function pad4(n) {
+    return ('000' + n).slice(-4);
   }
 
   // --- ISP Monitor: ficha del terminal y series de 24 h -------------------
@@ -381,14 +560,81 @@
       ],
     };
   }
+  // ⚠2 `technician` es siempre null: FSM no expone quién cerró la tarea.
   function mockClosedTask(seed) {
     return {
       taskId: 'TASK/' + (100000 + seed) + '/2026',
-      occurredAt: nowIso(),
+      workOrder: mockWorkOrderId(seed),
+      occurredAt: new Date(Date.now() - seed * 86400000).toISOString(),
       reason: 'WiFi débil en habitaciones',
       closingNotes: 'Se cambió canal a 5GHz y mejoró cobertura.',
-      technician: 'Andrés Cevallos',
+      technician: null,
       result: seed % 2 === 0 ? 'SATISFACTORIA' : 'INSATISFACTORIA',
+      notesLoaded: false,
+    };
+  }
+  // Notas de cierre de una orden (se cargan bajo demanda, una por expansión).
+  function mockWorkOrderTasks(workOrder) {
+    const wo = String(workOrder);
+    const digits = wo.replace(/\D/g, '');
+    const seed = digits ? Number(digits.slice(-3)) : 0;
+    const finishedAt = new Date(Date.now() - (seed % 30) * 86400000).toISOString();
+    return {
+      workOrder: wo,
+      brand: mockBrand(),
+      tasks: [
+        {
+          taskId: 'TASK/' + (294000 + (seed % 900)) + '/2026',
+          status: 'CERRADA',
+          businessKey: 'BK-' + (seed % 9999),
+          createdAt: new Date(Date.parse(finishedAt) - 9000000).toISOString(),
+          finishedAt: finishedAt,
+          result: seed % 2 === 0 ? 'SATISFACTORIA' : 'INSATISFACTORIA',
+          notes: [
+            { createdAt: new Date(Date.parse(finishedAt) - 600000).toISOString(),
+              content: 'Cliente reporta intermitencia, se reinició la ONT y se validó potencia óptica.' },
+            { createdAt: finishedAt,
+              content: 'Se reubicó el equipo a la sala; señal WiFi estable en toda la vivienda.' },
+          ],
+        },
+      ],
+    };
+  }
+  function mockAccountOrders(accountNumber, estado) {
+    const profile = mockClientProfile(accountNumber);
+    const orders = [0, 1, 2].map(function (i) {
+      const created = new Date(Date.now() - (i + 1) * 5 * 86400000).toISOString();
+      const finished = i === 0 ? null : new Date(Date.parse(created) + 9000000).toISOString();
+      return {
+        workOrder: mockWorkOrderId(i),
+        task: i === 0 ? 'MANTENIMIENTO' : 'INSTALACION',
+        state: finished ? 'FINALIZADA' : 'EN PROCESO',
+        externalProcess: 'PROC-' + (1000 + i),
+        cpartyId: 'CP-' + (500 + i),
+        createdAt: created,
+        endedAt: finished,
+        finished: finished !== null,
+        note: 'Orden de prueba generada por el modo demo.',
+        latitude: profile.latitude,
+        longitude: profile.longitude,
+        address: profile.address,
+      };
+    });
+    const filtered = estado === 'Pendientes'
+      ? orders.filter(function (o) { return !o.finished; })
+      : orders;
+    return {
+      accountNumber: accountNumber,
+      brand: mockBrand(),
+      client: {
+        names: profile.fullName,
+        phoneNumber: profile.phones[0],
+        email: profile.email,
+        address: profile.address,
+        latitude: profile.latitude,
+        longitude: profile.longitude,
+      },
+      orders: filtered,
     };
   }
 
@@ -407,6 +653,10 @@
     },
     getCurrentUser: getUser,
     getToken: getToken,
+    // Marca (realm) de la operadora: viaja como header X-Wifix-Brand en todas
+    // las peticiones. null = el backend usa su marca por defecto.
+    getBrand: getBrand,
+    setBrand: setBrand,
     logout() {
       setToken(null);
       setUser(null);
@@ -600,22 +850,107 @@
       return mockContractStatus(accountNumber);
     },
 
+    // ---- Integración FSM ---------------------------------------------------
+    // Estado de la integración con la operadora. Es información local del
+    // backend: NO dispara ninguna llamada a la operadora.
+    async getFsmHealth() {
+      if (this.useRealApi) return fetchJson('GET', '/integrations/fsm/health');
+      await delay(60);
+      return mockFsmHealth();
+    },
+
+    // Estado de varias cuentas en una sola acción del técnico (campo 8, paso 2).
+    // NUNCA se llama de forma automática: solo por gesto explícito.
+    // Si llegan más cuentas que el tope, se parte en lotes SECUENCIALES para no
+    // abusar de la operadora (todo su tráfico es producción).
+    async getAccountsStatusBatch(accounts) {
+      const list = [];
+      const seen = {};
+      (accounts || []).forEach(function (a) {
+        const s = String(a === null || a === undefined ? '' : a).trim();
+        if (!s || seen[s]) return;
+        seen[s] = true;
+        list.push(s);
+      });
+      if (list.length === 0) {
+        const err = new Error('Se necesita al menos una cuenta para consultar estados.');
+        err.code = 'VALIDATION_ERROR';
+        throw err;
+      }
+      const merged = { brand: null, items: [], requested: 0, resolved: 0, failed: 0 };
+      for (let i = 0; i < list.length; i += STATUS_BATCH_LIMIT) {
+        const chunk = list.slice(i, i + STATUS_BATCH_LIMIT);
+        let part;
+        if (this.useRealApi) {
+          part = await fetchJson('POST', '/accounts/status-batch', { accounts: chunk });
+        } else {
+          await delay(120);
+          part = mockStatusBatch(chunk);
+        }
+        if (part) {
+          if (part.brand && !merged.brand) merged.brand = part.brand;
+          if (Array.isArray(part.items)) merged.items = merged.items.concat(part.items);
+          merged.requested += Number(part.requested) || chunk.length;
+          merged.resolved += Number(part.resolved) || 0;
+          merged.failed += Number(part.failed) || 0;
+        }
+      }
+      return merged;
+    },
+
+    // Órdenes crudas normalizadas de la cuenta. estado: 'Todas' | 'Pendientes'.
+    async getAccountOrders(accountNumber, estado) {
+      const q = estado ? '?estado=' + encodeURIComponent(estado) : '';
+      if (this.useRealApi) {
+        return fetchJson('GET', '/accounts/' + encodeURIComponent(accountNumber) + '/orders' + q);
+      }
+      await delay(80);
+      return mockAccountOrders(accountNumber, estado);
+    },
+
+    // Notas de cierre de una orden. `workOrder` va como query param porque
+    // contiene barras (ORDER/424900/2026).
+    async getWorkOrderTasks(workOrder) {
+      if (this.useRealApi) {
+        return fetchJson('GET', '/workorders/tasks?workOrder=' + encodeURIComponent(workOrder));
+      }
+      await delay(80);
+      return mockWorkOrderTasks(workOrder);
+    },
+
     // ---- Diagnóstico de Red (campos 6, 8-14, 19-21) ------------------------
     // Campo 6: NAPs cercanas a una coordenada (GPS del técnico o de la tarea).
     // La API de operadora indexa por lat/lng, no por número de cuenta.
-    async getNearbyNaps(coords) {
+    // opts = { meters, maxRows } (opcional). Devuelve { naps, degraded }:
+    // el aviso de degradación viaja en el header X-Wifix-Degraded porque la
+    // respuesta del backend es un array desnudo.
+    async getNearbyNaps(coords, opts) {
       if (!coords || !isFinite(coords.latitude) || !isFinite(coords.longitude)) {
         throw new Error('Se necesita una coordenada (lat/lng) para buscar NAPs.');
       }
+      const o = opts || {};
       if (this.useRealApi) {
-        return fetchJson(
-          'GET',
-          '/naps/nearby?lat=' + encodeURIComponent(coords.latitude) +
-            '&lng=' + encodeURIComponent(coords.longitude),
-        );
+        let path = '/naps/nearby?lat=' + encodeURIComponent(coords.latitude) +
+          '&lng=' + encodeURIComponent(coords.longitude);
+        if (o.meters !== undefined && o.meters !== null) path += '&meters=' + encodeURIComponent(o.meters);
+        if (o.maxRows !== undefined && o.maxRows !== null) path += '&maxRows=' + encodeURIComponent(o.maxRows);
+        const r = await fetchJson('GET', path, undefined, { withMeta: true });
+        return {
+          naps: Array.isArray(r.data) ? r.data : [],
+          degraded: r.degraded || null,
+        };
       }
       await delay(80);
-      return mockNearbyNaps(coords);
+      const todas = mockNearbyNaps(coords, o);
+      const maxRows = isFinite(o.maxRows) ? Number(o.maxRows) : 5;
+      const degraded = todas.length > maxRows
+        ? {
+          reason: 'TRUNCATED',
+          message: 'Se muestran las ' + maxRows + ' NAPs más cercanas de ' + todas.length +
+            ' en el radio. Amplía el número de filas para ver el resto.',
+        }
+        : null;
+      return { naps: todas.slice(0, maxRows), degraded: degraded };
     },
 
     // ---- ISP Monitor por serial GPON / MAC HFC (campos 9-13) --------------
@@ -648,12 +983,15 @@
       return mockSeries(id, scope, metric);
     },
 
-    async getNapPorts(napCode) {
+    // `napRef` = napId numérico de FSM cuando existe, o el código de NAP.
+    // Este paso NUNCA pide estados de cliente: `withStatus` no se envía jamás
+    // desde la webapp (contrato §6 y §13).
+    async getNapPorts(napRef) {
       if (this.useRealApi) {
-        return fetchJson('GET', '/naps/' + encodeURIComponent(napCode) + '/ports');
+        return fetchJson('GET', '/naps/' + encodeURIComponent(napRef) + '/ports');
       }
       await delay(80);
-      return mockNapPorts(napCode);
+      return mockNapPorts(napRef);
     },
     async getNetworkMetrics(accountNumber) {
       if (this.useRealApi) {
@@ -701,22 +1039,47 @@
     },
 
     // ---- Tareas y Visitas (campos 15-16) -----------------------------------
+    // Devuelven siempre { items, totalOrders, ... }: el backend pasó de array
+    // desnudo a objeto envolvente y se tolera la forma antigua.
     async getUnsatisfactoryTasks(accountNumber) {
       if (this.useRealApi) {
-        return fetchJson('GET', '/accounts/' + encodeURIComponent(accountNumber) + '/unsatisfactory-tasks');
+        const r = await fetchJson('GET', '/accounts/' + encodeURIComponent(accountNumber) + '/unsatisfactory-tasks');
+        return asItemsEnvelope(r);
       }
       await delay(80);
-      return [mockClosedTask(1), mockClosedTask(3)].map(function (t) {
+      const items = [mockClosedTask(1), mockClosedTask(3)].map(function (t) {
         t.result = 'INSATISFACTORIA';
+        t.reason = 'CERRADA';
+        t.notesLoaded = true;
         return t;
       });
+      return {
+        items: items,
+        scanned: 5,
+        totalOrders: 12,
+        truncated: true,
+        brand: mockBrand(),
+        degraded: {
+          reason: 'TRUNCATED',
+          message: 'Se revisaron las 5 órdenes más recientes de 12. Abre una visita concreta para ver sus notas.',
+        },
+      };
     },
     async getPreviousVisits(accountNumber) {
       if (this.useRealApi) {
-        return fetchJson('GET', '/accounts/' + encodeURIComponent(accountNumber) + '/previous-visits');
+        const r = await fetchJson('GET', '/accounts/' + encodeURIComponent(accountNumber) + '/previous-visits');
+        return asItemsEnvelope(r);
       }
       await delay(80);
-      return [mockClosedTask(2), mockClosedTask(4), mockClosedTask(6)];
+      const items = [mockClosedTask(2), mockClosedTask(4), mockClosedTask(6)].map(function (t) {
+        t.taskId = t.workOrder;
+        t.reason = 'INSTALACION';
+        t.closingNotes = '';
+        t.result = 'PENDIENTE';
+        t.notesLoaded = false;
+        return t;
+      });
+      return { items: items, totalOrders: 12, brand: mockBrand() };
     },
   };
 

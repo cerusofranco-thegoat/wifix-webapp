@@ -73,6 +73,8 @@ loginForm.addEventListener('submit', async (ev) => {
     hideLogin();
     loginEmail.value = '';
     loginPassword.value = '';
+    // Una sola llamada por sesión: el health es local del backend.
+    loadFsmHealth().then(warnIfNoBrandAvailable);
   } catch (err) {
     console.error('[Wifix] login error:', err);
     loginError.textContent = err.message || 'No se pudo iniciar sesión.';
@@ -84,6 +86,8 @@ loginForm.addEventListener('submit', async (ev) => {
 
 logoutBtn.addEventListener('click', () => {
   WifixAPI.logout();
+  _fsmHealth = null;
+  renderIntegrationWarning(null);
   // Cerrar todas las detail screens y el subscreen al cerrar sesión.
   document.querySelectorAll('.detailscreen, .subscreen').forEach((el) => {
     el.classList.remove('open');
@@ -92,8 +96,11 @@ logoutBtn.addEventListener('click', () => {
   showLogin();
 });
 
+// Solo el 401 del JWT propio de Wifix llega acá. Los fallos de la integración
+// con la operadora viajan como UPSTREAM_AUTH_ERROR (503) y NO cierran sesión.
 window.addEventListener('wifix:unauthorized', () => {
   console.warn('[Wifix] sesión expirada, volviendo a login.');
+  _fsmHealth = null;
   document.querySelectorAll('.detailscreen, .subscreen').forEach((el) => {
     el.classList.remove('open');
     el.setAttribute('aria-hidden', 'true');
@@ -101,6 +108,187 @@ window.addEventListener('wifix:unauthorized', () => {
   showLogin();
   loginError.textContent = 'Tu sesión expiró. Vuelve a ingresar.';
 });
+
+// === Integración con la operadora (FSM) =====================================
+// Marca activa (realm) y disponibilidad de la integración. `health` es local
+// del backend: NO consulta a la operadora, así que se pide una sola vez por
+// sesión y se cachea en memoria.
+let _fsmHealth = null;
+let _fsmHealthLoading = null;
+
+function fsmAvailableBrands() {
+  if (!_fsmHealth || !Array.isArray(_fsmHealth.brands)) return [];
+  return _fsmHealth.brands.filter(b => b && b.available === true);
+}
+
+function fsmActiveBrand() {
+  const elegida = WifixAPI.getBrand();
+  if (elegida) return elegida;
+  return (_fsmHealth && _fsmHealth.defaultBrand) || null;
+}
+
+async function loadFsmHealth() {
+  if (_fsmHealth) return _fsmHealth;
+  if (_fsmHealthLoading) return _fsmHealthLoading;
+  _fsmHealthLoading = (async () => {
+    try {
+      _fsmHealth = await WifixAPI.getFsmHealth();
+    } catch (err) {
+      // No bloquea nada: sin health, el chip no se muestra y el resto de la
+      // app (Herramientas, Equipos Retirados) sigue igual.
+      console.warn('[Wifix] fsm health:', err);
+      _fsmHealth = null;
+    } finally {
+      _fsmHealthLoading = null;
+    }
+    renderBrandChips();
+    return _fsmHealth;
+  })();
+  return _fsmHealthLoading;
+}
+
+function renderBrandChips() {
+  const slots = document.querySelectorAll('[data-slot="brand-chip"]');
+  const disponibles = fsmAvailableBrands();
+  const activa = fsmActiveBrand();
+  slots.forEach((slot) => {
+    if (!_fsmHealth || !activa) {
+      slot.innerHTML = '';
+      slot.hidden = true;
+      return;
+    }
+    slot.hidden = false;
+    const seleccionable = disponibles.length > 1;
+    const etiqueta = escapeHtml(activa);
+    if (seleccionable) {
+      slot.innerHTML = `
+        <button type="button" class="brand-chip selectable" data-action="brand-menu"
+          aria-haspopup="true" aria-expanded="false"
+          aria-label="Marca de la operadora: ${etiqueta}. Tocar para cambiar.">
+          <span class="brand-chip-label">Marca</span>
+          <span class="brand-chip-value">${etiqueta}</span>
+        </button>`;
+      const btn = slot.querySelector('[data-action="brand-menu"]');
+      btn.addEventListener('click', () => toggleBrandMenu(slot, btn));
+    } else {
+      slot.innerHTML = `
+        <span class="brand-chip" aria-label="Marca de la operadora: ${etiqueta}">
+          <span class="brand-chip-label">Marca</span>
+          <span class="brand-chip-value">${etiqueta}</span>
+        </span>`;
+    }
+  });
+}
+
+function closeBrandMenus(focusBtn) {
+  const habiaMenu = document.querySelector('.brand-menu') !== null;
+  document.querySelectorAll('.brand-menu').forEach(m => m.remove());
+  document.querySelectorAll('[data-action="brand-menu"]').forEach(b => b.setAttribute('aria-expanded', 'false'));
+  // Devolver el foco al chip para no perder al usuario de teclado.
+  if (habiaMenu && focusBtn && focusBtn.focus) focusBtn.focus();
+}
+
+// Cerrar el selector con Escape o tocando fuera.
+document.addEventListener('keydown', (ev) => {
+  if (ev.key !== 'Escape') return;
+  const abierto = document.querySelector('.brand-menu');
+  if (!abierto) return;
+  const btn = abierto.parentNode ? abierto.parentNode.querySelector('[data-action="brand-menu"]') : null;
+  closeBrandMenus(btn);
+});
+document.addEventListener('click', (ev) => {
+  if (!document.querySelector('.brand-menu')) return;
+  const dentro = ev.target && ev.target.closest && ev.target.closest('.brand-chip-slot');
+  if (dentro) return;
+  closeBrandMenus();
+});
+
+function toggleBrandMenu(slot, btn) {
+  const abierto = slot.querySelector('.brand-menu');
+  closeBrandMenus();
+  if (abierto) return;
+  const activa = fsmActiveBrand();
+  const menu = document.createElement('div');
+  menu.className = 'brand-menu';
+  menu.setAttribute('role', 'menu');
+  menu.innerHTML = fsmAvailableBrands().map(b => `
+    <button type="button" class="brand-menu-item${b.brand === activa ? ' is-active' : ''}"
+      role="menuitemradio" aria-checked="${b.brand === activa ? 'true' : 'false'}"
+      data-brand="${escapeHtml(b.brand)}">${escapeHtml(b.brand)}</button>`).join('');
+  slot.appendChild(menu);
+  btn.setAttribute('aria-expanded', 'true');
+  menu.querySelectorAll('[data-brand]').forEach((item) => {
+    item.addEventListener('click', () => {
+      const marca = item.dataset.brand;
+      closeBrandMenus();
+      applyBrand(marca);
+      // El chip se repinta: se devuelve el foco al nuevo chip.
+      const nuevo = slot.querySelector('[data-action="brand-menu"]');
+      if (nuevo && nuevo.focus) nuevo.focus();
+    });
+  });
+  const primero = menu.querySelector('.brand-menu-item');
+  if (primero) primero.focus();
+}
+
+// Cambiar de marca invalida todo lo que ya se pintó: los datos de una marca no
+// valen para la otra. No se dispara ninguna consulta: se recarga al expandir.
+function applyBrand(brand) {
+  if (!brand || brand === fsmActiveBrand()) return;
+  WifixAPI.setBrand(brand);
+  _napPanelState.naps = [];
+  _napPanelState.selectedNap = null;
+  _napPanelState.degraded = null;
+  _napPanelState.homeCoords = null;
+  validatedProfile = null;
+  validatedAccount = null;
+  document.querySelectorAll('#servicioList [data-slot="body"], #redList [data-slot="body"]').forEach((body) => {
+    delete body.dataset.loaded;
+    body.innerHTML = '<div class="detail-loading">Toca para cargar…</div>';
+    const item = body.closest ? body.closest('.servicio-item') : null;
+    if (item) item.classList.remove('open');
+  });
+  renderIntegrationWarning(null);
+  renderBrandChips();
+}
+
+// Banner de integración no disponible. No bloquea, no cierra sesión, no
+// recarga: solo informa. El mensaje ya viene redactado en español del backend.
+function renderIntegrationWarning(message) {
+  document.querySelectorAll('[data-slot="integration-warning"]').forEach((slot) => {
+    if (!message) {
+      slot.innerHTML = '';
+      slot.hidden = true;
+      return;
+    }
+    slot.hidden = false;
+    slot.innerHTML = `<div class="detail-warning" role="status">${escapeHtml(message)}</div>`;
+  });
+}
+
+window.addEventListener('wifix:integration-unavailable', (ev) => {
+  const detail = (ev && ev.detail) || {};
+  console.warn('[Wifix] integración no disponible:', detail);
+  renderIntegrationWarning(detail.message || 'La integración con la operadora no está disponible.');
+});
+
+// Si al arrancar ninguna marca está disponible, se avisa una sola vez en el
+// panel (nunca un modal: el técnico tiene que poder seguir trabajando).
+function warnIfNoBrandAvailable() {
+  if (!_fsmHealth) return;
+  if (fsmAvailableBrands().length > 0) return;
+  const razones = (_fsmHealth.brands || []).map(b => b && b.reason).filter(Boolean);
+  const detalle = razones.length ? ` (${razones.join(', ')})` : '';
+  renderIntegrationWarning(
+    'Los datos de la operadora no están disponibles en este momento' + detalle +
+    '. El resto de la app funciona con normalidad.',
+  );
+}
+
+// Sesión ya abierta al cargar la app: se pide el health una sola vez.
+if (WifixAPI.isAuthenticated()) {
+  loadFsmHealth().then(warnIfNoBrandAvailable);
+}
 
 // === Categorías =============================================================
 cards.forEach(card => {
@@ -200,8 +388,23 @@ confirmAccountBtn.addEventListener('click', async () => {
     if (subGrid) subGrid.classList.add('account-confirmed');
     enableSubCards();
 
-    confirmAccountFeedback.textContent = `Cuenta confirmada — ${profile.fullName}`;
+    confirmAccountFeedback.textContent = `Cuenta confirmada — ${profile.fullName || '—'}`;
     confirmAccountFeedback.className = 'confirm-account-feedback success';
+
+    // Estado del cliente: UNA sola llamada adicional. Si falla no invalida la
+    // confirmación — el técnico ya tiene el nombre y puede seguir trabajando.
+    try {
+      const contract = await WifixAPI.getContractStatus(cuenta);
+      const accounts = (contract && Array.isArray(contract.accounts)) ? contract.accounts : [];
+      const own = accounts.find(a => a.accountNumber === cuenta) || accounts[0] || null;
+      const estado = own && own.status ? own.status : '—';
+      confirmAccountFeedback.textContent =
+        `Cuenta confirmada — ${profile.fullName || '—'} · ${estado}`;
+    } catch (statusErr) {
+      console.warn('[Wifix] contract-status en confirmación:', statusErr);
+      confirmAccountFeedback.textContent =
+        `Cuenta confirmada — ${profile.fullName || '—'} · —`;
+    }
   } catch (err) {
     console.error('[Wifix] confirm-account:', err);
     invalidateAccountCache();
@@ -296,6 +499,17 @@ function escapeHtml(s) {
     .replaceAll("'", '&#39;');
 }
 
+// Error de panel. UPSTREAM_AUTH_ERROR (503) no es una falla del técnico ni de
+// su sesión: es un problema administrativo del token de la operadora. Se pinta
+// como aviso, no como error rojo, y el resto de la app sigue funcionando.
+function renderPanelError(err, fallback) {
+  const msg = (err && err.message) || fallback || 'Error al cargar.';
+  if (err && err.code === 'UPSTREAM_AUTH_ERROR') {
+    return `<div class="detail-warning" role="status">${escapeHtml(msg)}</div>`;
+  }
+  return `<div class="detail-error" role="alert">${escapeHtml(msg)}</div>`;
+}
+
 // Mock data generation (sin cambios — usado donde la API no aplica)
 const pick = arr => arr[Math.floor(Math.random() * arr.length)];
 const randInt = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
@@ -350,6 +564,7 @@ const ICONS = {
   plan: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7H4a1 1 0 0 0-1 1v9a1 1 0 0 0 1 1h16a1 1 0 0 0 1-1V8a1 1 0 0 0-1-1z"/><path d="M16 7V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v2"/></svg>',
   speed:'<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 18 0"/><path d="M12 12l4-3"/><circle cx="12" cy="12" r="1.2" fill="currentColor"/></svg>',
   edit: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>',
+  mail: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3.5 7l8.5 6 8.5-6"/></svg>',
 };
 
 // ============================================================================
@@ -376,6 +591,7 @@ async function openDatosPersonales() {
   }
   accountChip.textContent = cuenta;
   detailEyebrow.textContent = labels[currentCategory].title;
+  renderBrandChips();
 
   detailPersonales.classList.add('open');
   detailPersonales.setAttribute('aria-hidden', 'false');
@@ -393,25 +609,40 @@ async function openDatosPersonales() {
     profile = await WifixAPI.getClientProfile(cuenta);
   } catch (err) {
     console.error('[Wifix] client-profile:', err);
-    detailList.innerHTML = `<div class="detail-error">No se pudo cargar el perfil: ${escapeHtml(err.message || 'Error')}</div>`;
+    detailList.innerHTML = renderPanelError(err, 'No se pudo cargar el perfil.');
     return;
   }
 
   renderClientProfile(profile, cuenta);
 }
 
+// Marca discreta para los campos que todavía NO vienen de la operadora.
+// `sources[campo]` puede ser 'FSM' | 'MOCK' | 'COMARCH' (contrato §3).
+function sourceBadge(profile, field) {
+  const src = profile && profile.sources ? profile.sources[field] : null;
+  if (src !== 'MOCK') return '';
+  return ' <span class="source-badge" title="Dato simulado: la operadora todavía no lo expone">simulado</span>';
+}
+
 function renderClientProfile(profile, cuenta) {
   const phonesHtml = (profile.phones && profile.phones.length)
     ? profile.phones.map(escapeHtml).join('<br/>')
     : '—';
-  const speedTxt = `${profile.contractedDownloadMbps ?? '—'} ↓ / ${profile.contractedUploadMbps ?? '—'} ↑ Mbps`;
+  const down = profile.contractedDownloadMbps ?? '—';
+  const up = profile.contractedUploadMbps ?? '—';
+  const speedTxt = `${escapeHtml(down)} ↓ / ${escapeHtml(up)} ↑ Mbps`;
+  // Plan y velocidad siguen simulados hasta que exista la API de Comarch: se
+  // rotulan como tales para que el técnico no los lea como datos reales.
+  const badgePlan = sourceBadge(profile, 'planName');
+  const badgeVel = sourceBadge(profile, 'contractedDownloadMbps') || sourceBadge(profile, 'contractedUploadMbps');
 
   detailList.innerHTML = [
-    renderDetailRow(ICONS.user,  'Nombres y Apellidos', escapeHtml(profile.fullName || '—')),
-    renderDetailRow(ICONS.pin,   'Dirección', escapeHtml(profile.address || '—')),
-    renderDetailRow(ICONS.phone, 'Teléfonos', phonesHtml),
-    renderDetailRow(ICONS.plan,  'Plan Contratado', escapeHtml(profile.planName || '—'), { highlight: true }),
-    renderDetailRow(ICONS.speed, 'Velocidad Contratada', speedTxt, { highlight: true }),
+    renderDetailRow(ICONS.user,  'Nombres y Apellidos' + sourceBadge(profile, 'fullName'), escapeHtml(profile.fullName || '—')),
+    renderDetailRow(ICONS.pin,   'Dirección' + sourceBadge(profile, 'address'), escapeHtml(profile.address || '—')),
+    renderDetailRow(ICONS.phone, 'Teléfonos' + sourceBadge(profile, 'phones'), phonesHtml),
+    renderDetailRow(ICONS.mail,  'Correo' + sourceBadge(profile, 'email'), escapeHtml(profile.email || '—')),
+    renderDetailRow(ICONS.plan,  'Plan Contratado' + badgePlan, escapeHtml(profile.planName || '—'), { highlight: true }),
+    renderDetailRow(ICONS.speed, 'Velocidad Contratada' + badgeVel, speedTxt, { highlight: true }),
     `<button class="save-btn outline" id="editProfileBtn">${ICONS.edit}<span style="margin-left:6px">Actualizar datos</span></button>`,
     `<div id="editProfileForm" class="profile-edit-form" hidden></div>`,
   ].join('');
@@ -439,6 +670,7 @@ function renderEditProfileForm(profile, cuenta, slot) {
       <label class="form-row"><span class="form-label">Teléfonos (uno por línea)</span>
         <textarea data-field="phones" rows="3">${escapeHtml((profile.phones || []).join('\n'))}</textarea></label>
       <button class="save-btn" data-action="save-profile">Guardar cambios</button>
+      <p class="form-note">Los cambios se guardan solo en Wifix; no se envían al sistema de la operadora.</p>
     </div>`;
 
   const formEl = slot.querySelector('[data-form="profile-edit"]');
@@ -471,26 +703,57 @@ function renderEditProfileForm(profile, cuenta, slot) {
 // ============================================================================
 // Datos del Servicio (campos 6-18) — usa varios endpoints
 // ============================================================================
+// Estados que devuelve la operadora (contrato §4). El contrato amplió la unión
+// de 3 a 5 estados + DESCONOCIDA; cualquier valor no previsto cae en 'muted'.
+const STATUS_CLASS_MAP = {
+  ACTIVA: 'ok',
+  SUSPENDIDA: 'warn',
+  TERMINADA: 'fail',
+  ORDENADA: 'info',
+  PENDIENTE: 'warn',
+  DESCONOCIDA: 'muted',
+};
+
+function statusTileClass(status) {
+  return STATUS_CLASS_MAP[status] || 'muted';
+}
+
 function renderStatusFromContract(contract, account) {
-  const own = contract.accounts.find(a => a.accountNumber === account) || contract.accounts[0];
-  const status = own ? own.status : '—';
-  const statusClass = status === 'ACTIVA' ? 'ok' : status === 'SUSPENDIDA' ? 'warn' : 'fail';
+  const accounts = (contract && Array.isArray(contract.accounts)) ? contract.accounts : [];
+  const own = accounts.find(a => a.accountNumber === account) || accounts[0] || null;
+  const status = own && own.status ? own.status : 'DESCONOCIDA';
+  const statusClass = statusTileClass(status);
+  // Texto literal de la operadora bajo el estado normalizado (puede ser null).
+  const descripcion = own && own.statusDescription
+    ? `<span class="st-sub">${escapeHtml(own.statusDescription)}</span>`
+    : '';
+  const lastWo = own && own.lastWorkOrder
+    ? `<div class="mini-row">
+        <span class="mr-label">Última orden</span>
+        <span class="mr-value">${escapeHtml(own.lastWorkOrder)}</span>
+      </div>`
+    : '';
+  // FSM entrega una sola cuenta por contrato: la lista se ve bien con 1 fila.
+  const filas = accounts.map(a => `
+      <div class="mini-row">
+        <span class="mr-label">${escapeHtml(a.accountNumber)}</span>
+        <span class="mr-value">${escapeHtml(a.contractId || '—')} · ${escapeHtml(a.status || 'DESCONOCIDA')}</span>
+      </div>`).join('');
+
   return `
     <div class="status-grid">
       <div class="status-tile ${statusClass}">
         <span class="st-label">Estado</span>
         <span class="st-value">${escapeHtml(status)}</span>
+        ${descripcion}
       </div>
       <div class="status-tile">
         <span class="st-label">Cliente</span>
-        <span class="st-value">${escapeHtml(contract.clientName || '—')}</span>
+        <span class="st-value">${escapeHtml((contract && contract.clientName) || '—')}</span>
       </div>
     </div>
-    ${contract.accounts.map(a => `
-      <div class="mini-row">
-        <span class="mr-label">${escapeHtml(a.accountNumber)}</span>
-        <span class="mr-value">${escapeHtml(a.contractId)} · ${escapeHtml(a.status)}</span>
-      </div>`).join('')}`;
+    ${filas || '<div class="detail-empty">Sin cuentas asociadas.</div>'}
+    ${lastWo}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -502,9 +765,31 @@ let _napPanelState = {
   taskId: null,
   openedAt: null,
   coords: null,      // { latitude, longitude, accuracy } cuando hay GPS
-  selectedNap: null, // napCode seleccionado para GPON
+  selectedNap: null, // napRef seleccionado para GPON (napId o napCode)
   naps: [],          // array de NAPs cargadas (se guarda al cargar el panel)
+  meters: 100,       // radio de búsqueda (100 / 250 / 500)
+  maxRows: 5,        // cuántas NAPs mostrar (5 / 10 / 20)
+  degraded: null,    // aviso de degradación de la última consulta
+  homeCoords: null,  // coordenada del domicilio que trae la orden (si existe)
 };
+
+// Referencia de la NAP para el backend: napId numérico de FSM cuando existe,
+// si no el código de NAP (camino TEC). Contrato §6.
+function _napRef(nap) {
+  if (!nap) return '';
+  return nap.napId !== null && nap.napId !== undefined ? String(nap.napId) : String(nap.napCode || '');
+}
+
+// Caché de puertos por panel: expandir la NAP y luego seleccionarla para GPON
+// son dos gestos distintos sobre la MISMA NAP. Sin caché serían dos llamadas a
+// la operadora por lo mismo. Se limpia en cada búsqueda nueva de NAPs.
+async function _napPortsCached(scope, napRef) {
+  if (!scope._napPortsCache) scope._napPortsCache = {};
+  if (scope._napPortsCache[napRef]) return scope._napPortsCache[napRef];
+  const data = await WifixAPI.getNapPorts(napRef);
+  scope._napPortsCache[napRef] = data;
+  return data;
+}
 
 // Fórmula de Haversine: distancia en metros entre dos coordenadas.
 // Usada para calcular distancia NAP ↔ ubicación capturada.
@@ -582,23 +867,29 @@ function _renderNapCards(naps, scope) {
   const slot = scope.querySelector('[data-slot="nap-cards"]');
   if (!slot) return;
   slot.innerHTML = sorted.map(n => {
-    const isSelected = _napPanelState.selectedNap === n.napCode;
+    const ref = _napRef(n);
+    const isSelected = _napPanelState.selectedNap === ref;
+    // "Red de acceso", nunca "nodo": es el puerto de OLT / la tarjeta de CMTS.
+    const red = n.networkName
+      ? `<span class="nap-network-name"><span class="nap-network-key">Red de acceso</span>${escapeHtml(n.networkName)}</span>`
+      : '';
     return `
-      <div class="nap-card${isSelected ? ' nap-selected' : ''}" data-nap="${escapeHtml(n.napCode)}">
+      <div class="nap-card${isSelected ? ' nap-selected' : ''}" data-nap="${escapeHtml(ref)}">
         <div class="nap-head">
-          <span class="nap-name">${escapeHtml(n.napCode)}</span>
+          <span class="nap-name">${escapeHtml(n.napCode || '—')}</span>
           ${isSelected ? '<span class="nap-selected-badge">GPON seleccionada</span>' : ''}
         </div>
         <span class="nap-distance">${_napDistanceText(n)}</span>
+        ${red}
         ${_napOccupancyBar(n)}
         <div class="nap-actions">
-          <button class="add-row-btn" data-action="view-ports" data-nap="${escapeHtml(n.napCode)}">Ver puertos</button>
-          <button class="add-row-btn nap-gpon-btn" data-action="select-gpon" data-nap="${escapeHtml(n.napCode)}"
+          <button class="add-row-btn nap-ports-btn" type="button" data-action="view-ports" data-nap="${escapeHtml(ref)}">Ver puertos</button>
+          <button class="add-row-btn nap-gpon-btn" type="button" data-action="select-gpon" data-nap="${escapeHtml(ref)}"
             aria-pressed="${isSelected}">
             ${isSelected ? 'Seleccionada' : 'Seleccionar para GPON'}
           </button>
         </div>
-        <div class="nap-ports-slot" data-slot="ports-${escapeHtml(n.napCode)}"></div>
+        <div class="nap-ports-slot" data-ports-for="${escapeHtml(ref)}" data-slot="ports-${escapeHtml(ref)}"></div>
       </div>`;
   }).join('');
 }
@@ -607,8 +898,8 @@ function _renderNapCards(naps, scope) {
 async function _renderGponSummary(scope) {
   const summarySlot = scope.querySelector('[data-slot="gpon-summary"]');
   if (!summarySlot) return;
-  const napCode = _napPanelState.selectedNap;
-  if (!napCode) {
+  const napRef = _napPanelState.selectedNap;
+  if (!napRef) {
     summarySlot.innerHTML = '';
     summarySlot.hidden = true;
     return;
@@ -617,9 +908,10 @@ async function _renderGponSummary(scope) {
   summarySlot.innerHTML = `<div class="detail-loading">Obteniendo puerto sugerido…</div>`;
 
   try {
-    const data = await WifixAPI.getNapPorts(napCode);
+    const data = await _napPortsCached(scope, napRef);
     const naps = scope._napData || [];
-    const nap = naps.find(n => n.napCode === napCode);
+    const nap = naps.find(n => _napRef(n) === napRef) || null;
+    const napCode = (nap && nap.napCode) || (data && data.napCode) || napRef;
     const dist = nap ? _napDistanceToNap(nap) : null;
     const distTxt = dist !== null ? `${dist.toFixed(1)} m` : '—';
     const occ = nap ? `${nap.occupiedPorts}/${nap.totalPorts}` : '—';
@@ -651,6 +943,11 @@ async function _renderGponSummary(scope) {
           <span class="nap-gpon-key">NAP</span>
           <span class="nap-gpon-val nap-name">${escapeHtml(napCode)}</span>
         </div>
+        ${(nap && nap.networkName) ? `
+        <div class="nap-gpon-summary-row">
+          <span class="nap-gpon-key">Red de acceso</span>
+          <span class="nap-gpon-val">${escapeHtml(nap.networkName)}</span>
+        </div>` : ''}
         <div class="nap-gpon-summary-row">
           <span class="nap-gpon-key">Distancia</span>
           <span class="nap-gpon-val">${escapeHtml(distTxt)}</span>
@@ -677,24 +974,35 @@ async function _napFetchAndRender(scope) {
   if (!slot) return;
   const coords = _napPanelState.coords;
 
+  _napRenderDegradedNote(scope, null);
+
   if (!coords) {
     slot.innerHTML = `<div class="detail-empty">Captura tu ubicación (GPS o lat/lng manual) para buscar las NAPs del sector.</div>`;
     return;
   }
 
   slot.innerHTML = `<div class="detail-loading">Buscando NAPs cercanas…</div>`;
+  scope._napPortsCache = {};
   try {
-    const naps = await WifixAPI.getNearbyNaps(coords);
-    _napPanelState.naps = naps || [];
+    const res = await WifixAPI.getNearbyNaps(coords, {
+      meters: _napPanelState.meters,
+      maxRows: _napPanelState.maxRows,
+    });
+    const naps = (res && Array.isArray(res.naps)) ? res.naps : [];
+    _napPanelState.naps = naps;
+    _napPanelState.degraded = (res && res.degraded) || null;
     scope._napData = _napPanelState.naps;
 
+    // El aviso de degradación va ENCIMA de las tarjetas y no oculta resultados.
+    _napRenderDegradedNote(scope, _napPanelState.degraded);
+
     if (_napPanelState.naps.length === 0) {
-      slot.innerHTML = `<div class="detail-empty">No hay NAPs registradas cerca de esta coordenada.</div>`;
+      slot.innerHTML = `<div class="detail-empty">No hay NAPs registradas a ${_napPanelState.meters} m de esta coordenada. Prueba con un radio mayor.</div>`;
       return;
     }
     // Si la NAP seleccionada ya no está en el resultado, se limpia la selección.
     if (_napPanelState.selectedNap &&
-        !_napPanelState.naps.some(n => n.napCode === _napPanelState.selectedNap)) {
+        !_napPanelState.naps.some(n => _napRef(n) === _napPanelState.selectedNap)) {
       _napPanelState.selectedNap = null;
       await _renderGponSummary(scope);
     }
@@ -702,8 +1010,21 @@ async function _napFetchAndRender(scope) {
     _wireNapCardButtons(scope, _napPanelState.naps);
   } catch (err) {
     console.error('[Wifix] NAPs cercanas', err);
-    slot.innerHTML = `<div class="detail-error">${escapeHtml(err.message || 'No se pudieron consultar las NAPs.')}</div>`;
+    slot.innerHTML = renderPanelError(err, 'No se pudieron consultar las NAPs.');
   }
+}
+
+// Aviso discreto de resultado degradado (fuente alternativa, lista recortada…).
+function _napRenderDegradedNote(scope, degraded) {
+  const slot = scope.querySelector('[data-slot="nap-degraded"]');
+  if (!slot) return;
+  if (!degraded || !degraded.message) {
+    slot.innerHTML = '';
+    slot.hidden = true;
+    return;
+  }
+  slot.hidden = false;
+  slot.innerHTML = `<div class="nap-degraded-note" role="status">${escapeHtml(degraded.message)}</div>`;
 }
 
 // Conecta los botones del panel NAP: GPS, coordenadas manuales, selección GPON.
@@ -739,18 +1060,70 @@ function _wireNapPanel(scope) {
     }
   });
 
-  // Ingreso manual: reconsultar al cambiar lat o lng.
-  function onManualCoords() {
+  // Toma lo que haya en los inputs (incluida la coordenada precargada de la
+  // orden) sin disparar la consulta: la dispara siempre un gesto del técnico.
+  function adoptInputCoords() {
     const lat = parseFloat(latInput.value);
     const lng = parseFloat(lngInput.value);
-    if (!isFinite(lat) || !isFinite(lng)) return;
-    _napPanelState.coords = { latitude: lat, longitude: lng, accuracy: null };
+    if (!isFinite(lat) || !isFinite(lng)) return false;
+    const cur = _napPanelState.coords;
+    if (!cur || cur.latitude !== lat || cur.longitude !== lng) {
+      _napPanelState.coords = { latitude: lat, longitude: lng, accuracy: null };
+    }
+    return true;
+  }
+
+  // Ingreso manual: se usa `change` y no `input` para no lanzar una consulta
+  // a la operadora por cada tecla.
+  function onManualCoords() {
+    if (!adoptInputCoords()) return;
     gpsStatus.textContent = 'Coordenadas ingresadas manualmente.';
     gpsStatus.className = 'nap-gps-status ok';
     _napFetchAndRender(scope);
   }
   latInput.addEventListener('change', onManualCoords);
   lngInput.addEventListener('change', onManualCoords);
+
+  // --- Radio de búsqueda y cantidad de filas ------------------------------
+  // Una consulta por cambio explícito: nada automático, nada por scroll.
+  const radiusBtns = scope.querySelectorAll('[data-action="nap-meters"]');
+  radiusBtns.forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const meters = parseInt(btn.dataset.meters, 10);
+      if (!isFinite(meters)) return;
+      _napPanelState.meters = meters;
+      radiusBtns.forEach((b) => {
+        const on = b === btn;
+        b.classList.toggle('is-active', on);
+        b.setAttribute('aria-pressed', on ? 'true' : 'false');
+      });
+      adoptInputCoords();
+      _napFetchAndRender(scope);
+    });
+  });
+
+  const rowsSelect = scope.querySelector('[data-field="nap-maxrows"]');
+  if (rowsSelect) {
+    rowsSelect.addEventListener('change', () => {
+      const rows = parseInt(rowsSelect.value, 10);
+      if (!isFinite(rows)) return;
+      _napPanelState.maxRows = rows;
+      adoptInputCoords();
+      _napFetchAndRender(scope);
+    });
+  }
+
+  const searchBtn = scope.querySelector('[data-action="nap-search"]');
+  if (searchBtn) {
+    searchBtn.addEventListener('click', () => {
+      if (!adoptInputCoords()) {
+        gpsStatus.textContent = 'Ingresa una latitud y longitud válidas o usa el GPS.';
+        gpsStatus.className = 'nap-gps-status error';
+        return;
+      }
+      _napFetchAndRender(scope);
+    });
+  }
 }
 
 function _wireNapCardButtons(scope, naps) {
@@ -784,6 +1157,28 @@ function renderNapPanel() {
   const taskId = _napPanelState.taskId;
   const fechaHora = formatDate(_napPanelState.openedAt);
 
+  // Precarga: si la orden trae la coordenada del domicilio, se ofrece como
+  // valor inicial. NO dispara la consulta sola: sigue haciendo falta un gesto
+  // (botón "Buscar NAPs", cambio de radio, GPS o edición manual).
+  const home = _napPanelState.homeCoords;
+  const shown = _napPanelState.coords || home || null;
+  const usandoDomicilio = !_napPanelState.coords && !!home;
+  const latValue = shown ? shown.latitude : '';
+  const lngValue = shown ? shown.longitude : '';
+
+  let gpsStatusTxt;
+  let gpsStatusCls;
+  if (_napPanelState.coords) {
+    gpsStatusTxt = `Ubicacion capturada (precision ±${_napPanelState.coords.accuracy != null ? _napPanelState.coords.accuracy.toFixed(0) : '?'}m)`;
+    gpsStatusCls = ' ok';
+  } else if (usandoDomicilio) {
+    gpsStatusTxt = 'Coordenada del domicilio (de la orden). Toca "Buscar NAPs" o cámbiala si estás en otro punto.';
+    gpsStatusCls = '';
+  } else {
+    gpsStatusTxt = 'Sin ubicacion — toca el boton o ingresa lat/lng manualmente.';
+    gpsStatusCls = '';
+  }
+
   return `
     <div class="nap-panel" data-panel="nap-gpon">
 
@@ -804,29 +1199,49 @@ function renderNapPanel() {
             <span>Latitud</span>
             <input type="number" step="any" data-field="nap-lat" class="nap-coord-input"
               placeholder="-0.1800" aria-label="Latitud"
-              value="${_napPanelState.coords ? _napPanelState.coords.latitude : ''}">
+              value="${escapeHtml(latValue)}">
           </label>
           <label class="nap-coord-label">
             <span>Longitud</span>
             <input type="number" step="any" data-field="nap-lng" class="nap-coord-input"
               placeholder="-78.4680" aria-label="Longitud"
-              value="${_napPanelState.coords ? _napPanelState.coords.longitude : ''}">
+              value="${escapeHtml(lngValue)}">
           </label>
         </div>
-        <div class="nap-gps-status${_napPanelState.coords ? ' ok' : ''}" data-slot="nap-gps-status">
-          ${_napPanelState.coords
-            ? `Ubicacion capturada (precision ±${_napPanelState.coords.accuracy != null ? _napPanelState.coords.accuracy.toFixed(0) : '?'}m)`
-            : 'Sin ubicacion — toca el boton o ingresa lat/lng manualmente.'}
+        <div class="nap-gps-status${gpsStatusCls}" data-slot="nap-gps-status">
+          ${escapeHtml(gpsStatusTxt)}
         </div>
       </div>
 
-      <!-- 3) Tarjetas de NAPs -->
-      <div class="nap-section-title">NAPs disponibles en el sector</div>
-      <div data-slot="nap-cards">
-        <div class="detail-empty">Captura tu ubicación (GPS o lat/lng manual) para buscar las NAPs del sector.</div>
+      <!-- 3) Radio de búsqueda y cantidad de resultados -->
+      <div class="nap-radius-control">
+        <div class="nap-radius-group" role="group" aria-label="Radio de búsqueda">
+          <span class="nap-radius-label">Radio</span>
+          ${[100, 250, 500].map((m) => `
+            <button type="button" class="nap-radius-btn${_napPanelState.meters === m ? ' is-active' : ''}"
+              data-action="nap-meters" data-meters="${m}"
+              aria-pressed="${_napPanelState.meters === m ? 'true' : 'false'}">${m} m</button>`).join('')}
+        </div>
+        <div class="nap-radius-group">
+          <label class="nap-rows-label" for="napMaxRows">Mostrar</label>
+          <select class="nap-rows-select" id="napMaxRows" data-field="nap-maxrows">
+            ${[5, 10, 20].map((r) => `
+              <option value="${r}"${_napPanelState.maxRows === r ? ' selected' : ''}>${r}</option>`).join('')}
+          </select>
+          <button type="button" class="add-row-btn nap-search-btn" data-action="nap-search">Buscar NAPs</button>
+        </div>
       </div>
 
-      <!-- 4) Bloque resumen GPON -->
+      <!-- 4) Tarjetas de NAPs -->
+      <div class="nap-section-title">NAPs disponibles en el sector</div>
+      <div data-slot="nap-degraded" hidden></div>
+      <div data-slot="nap-cards">
+        <div class="detail-empty">${usandoDomicilio
+          ? 'Toca «Buscar NAPs» para consultar el sector de la coordenada del domicilio.'
+          : 'Captura tu ubicación (GPS o lat/lng manual) para buscar las NAPs del sector.'}</div>
+      </div>
+
+      <!-- 5) Bloque resumen GPON -->
       <div data-slot="gpon-summary" hidden></div>
 
     </div>`;
@@ -834,10 +1249,23 @@ function renderNapPanel() {
 
 // Wrapper que arma el panel completo (usado en SERVICIO_ITEMS.load).
 // La consulta a la operadora ocurre cuando el técnico captura la coordenada.
-async function loadNapPanel() {
+async function loadNapPanel(cuenta) {
   // Resetear selección y resultados al abrir (se mantienen coords y taskId).
   _napPanelState.selectedNap = null;
   _napPanelState.naps = [];
+  _napPanelState.degraded = null;
+  // Coordenada del domicilio: sale del perfil que ya se cargó al confirmar la
+  // cuenta. NO se pide de nuevo: cero llamadas extra a la operadora.
+  _napPanelState.homeCoords = null;
+  if (validatedProfile && validatedAccount === cuenta &&
+      isFinite(validatedProfile.latitude) && isFinite(validatedProfile.longitude) &&
+      validatedProfile.latitude !== null && validatedProfile.longitude !== null) {
+    _napPanelState.homeCoords = {
+      latitude: validatedProfile.latitude,
+      longitude: validatedProfile.longitude,
+      accuracy: null,
+    };
+  }
   return renderNapPanel();
 }
 
@@ -851,24 +1279,152 @@ function _bootNapPanel(body) {
   if (_napPanelState.coords) _napFetchAndRender(panel);
 }
 
+// Celda de puerto. Tres estados visuales:
+//   libre · ocupado con estado conocido (A/S/T/O/P) · ocupado sin consultar.
+// El estado del cliente NO llega en este paso (contrato §6): los ocupados
+// vienen con clientStatus null + statusPending true hasta que el técnico pida
+// la consulta explícitamente.
+function _renderPortCell(p) {
+  const pendiente = !!p.occupied && !p.clientStatus;
+  const cls = !p.occupied ? 'free' : (pendiente ? 'busy pending' : 'busy');
+  const cuenta = p.clientAccountNumber ? String(p.clientAccountNumber) : '';
+  let title;
+  if (!p.occupied) title = 'Puerto ' + pad(p.portNumber) + ' · libre';
+  else if (pendiente) title = 'Puerto ' + pad(p.portNumber) + ' · ' + (cuenta || 'ocupado') + ' · estado sin consultar';
+  else title = 'Puerto ' + pad(p.portNumber) + ' · ' + (cuenta || 'ocupado') + ' · ' + p.clientStatus;
+  const marca = p.clientStatus
+    ? '<small>' + escapeHtml(p.clientStatus) + '</small>'
+    : (pendiente ? '<small aria-hidden="true">·</small>' : '');
+  // El color por sí solo no comunica: el estado va también en el texto
+  // accesible de la celda para lectores de pantalla.
+  return `
+        <div class="port-cell ${cls}" role="listitem" data-port="${escapeHtml(p.portNumber)}"
+          ${cuenta ? `data-account="${escapeHtml(cuenta)}"` : ''}
+          ${p.equipmentId ? `data-equipment="${escapeHtml(p.equipmentId)}"` : ''}
+          title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}">
+          ${pad(p.portNumber)}${marca}
+        </div>`;
+}
+
 function renderPortsTable(napPorts) {
-  // La API de operadora aún no expone el detalle cliente por cliente:
-  // en ese caso se muestra el aviso en vez de una rejilla vacía.
-  if (!napPorts.ports || napPorts.ports.length === 0) {
-    const note = napPorts.note || 'No hay detalle de puertos para esta NAP.';
+  // La API de operadora aún no expone el detalle cliente por cliente en el
+  // camino heredado: en ese caso se muestra el aviso en vez de una rejilla.
+  if (!napPorts || !napPorts.ports || napPorts.ports.length === 0) {
+    const note = (napPorts && napPorts.note) || 'No hay detalle de puertos para esta NAP.';
     return `<div class="detail-empty port-note">${escapeHtml(note)}</div>`;
   }
+  const fanOut = napPorts.statusFanOut || { supported: false, pendingAccounts: 0, batchLimit: 12 };
+  const pendientes = Number(fanOut.pendingAccounts) || 0;
+  // El botón es la ÚNICA vía para consultar estados: nunca se dispara solo.
+  const accionEstados = (fanOut.supported && pendientes > 0)
+    ? `
+    <div class="port-status-actions" data-slot="port-status">
+      <button type="button" class="port-status-btn" data-action="port-status">
+        Consultar estado de ${pendientes} cliente${pendientes === 1 ? '' : 's'}
+      </button>
+      <div class="port-status-note" data-slot="port-status-note" role="status" aria-live="polite"></div>
+    </div>`
+    : '';
+
   return `
-    <div class="port-grid">
-      ${napPorts.ports.map(p => `
-        <div class="port-cell ${p.occupied ? 'busy' : 'free'}" title="${p.clientAccountNumber ? escapeHtml(p.clientAccountNumber) + ' (' + (p.clientStatus || '—') + ')' : 'Libre'}">
-          ${pad(p.portNumber)}${p.clientStatus ? '<small>' + p.clientStatus + '</small>' : ''}
-        </div>`).join('')}
+    <div class="port-grid" role="list" aria-label="Puertos de la NAP">
+      ${napPorts.ports.map(_renderPortCell).join('')}
     </div>
     <div class="port-legend">
       <span><span class="dot free"></span>Libre</span>
-      <span><span class="dot busy"></span>Ocupado</span>
-    </div>`;
+      <span><span class="dot busy"></span>Ocupado (estado conocido)</span>
+      <span><span class="dot pending"></span>Ocupado, estado sin consultar</span>
+    </div>
+    ${accionEstados}`;
+}
+
+// Repinta las celdas con el estado que devolvió la operadora. Las cuentas que
+// fallaron quedan en el estado neutro con el mensaje de error en el title.
+function _applyPortStatuses(slot, items, portsData) {
+  (items || []).forEach((item) => {
+    if (!item || !item.accountNumber) return;
+    const cuenta = String(item.accountNumber);
+    const celdas = slot.querySelectorAll('.port-cell[data-account]');
+    celdas.forEach((cell) => {
+      if (cell.dataset.account !== cuenta) return;
+      const numero = cell.dataset.port || '';
+      if (item.error) {
+        // Queda en el estado neutro: el error va en el texto de la celda.
+        cell.title = `Puerto ${pad(numero)} · ${cuenta} · ${item.error}`;
+        cell.setAttribute('aria-label', cell.title);
+        return;
+      }
+      const code = item.statusCode || '';
+      cell.classList.remove('pending');
+      cell.innerHTML = `${pad(numero)}${code ? '<small>' + escapeHtml(code) + '</small>' : ''}`;
+      const desc = item.statusDescription ? ` (${item.statusDescription})` : '';
+      cell.title = `Puerto ${pad(numero)} · ${cuenta} · ${item.status || code || '—'}${desc}`;
+      cell.setAttribute('aria-label', cell.title);
+    });
+    // Mantener el objeto en memoria alineado con lo que se ve en pantalla.
+    if (portsData && Array.isArray(portsData.ports) && !item.error) {
+      portsData.ports.forEach((p) => {
+        if (p.clientAccountNumber && String(p.clientAccountNumber) === cuenta) {
+          p.clientStatus = item.statusCode || null;
+          p.statusPending = false;
+        }
+      });
+    }
+  });
+}
+
+// Consulta de estados bajo demanda (campo 8, paso 2). Se ejecuta SOLO desde el
+// botón: nada de intervalos, scroll, hover ni precarga al abrir el panel.
+// Los lotes van secuenciales para no saturar a la operadora (todo producción).
+function _wirePortStatusButton(slot, portsData) {
+  const btn = slot.querySelector('[data-action="port-status"]');
+  if (!btn) return;
+  const note = slot.querySelector('[data-slot="port-status-note"]');
+  btn.addEventListener('click', async () => {
+    const cuentas = [];
+    const vistas = {};
+    (portsData.ports || []).forEach((p) => {
+      if (!p.statusPending || !p.clientAccountNumber) return;
+      const c = String(p.clientAccountNumber);
+      if (vistas[c]) return;
+      vistas[c] = true;
+      cuentas.push(c);
+    });
+    if (cuentas.length === 0) {
+      if (note) note.textContent = 'No quedan clientes por consultar.';
+      return;
+    }
+    const limite = Number(portsData.statusFanOut && portsData.statusFanOut.batchLimit) || 12;
+    const original = btn.textContent;
+    btn.disabled = true;
+    let resueltas = 0;
+    let fallidas = 0;
+    try {
+      for (let i = 0; i < cuentas.length; i += limite) {
+        const lote = cuentas.slice(i, i + limite);
+        btn.textContent = `Consultando ${Math.min(i + lote.length, cuentas.length)}/${cuentas.length}…`;
+        const res = await WifixAPI.getAccountsStatusBatch(lote);
+        _applyPortStatuses(slot, (res && res.items) || [], portsData);
+        resueltas += Number(res && res.resolved) || 0;
+        fallidas += Number(res && res.failed) || 0;
+      }
+      btn.remove();
+      if (note) {
+        note.textContent = fallidas > 0
+          ? `${resueltas} estado(s) consultado(s), ${fallidas} sin respuesta de la operadora.`
+          : `${resueltas} estado(s) consultado(s).`;
+        note.className = fallidas > 0 ? 'port-status-note warn' : 'port-status-note ok';
+      }
+    } catch (err) {
+      console.error('[Wifix] status-batch', err);
+      btn.disabled = false;
+      btn.textContent = original;
+      if (note) {
+        note.textContent = err.message || 'No se pudieron consultar los estados.';
+        note.className = 'port-status-note error';
+      }
+    }
+  });
 }
 
 // ============================================================================
@@ -1891,18 +2447,100 @@ function renderEventsList(events) {
     </div>`).join('');
 }
 
-function renderTasksList(tasks) {
-  if (!tasks || tasks.length === 0) return `<div class="detail-empty">Sin tareas registradas.</div>`;
+// `result` puede venir como objeto envolvente { items, totalOrders, scanned,
+// truncated, degraded } o, en backends viejos, como array desnudo.
+function renderTasksList(result) {
+  const items = Array.isArray(result) ? result : ((result && result.items) || []);
+  const truncated = !Array.isArray(result) && result ? result.truncated === true : false;
+  const degraded = (!Array.isArray(result) && result && result.degraded) || null;
+
+  // El mensaje ya viene redactado en español desde el backend: no se reescribe.
+  const nota = (truncated && degraded && degraded.message)
+    ? `<div class="detail-note">${escapeHtml(degraded.message)}</div>`
+    : '';
+
+  if (items.length === 0) {
+    return `${nota}<div class="detail-empty">Sin tareas registradas.</div>`;
+  }
+
   const badgeClass = r => r === 'SATISFACTORIA' ? 'badge-resolved' : r === 'PENDIENTE' ? 'badge-pending' : 'badge-fail';
-  return tasks.map(t => `
-    <div class="event-item">
+  const filas = items.map(t => {
+    // ⚠2 FSM no expone el técnico que cerró la tarea: llega null y se muestra
+    // como "—". Queda pendiente pedirlo a la operadora.
+    const tecnico = t.technician || '—';
+    const notas = t.closingNotes ? escapeHtml(t.closingNotes) : '';
+    // Notas bajo demanda: una expansión = una llamada. Nada de precargar.
+    const botonNotas = (!t.notesLoaded && t.workOrder)
+      ? `
+        <button type="button" class="task-notes-btn" data-action="task-notes"
+          data-workorder="${escapeHtml(t.workOrder)}" aria-expanded="false">Ver notas de cierre</button>
+        <div class="task-notes-slot" data-slot="task-notes"></div>`
+      : '';
+    return `
+    <div class="event-item" data-workorder="${escapeHtml(t.workOrder || '')}">
       <span class="event-date">${formatDatePill(t.occurredAt)}</span>
       <div class="event-body">
-        <span class="event-badge ${badgeClass(t.result)}">${escapeHtml(t.result)}</span>
-        <span class="event-title">${escapeHtml(t.taskId)} · ${escapeHtml(t.technician || '—')}</span>
-        <span class="event-desc"><strong>${escapeHtml(t.reason)}</strong> — ${escapeHtml(t.closingNotes || '')}</span>
+        <span class="event-badge ${badgeClass(t.result)}">${escapeHtml(t.result || '—')}</span>
+        <span class="event-title">${escapeHtml(t.taskId || t.workOrder || '—')} · ${escapeHtml(tecnico)}</span>
+        <span class="event-desc"><strong>${escapeHtml(t.reason || '—')}</strong>${notas ? ' — ' + notas : ''}</span>
+        ${botonNotas}
       </div>
-    </div>`).join('');
+    </div>`;
+  }).join('');
+
+  return nota + filas;
+}
+
+// Notas de cierre de una orden, cargadas solo cuando el técnico las pide.
+function wireTaskNotesButtons(scope) {
+  scope.querySelectorAll('[data-action="task-notes"]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const workOrder = btn.dataset.workorder;
+      const slot = btn.parentNode ? btn.parentNode.querySelector('[data-slot="task-notes"]') : null;
+      if (!slot || !workOrder) return;
+      if (slot.dataset.loaded === '1') {
+        const oculto = slot.classList.toggle('hidden');
+        btn.setAttribute('aria-expanded', oculto ? 'false' : 'true');
+        btn.textContent = oculto ? 'Ver notas de cierre' : 'Ocultar notas de cierre';
+        return;
+      }
+      btn.disabled = true;
+      slot.innerHTML = `<div class="detail-loading">Cargando notas…</div>`;
+      try {
+        const data = await WifixAPI.getWorkOrderTasks(workOrder);
+        slot.innerHTML = renderWorkOrderNotes(data);
+        slot.dataset.loaded = '1';
+        btn.setAttribute('aria-expanded', 'true');
+        btn.textContent = 'Ocultar notas de cierre';
+      } catch (err) {
+        console.error('[Wifix] notas de orden', err);
+        slot.innerHTML = renderPanelError(err, 'No se pudieron cargar las notas.');
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  });
+}
+
+function renderWorkOrderNotes(data) {
+  const tasks = (data && Array.isArray(data.tasks)) ? data.tasks : [];
+  const notas = [];
+  tasks.forEach((task) => {
+    (task.notes || []).forEach((n) => {
+      notas.push({ createdAt: n.createdAt, content: n.content, result: task.result, status: task.status });
+    });
+  });
+  if (notas.length === 0) {
+    return `<div class="detail-empty">Esta orden no tiene notas de cierre.</div>`;
+  }
+  return `
+    <ul class="task-notes-list">
+      ${notas.map(n => `
+        <li class="task-note">
+          <span class="task-note-date">${escapeHtml(formatDate(n.createdAt))}</span>
+          <span class="task-note-text">${escapeHtml(n.content || '—')}</span>
+        </li>`).join('')}
+    </ul>`;
 }
 
 function renderHistorySummary(history) {
@@ -1920,7 +2558,7 @@ function renderHistorySummary(history) {
 
 const SERVICIO_ITEMS = [
   { id: 'naps',    icon: SERVICIO_ICONS.nap,     title: 'NAPs cercanas y seleccion GPON Xtreme',
-    load: () => loadNapPanel() },
+    load: (cuenta) => loadNapPanel(cuenta) },
   { id: 'status',  icon: SERVICIO_ICONS.user,    title: 'Status del cliente por contrato/cuenta',
     load: (cuenta) => WifixAPI.getContractStatus(cuenta).then(c => renderStatusFromContract(c, cuenta)) },
   { id: 'isp',     icon: SERVICIO_ICONS.metrics, title: 'ISP Monitor — señal, SNR, FEC y caídas 24 h',
@@ -1931,10 +2569,11 @@ const SERVICIO_ITEMS = [
   // porque es el contrato publicado; lo que cambia es lo que lee el técnico.
   { id: 'events',  icon: SERVICIO_ICONS.alert,   title: 'Daños (eventos) en la red de acceso',
     load: (cuenta) => WifixAPI.getNodeEvents(cuenta).then(renderEventsList) },
+  // Las dos rutas devuelven { items, totalOrders, truncated, degraded }.
   { id: 'unsat',   icon: SERVICIO_ICONS.note,    title: 'Tareas insatisfactorias (cierre)',
-    load: (cuenta) => WifixAPI.getUnsatisfactoryTasks(cuenta).then(renderTasksList) },
+    load: (cuenta) => WifixAPI.getUnsatisfactoryTasks(cuenta).then(res => renderTasksList(res)) },
   { id: 'visits',  icon: SERVICIO_ICONS.history, title: 'Visitas anteriores',
-    load: (cuenta) => WifixAPI.getPreviousVisits(cuenta).then(renderTasksList) },
+    load: (cuenta) => WifixAPI.getPreviousVisits(cuenta).then(res => renderTasksList(res)) },
   { id: 'history', icon: SERVICIO_ICONS.history, title: 'Historial de la app (registros guardados)',
     load: (cuenta) => WifixAPI.getAccountToolHistory(cuenta).then(renderHistorySummary) },
 ];
@@ -1985,37 +2624,62 @@ function openDatosServicio() {
             _bootIspPanel(body, cuenta);
           } else {
             wireNapPortsButtons(body);
+            wireTaskNotesButtons(body);
           }
         } catch (err) {
           console.error('[Wifix] servicio', id, err);
-          body.innerHTML = `<div class="detail-error">${escapeHtml(err.message || 'Error al cargar')}</div>`;
+          body.innerHTML = renderPanelError(err, 'Error al cargar');
         }
       }
     });
   });
 
+  renderBrandChips();
+  warnIfNoBrandAvailable();
+
   detailServicio.classList.add('open');
   detailServicio.setAttribute('aria-hidden', 'false');
+}
+
+// Localiza el hueco de puertos de una tarjeta sin depender de CSS.escape:
+// el napRef puede ser numérico y escapar dígitos dentro de un selector de
+// atributo es una fuente segura de errores.
+function _findPortsSlot(scope, btn, napRef) {
+  const card = btn.closest ? btn.closest('.nap-card') : null;
+  if (card) {
+    const inCard = card.querySelector('.nap-ports-slot');
+    if (inCard) return inCard;
+  }
+  const todos = scope.querySelectorAll('.nap-ports-slot');
+  for (let i = 0; i < todos.length; i++) {
+    if (todos[i].dataset.portsFor === napRef) return todos[i];
+  }
+  return null;
 }
 
 function wireNapPortsButtons(scope) {
   scope.querySelectorAll('[data-action="view-ports"]').forEach((btn) => {
     btn.addEventListener('click', async (ev) => {
       ev.stopPropagation();
-      const napCode = btn.dataset.nap;
-      const slot = scope.querySelector(`[data-slot="ports-${CSS.escape(napCode)}"]`);
+      const napRef = btn.dataset.nap;
+      const slot = _findPortsSlot(scope, btn, napRef);
       if (!slot) return;
+      // Una expansión = una llamada. Si ya se cargó, solo se muestra/oculta.
       if (slot.dataset.loaded === '1') {
-        slot.classList.toggle('hidden');
+        const oculto = slot.classList.toggle('hidden');
+        btn.setAttribute('aria-expanded', oculto ? 'false' : 'true');
         return;
       }
       slot.innerHTML = `<div class="detail-loading">Cargando puertos…</div>`;
       try {
-        const data = await WifixAPI.getNapPorts(napCode);
+        const data = await _napPortsCached(scope, napRef);
         slot.innerHTML = renderPortsTable(data);
         slot.dataset.loaded = '1';
+        btn.setAttribute('aria-expanded', 'true');
+        _wirePortStatusButton(slot, data);
       } catch (err) {
-        slot.innerHTML = `<div class="detail-error">${escapeHtml(err.message || 'Error')}</div>`;
+        console.error('[Wifix] puertos NAP', err);
+        slot.innerHTML = renderPanelError(err, 'No se pudieron cargar los puertos.');
       }
     });
   });

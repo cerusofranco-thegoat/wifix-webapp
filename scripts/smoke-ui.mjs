@@ -388,14 +388,107 @@ const napPanel = await ctx.loadNapPanel();
 check('renderNapPanel HTML balanceado', balanced(napPanel) === null, balanced(napPanel));
 check('pide coordenada antes de consultar', napPanel.includes('Captura tu ubicación'));
 
-const naps = await WifixAPI.getNearbyNaps({ latitude: -2.1685, longitude: -79.9189 });
-check('mock de NAPs trae lat/lng y puertos libres',
-  naps.every((n) => isFinite(n.latitude) && isFinite(n.longitude) && n.freePorts !== undefined));
+check('ofrece elegir el radio de búsqueda', napPanel.includes('data-action="nap-meters"'));
+check('el radio no se consulta solo: hay botón explícito', napPanel.includes('data-action="nap-search"'));
 
-const ports = await WifixAPI.getNapPorts('PL2KD9');
-check('renderPortsTable con detalle', ctx.renderPortsTable(ports).includes('port-grid'));
+// getNearbyNaps devuelve { naps, degraded }: el aviso de degradación viaja en
+// el header X-Wifix-Degraded porque la respuesta del backend es un array.
+const nearby = await WifixAPI.getNearbyNaps({ latitude: -2.1685, longitude: -79.9189 }, { meters: 100, maxRows: 5 });
+check('getNearbyNaps devuelve { naps, degraded }',
+  Array.isArray(nearby.naps) && 'degraded' in nearby);
+check('mock de NAPs trae lat/lng y puertos libres',
+  nearby.naps.every((n) => isFinite(n.latitude) && isFinite(n.longitude) && n.freePorts !== undefined));
+check('mock de NAPs trae napId, red de acceso y fuente',
+  nearby.naps.every((n) => Number.isFinite(n.napId) && typeof n.networkName === 'string' && n.source === 'FSM'));
+check('maxRows recorta y avisa que la lista quedó truncada', await (async () => {
+  const r = await WifixAPI.getNearbyNaps({ latitude: -2.1685, longitude: -79.9189 }, { meters: 500, maxRows: 5 });
+  return r.naps.length === 5 && r.degraded && r.degraded.reason === 'TRUNCATED';
+})());
+
+check('la referencia de la NAP es el napId cuando existe',
+  ctx._napRef(nearby.naps[0]) === String(nearby.naps[0].napId)
+  && ctx._napRef({ napId: null, napCode: 'PL2KD9' }) === 'PL2KD9');
+
+// Campo 8, paso 1: los ocupados llegan SIN estado (clientStatus null).
+const ports = await WifixAPI.getNapPorts(String(nearby.naps[0].napId));
+const portsHtml = ctx.renderPortsTable(ports);
+check('renderPortsTable con detalle', portsHtml.includes('port-grid'));
+check('los ocupados llegan sin estado consultado',
+  ports.ports.filter((p) => p.occupied).every((p) => p.clientStatus === null && p.statusPending === true));
+check('tercer estado visual "ocupado sin consultar"', portsHtml.includes('port-cell busy pending'));
+check('la leyenda explica las tres categorías',
+  portsHtml.includes('Ocupado (estado conocido)') && portsHtml.includes('Ocupado, estado sin consultar'));
+check('ofrece consultar estados solo por acción explícita',
+  portsHtml.includes('data-action="port-status"') && portsHtml.includes('Consultar estado de'));
+check('renderPortsTable HTML balanceado', balanced(portsHtml) === null, balanced(portsHtml));
 check('renderPortsTable sin detalle muestra el aviso',
   ctx.renderPortsTable({ napCode: 'X', ports: [], detailAvailable: false, note: 'sin detalle' }).includes('sin detalle'));
+check('camino TEC no ofrece consultar estados',
+  !ctx.renderPortsTable(await WifixAPI.getNapPorts('PL2KD9')).includes('port-status-btn'));
+
+console.log('\n== Estado del cliente (campo 7) ==');
+const contract = await WifixAPI.getContractStatus('35070291');
+const statusHtml = ctx.renderStatusFromContract(contract, '35070291');
+check('contractId null se muestra como guion, no como "null"',
+  !statusHtml.includes('null') && statusHtml.includes('—'));
+check('muestra la descripción literal de la operadora', statusHtml.includes('Activo'));
+check('muestra la última orden', statusHtml.includes('ORDER/424900/2026'));
+check('mapea los 5 estados + desconocido',
+  ctx.statusTileClass('ACTIVA') === 'ok' && ctx.statusTileClass('SUSPENDIDA') === 'warn'
+  && ctx.statusTileClass('TERMINADA') === 'fail' && ctx.statusTileClass('ORDENADA') === 'info'
+  && ctx.statusTileClass('PENDIENTE') === 'warn' && ctx.statusTileClass('DESCONOCIDA') === 'muted'
+  && ctx.statusTileClass('LO QUE SEA') === 'muted');
+check('status HTML balanceado', balanced(statusHtml) === null, balanced(statusHtml));
+
+console.log('\n== Visitas y tareas (campos 15/16) ==');
+const visits = await WifixAPI.getPreviousVisits('35070291');
+const visitsHtml = ctx.renderTasksList(visits);
+check('acepta la forma { items, totalOrders }', Array.isArray(visits.items));
+check('técnico null se muestra como guion', visitsHtml.includes('· —') && !visitsHtml.includes('null'));
+check('ofrece cargar las notas bajo demanda', visitsHtml.includes('data-action="task-notes"'));
+check('visitas HTML balanceado', balanced(visitsHtml) === null, balanced(visitsHtml));
+const unsat = await WifixAPI.getUnsatisfactoryTasks('35070291');
+const unsatHtml = ctx.renderTasksList(unsat);
+check('pinta el aviso de lista truncada del backend',
+  unsatHtml.includes('detail-note') && unsatHtml.includes('Se revisaron las 5 órdenes'));
+check('tolera el array desnudo antiguo', ctx.renderTasksList([]).includes('Sin tareas registradas'));
+const notes = ctx.renderWorkOrderNotes(await WifixAPI.getWorkOrderTasks('ORDER/424900/2026'));
+check('renderiza las notas de cierre', notes.includes('task-note-date') && notes.includes('ONT'));
+check('notas HTML balanceado', balanced(notes) === null, balanced(notes));
+
+console.log('\n== Integración FSM ==');
+const health = await WifixAPI.getFsmHealth();
+check('health informa modo, marca por defecto y marcas',
+  typeof health.mode === 'string' && typeof health.defaultBrand === 'string' && Array.isArray(health.brands));
+WifixAPI.setBrand('seteinfo');
+check('la marca se guarda y se lee', WifixAPI.getBrand() === 'seteinfo');
+WifixAPI.setBrand(null);
+check('la marca se puede limpiar (usa el default del backend)', WifixAPI.getBrand() === null);
+const batch = await WifixAPI.getAccountsStatusBatch(['35070291', '35070291', '71398253']);
+check('status-batch deduplica las cuentas', batch.items.length === 2);
+const muchas = Array.from({ length: 27 }, (_, i) => String(40001000 + i));
+const batchBig = await WifixAPI.getAccountsStatusBatch(muchas);
+check('status-batch parte en lotes y devuelve todas', batchBig.items.length === 27);
+check('un fallo aislado no tumba el lote',
+  batchBig.items.some((it) => it.error) && batchBig.items.some((it) => it.statusCode));
+check('UPSTREAM_AUTH_ERROR se pinta como aviso, no como error rojo',
+  ctx.renderPanelError({ code: 'UPSTREAM_AUTH_ERROR', message: 'token vencido' }).includes('detail-warning'));
+check('otros errores siguen siendo error',
+  ctx.renderPanelError({ code: 'CONNECTOR_ERROR', message: 'boom' }).includes('detail-error'));
+
+console.log('\n== Perfil del cliente (campos 1-5) ==');
+const profile = await WifixAPI.getClientProfile('35070291');
+check('el perfil trae correo y coordenada del domicilio',
+  typeof profile.email === 'string' && isFinite(profile.latitude) && isFinite(profile.longitude));
+check('los campos simulados se marcan como tales',
+  ctx.sourceBadge(profile, 'planName').includes('simulado') && ctx.sourceBadge(profile, 'fullName') === '');
+
+console.log('\n== Prohibiciones del contrato ==');
+const fuentes = ['api.js', 'app.js'].map((f) => readFileSync(new URL('../' + f, import.meta.url), 'utf8'));
+check('la webapp nunca envía withStatus',
+  !fuentes.some((s) => /withStatus\s*[=:]/.test(s) || s.includes("'withStatus'") || s.includes('withStatus=1')));
+check('no hay import/export en los archivos planos',
+  !fuentes.some((s) => /^\s*(import|export)\s/m.test(s)));
 
 console.log(fails.length === 0 ? '\nTODO OK\n' : `\n${fails.length} FALLOS: ${fails.join(', ')}\n`);
 process.exitCode = fails.length === 0 ? 0 : 1;
