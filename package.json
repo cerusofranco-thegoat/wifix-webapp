@@ -7,6 +7,7 @@
     "build:web": "node scripts/build-www.mjs",
     "serve": "npx http-server . -p 5173 -c-1",
     "smoke": "node scripts/smoke-ui.mjs",
+    "smoke:speedtest": "node scripts/smoke-speedtest.mjs",
     "cap:sync": "npm run build:web && cap sync android",
     "cap:open": "cap open android",
     "cap:run": "npm run build:web && cap run android"

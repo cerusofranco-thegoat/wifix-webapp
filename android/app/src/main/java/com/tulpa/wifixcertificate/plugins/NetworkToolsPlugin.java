@@ -556,6 +556,20 @@ public class NetworkToolsPlugin extends Plugin {
     private static final String SPEEDTEST_UA =
         "Mozilla/5.0 (Android) WifixSpeedtest/1.0";
 
+    /** Redirecciones que seguimos a mano (ver openGetFollowing). */
+    private static final int MAX_REDIRECTS = 5;
+
+    /** Primer tramo del test que NO se promedia: TCP slow-start / ramp-up. */
+    private static final int RAMP_UP_MS = 1500;
+
+    /**
+     * Techo físico de una medición creíble desde un teléfono por WiFi.
+     * Ni Wi-Fi 6E sobre un plan residencial pasa de aquí: cualquier muestra
+     * por encima es un artefacto de medición (bytes contados que nunca
+     * transitaron) y se descarta en vez de promediarse.
+     */
+    private static final double MAX_PLAUSIBLE_MBPS = 2500.0;
+
     // -----------------------------------------------------------------------
     // httpPing — N descargas de un asset chico; descarta la 1ª (warm-up),
     // mide tiempo de respuesta completa. Sirve para ping a candidatos y para
@@ -618,6 +632,16 @@ public class NetworkToolsPlugin extends Plugin {
     // un AtomicLong. Corta a minMs (tope maxMs). Emite progreso cada ~300ms con
     // mbps de ventana móvil de ~2s. Verifica que el código sea 200 antes de
     // contar; si no, loguea y reintenta. Captura cf-meta-colo si viene.
+    //
+    // Tres correcciones sobre la versión anterior:
+    //  1) Sigue redirecciones a mano (openGetFollowing): el 307 de los
+    //     servidores Ookla ya no aborta la fase.
+    //  2) Reintenta con BACKOFF exponencial y abandona el stream tras varios
+    //     fallos seguidos: antes martillaba el endpoint cada 150 ms durante
+    //     15 s, lo que se ganaba el 429 de Cloudflare en el fallback.
+    //  3) El mbps final se calcula sobre la ventana POSTERIOR al ramp-up
+    //     (RAMP_UP_MS), no sobre todo el test: el TCP slow-start de los
+    //     primeros ~1.5 s ya no arrastra el promedio hacia abajo.
     // -----------------------------------------------------------------------
     @PluginMethod
     public void downloadTest(PluginCall call) {
@@ -643,6 +667,13 @@ public class NetworkToolsPlugin extends Plugin {
                 final AtomicInteger firstBadCode = new AtomicInteger(-1);
                 final AtomicInteger streamRetries = new AtomicInteger(0);
                 final String[] lastError = { null };
+                // Streams todavía vivos: cuando llegan a 0 (endpoint roto,
+                // 429 sostenido…) el reporter corta en vez de esperar 15 s.
+                final AtomicInteger liveStreams = new AtomicInteger(parallel);
+                // Streams que se rindieron por fallos (no por fin del test).
+                final AtomicInteger gaveUp = new AtomicInteger(0);
+                // Fallos seguidos tolerados por stream antes de abandonarlo.
+                final int MAX_STREAM_FAILURES = 4;
 
                 Thread[] workers = new Thread[parallel];
                 for (int i = 0; i < parallel; i++) {
@@ -650,7 +681,10 @@ public class NetworkToolsPlugin extends Plugin {
                     workers[i] = new Thread(() -> {
                         byte[] buf = new byte[64 * 1024];
                         long streamBytes = 0;
-                        while (!abort.get()) {
+                        int failures = 0;
+                        // El stream se abandona tras MAX_STREAM_FAILURES fallos
+                        // seguidos (endpoint muerto / rate-limit sostenido).
+                        while (!abort.get() && failures < MAX_STREAM_FAILURES) {
                             HttpURLConnection conn = null;
                             // reusable=true sólo cuando leímos el body COMPLETO hasta
                             // EOF (-1): ese socket vuelve al pool de keep-alive y el
@@ -659,7 +693,10 @@ public class NetworkToolsPlugin extends Plugin {
                             // o por excepción, el socket NO es reutilizable → disconnect.
                             boolean reusable = false;
                             try {
-                                conn = openGet(url + (url.contains("?") ? "&" : "?")
+                                // openGetFollowing: resuelve 301/302/307/308
+                                // (incluido el salto http↔https que
+                                // HttpURLConnection se niega a seguir).
+                                conn = openGetFollowing(url + (url.contains("?") ? "&" : "?")
                                         + "n=" + Math.random());
                                 int code = conn.getResponseCode();
                                 if (code != 200) {
@@ -667,13 +704,16 @@ public class NetworkToolsPlugin extends Plugin {
                                         "download stream " + idx + " código != 200: " + code);
                                     firstBadCode.compareAndSet(-1, code);
                                     streamRetries.incrementAndGet();
+                                    failures++;
                                     try { drainError(conn); } catch (Exception ignored) {}
                                     conn.disconnect();
                                     conn = null;
-                                    // Pequeña pausa antes de reintentar el stream.
-                                    try { Thread.sleep(150); } catch (InterruptedException ignored) {}
+                                    // Backoff creciente: martillar un endpoint que
+                                    // devuelve 429/307 sólo empeora el rate-limit.
+                                    if (failures < MAX_STREAM_FAILURES) backoffSleep(failures);
                                     continue;
                                 }
+                                failures = 0;
                                 if (colo[0] == null) {
                                     String c = readColo(conn);
                                     if (c != null) colo[0] = c;
@@ -702,6 +742,9 @@ public class NetworkToolsPlugin extends Plugin {
                                 android.util.Log.w("WifixSpeedtest",
                                     "download stream " + idx + " excepción: " + e.getMessage());
                                 lastError[0] = e.getMessage();
+                                failures++;
+                                // El finally de abajo desconecta el socket roto.
+                                if (failures < MAX_STREAM_FAILURES) backoffSleep(failures);
                             } finally {
                                 // Sólo desconectar si el socket NO quedó reutilizable
                                 // (abort a medias, excepción). En el camino EOF se omite
@@ -710,21 +753,32 @@ public class NetworkToolsPlugin extends Plugin {
                                 if (conn != null && !reusable) conn.disconnect();
                             }
                         }
+                        if (failures >= MAX_STREAM_FAILURES) gaveUp.incrementAndGet();
+                        liveStreams.decrementAndGet();
                         android.util.Log.i("WifixSpeedtest",
-                            "download stream " + idx + " bytes=" + streamBytes);
+                            "download stream " + idx + " bytes=" + streamBytes
+                            + " failures=" + failures);
                     });
                     workers[i].start();
                 }
 
-                runReporter("download", bytes, abort, start, minMs, maxMs);
+                long[] ramp = runReporter("download", bytes, abort, start, minMs, maxMs, liveStreams);
 
                 for (Thread w : workers) { try { w.join(2000); } catch (Exception ignored) {} }
 
-                long elapsed = System.currentTimeMillis() - start;
+                long endMs = System.currentTimeMillis();
+                long elapsed = endMs - start;
                 long total = bytes.get();
-                double mbps = elapsed > 0 ? (total * 8.0) / (elapsed / 1000.0) / 1e6 : 0;
+
+                // mbps sobre la ventana estable (post ramp-up). Si el test cortó
+                // antes del ramp-up (endpoint muerto) se usa todo el intervalo.
+                long winMs = ramp[0] > 0 ? endMs - ramp[0] : elapsed;
+                long winBytes = ramp[0] > 0 ? total - ramp[1] : total;
+                if (winMs < 1000) { winMs = elapsed; winBytes = total; }
+                double mbps = winMs > 0 ? (winBytes * 8.0) / (winMs / 1000.0) / 1e6 : 0;
                 android.util.Log.i("WifixSpeedtest",
-                    "download total bytes=" + total + " elapsedMs=" + elapsed + " mbps=" + mbps
+                    "download total bytes=" + total + " elapsedMs=" + elapsed
+                    + " winBytes=" + winBytes + " winMs=" + winMs + " mbps=" + mbps
                     + " firstHttpCode=" + firstBadCode.get()
                     + " streamRetries=" + streamRetries.get()
                     + " lastError=" + lastError[0]);
@@ -738,6 +792,9 @@ public class NetworkToolsPlugin extends Plugin {
                 result.put("downloadFirstHttpCode", firstBadCode.get());
                 result.put("downloadLastError", lastError[0]);
                 result.put("downloadStreamRetries", streamRetries.get());
+                result.put("downloadWindowMs", winMs);
+                result.put("downloadWindowBytes", winBytes);
+                result.put("downloadStreamsGaveUp", gaveUp.get());
                 call.resolve(result);
             } catch (Exception e) {
                 call.reject("downloadTest falló: " + e.getMessage(), e);
@@ -746,19 +803,30 @@ public class NetworkToolsPlugin extends Plugin {
     }
 
     // -----------------------------------------------------------------------
-    // uploadTest — N hilos hacen POST contra Cloudflare __up. CADA conexión
-    // escribe de forma CONTINUA (no un payload finito que se "completa" al
-    // instante) en bloques de 64 KB hasta que aborta, contando SÓLO los bytes
-    // tras retornar out.write(): así la contrapresión del socket TCP marca el
-    // ritmo real de subida. Tras abortar, cierra el stream y OBLIGA la
-    // transmisión llamando getResponseCode()/drenando la respuesta.
+    // uploadTest — N hilos hacen POST por REQUEST COMPLETO y sólo cuentan los
+    // bytes que el servidor CONFIRMÓ haber recibido.
     //
-    // FIX del bug de ~4000 Mbps: la versión anterior enviaba un payload finito
-    // de 5 MB y reconectaba; los primeros writes llenan el buffer de envío del
-    // kernel al instante y se contaban como "enviados" aunque no salieran por
-    // la red antes del out.close()/disconnect(). Al escribir de forma continua
-    // y cortar por tiempo (no por tamaño), el conteo refleja exactamente lo que
-    // el socket aceptó transmitir durante la ventana de medición.
+    // FIX del bug de ~7000 Mbps: la versión anterior escribía de forma continua
+    // y sumaba cada bloque apenas out.write() retornaba, sin mirar nunca el
+    // código de respuesta. Dos formas de mentir tenía eso:
+    //   (a) write() retorna cuando el bloque entra al buffer de envío (kernel /
+    //       sink de OkHttp), no cuando sale por la red;
+    //   (b) si el servidor cortaba temprano (307 a https, 405, 413…) los bytes
+    //       escritos se seguían contando como "subidos" aunque la request
+    //       hubiera fallado — de ahí las lecturas físicamente imposibles.
+    //
+    // Ahora cada iteración sube un payload de tamaño FIJO conocido y:
+    //   - mide desde el primer write hasta que llega la respuesta del servidor
+    //     (la respuesta sólo llega cuando el server leyó el cuerpo entero);
+    //   - descarta la muestra si el código no es 2xx, si quedó incompleta o si
+    //     da más de MAX_PLAUSIBLE_MBPS;
+    //   - descarta la PRIMERA muestra de cada stream (TCP slow-start);
+    //   - adapta el tamaño del payload para que cada request dure ~2 s, así
+    //     satura tanto un plan de 10 Mbps como uno de 1 Gbps;
+    //   - si el server responde 3xx con Location, se muda a esa URL en vez de
+    //     seguir subiendo al vacío.
+    // El agregado final = bytes confirmados / ventana real cubierta por las
+    // muestras válidas (los streams corren en paralelo y se solapan).
     // -----------------------------------------------------------------------
     @PluginMethod
     public void uploadTest(PluginCall call) {
@@ -779,20 +847,53 @@ public class NetworkToolsPlugin extends Plugin {
                 final byte[] block = new byte[BLOCK];
                 for (int i = 0; i < BLOCK; i++) block[i] = (byte) ((i * 137) & 0xff);
 
+                // Tamaños de payload por request: arranca chico (warm-up) y se
+                // ajusta para durar ~2 s por request.
+                final long FIRST_PAYLOAD = 1L * 1024 * 1024;
+                final long MIN_PAYLOAD = 256L * 1024;
+                final long MAX_PAYLOAD = 32L * 1024 * 1024;
+                final double TARGET_REQ_MS = 2000.0;
+                final int MAX_STREAM_FAILURES = 4;
+
+                // bytes = SÓLO lo confirmado con 2xx (alimenta también el
+                // medidor en vivo: preferimos un gauge honesto y escalonado a
+                // uno suave y mentiroso).
                 final AtomicLong bytes = new AtomicLong(0);
                 final AtomicBoolean abort = new AtomicBoolean(false);
+                final AtomicInteger liveStreams = new AtomicInteger(parallel);
+                final AtomicInteger gaveUp = new AtomicInteger(0);
+                final AtomicInteger samples = new AtomicInteger(0);
+                final AtomicInteger discardedImplausible = new AtomicInteger(0);
+                final AtomicInteger discardedHttp = new AtomicInteger(0);
+                final AtomicInteger firstBadCode = new AtomicInteger(-1);
+                final String[] lastError = { null };
+                // Ventana cubierta por las muestras válidas, en ns desde startNs.
+                final AtomicLong firstSampleNs = new AtomicLong(Long.MAX_VALUE);
+                final AtomicLong lastSampleNs = new AtomicLong(0);
+
                 final long start = System.currentTimeMillis();
+                final long startNs = System.nanoTime();
 
                 Thread[] workers = new Thread[parallel];
                 for (int i = 0; i < parallel; i++) {
                     final int idx = i;
                     workers[i] = new Thread(() -> {
                         long streamBytes = 0;
-                        while (!abort.get()) {
+                        long payload = FIRST_PAYLOAD;
+                        boolean warmupDone = false;
+                        int failures = 0;
+                        String target = url;
+                        while (!abort.get() && failures < MAX_STREAM_FAILURES) {
                             HttpURLConnection conn = null;
                             int code = -1;
+                            // reusable: la request terminó limpia (2xx + body
+                            // drenado) → el socket vuelve al pool de keep-alive y
+                            // la siguiente no paga handshake. Sin esto, el hueco
+                            // de reconexión cae DENTRO de la ventana medida y
+                            // subestima la subida.
+                            boolean reusable = false;
                             try {
-                                URL u = new URL(url + (url.contains("?") ? "&" : "?")
+                                URL u = new URL(target + (target.contains("?") ? "&" : "?")
                                         + "n=" + Math.random());
                                 conn = (HttpURLConnection) u.openConnection();
                                 conn.setConnectTimeout(8000);
@@ -802,61 +903,152 @@ public class NetworkToolsPlugin extends Plugin {
                                 conn.setRequestMethod("POST");
                                 conn.setRequestProperty("Content-Type", "application/octet-stream");
                                 conn.setRequestProperty("User-Agent", SPEEDTEST_UA);
-                                // Chunked: fuerza streaming real al socket, sin
-                                // bufferizar todo el cuerpo en RAM ni requerir
-                                // Content-Length por adelantado.
-                                conn.setChunkedStreamingMode(0);
+                                // Longitud fija: el servidor sabe cuánto esperar y
+                                // responde recién cuando leyó todo → el tiempo hasta
+                                // la respuesta ES el tiempo de tránsito.
+                                conn.setFixedLengthStreamingMode(payload);
 
                                 OutputStream out = conn.getOutputStream();
-                                // Escritura continua: cada write bloquea cuando
-                                // el buffer del socket se llena → el conteo sigue
-                                // el ancho de banda real de subida.
-                                while (!abort.get()) {
-                                    out.write(block, 0, BLOCK);
-                                    // Sólo cuenta DESPUÉS de que write() retornó
-                                    // (el bloque ya fue aceptado por el socket).
-                                    if (abort.get()) break;
-                                    bytes.addAndGet(BLOCK);
-                                    streamBytes += BLOCK;
+                                final long t0 = System.nanoTime();
+                                long written = 0;
+                                while (written < payload && !abort.get()) {
+                                    int n = (int) Math.min(BLOCK, payload - written);
+                                    out.write(block, 0, n);
+                                    written += n;
                                 }
+                                final boolean complete = (written == payload);
                                 try { out.flush(); } catch (Exception ignored) {}
+                                // Con longitud fija, cerrar a mitad de cuerpo lanza:
+                                // esa muestra se descarta igual (complete == false).
                                 try { out.close(); } catch (Exception ignored) {}
 
-                                // OBLIGATORIO: forzar que la petición se
-                                // transmita y cierre. Sin getResponseCode()
-                                // HttpURLConnection puede no enviar a la red.
-                                try {
-                                    code = conn.getResponseCode();
-                                    drainBody(conn, code);
-                                } catch (Exception ignored) {}
+                                if (!complete) break;   // abortamos a mitad: no hay muestra
+
+                                code = conn.getResponseCode();
+                                final long t1 = System.nanoTime();
+                                drainBody(conn, code);
+
+                                if (code >= 300 && code < 400) {
+                                    // Redirección del POST (típico http→https): no se
+                                    // cuenta y nos mudamos al destino real.
+                                    String loc = conn.getHeaderField("Location");
+                                    firstBadCode.compareAndSet(-1, code);
+                                    discardedHttp.incrementAndGet();
+                                    failures++;
+                                    if (loc != null && !loc.isEmpty()) {
+                                        target = new URL(new URL(target), loc).toString();
+                                        failures--;   // mudarse no es un fallo del enlace
+                                    }
+                                    if (failures > 0) backoffSleep(failures);
+                                    continue;
+                                }
+                                if (code < 200 || code >= 300) {
+                                    // 4xx/5xx: el servidor NO recibió/aceptó el cuerpo.
+                                    android.util.Log.w("WifixSpeedtest",
+                                        "upload stream " + idx + " código != 2xx: " + code);
+                                    firstBadCode.compareAndSet(-1, code);
+                                    discardedHttp.incrementAndGet();
+                                    failures++;
+                                    if (failures < MAX_STREAM_FAILURES) backoffSleep(failures);
+                                    continue;
+                                }
+
+                                failures = 0;
+                                reusable = true;
+                                double secs = (t1 - t0) / 1e9;
+                                double sampleMbps = secs > 0 ? (written * 8.0) / secs / 1e6 : 0;
+
+                                if (!warmupDone) {
+                                    // Primera request del stream: TCP slow-start, no cuenta.
+                                    warmupDone = true;
+                                } else if (sampleMbps > MAX_PLAUSIBLE_MBPS) {
+                                    // Imposible desde un teléfono por WiFi: artefacto.
+                                    discardedImplausible.incrementAndGet();
+                                    android.util.Log.w("WifixSpeedtest",
+                                        "upload stream " + idx + " muestra descartada: "
+                                        + sampleMbps + " Mbps");
+                                } else {
+                                    bytes.addAndGet(written);
+                                    streamBytes += written;
+                                    samples.incrementAndGet();
+                                    long relT0 = t0 - startNs, relT1 = t1 - startNs;
+                                    long prev;
+                                    do { prev = firstSampleNs.get(); }
+                                    while (relT0 < prev && !firstSampleNs.compareAndSet(prev, relT0));
+                                    do { prev = lastSampleNs.get(); }
+                                    while (relT1 > prev && !lastSampleNs.compareAndSet(prev, relT1));
+                                }
+
+                                // Ajuste del tamaño para apuntar a ~2 s por request.
+                                double ms = secs * 1000.0;
+                                if (ms > 1) {
+                                    long next = (long) (written * (TARGET_REQ_MS / ms));
+                                    payload = Math.max(MIN_PAYLOAD, Math.min(MAX_PAYLOAD, next));
+                                } else {
+                                    payload = Math.min(MAX_PAYLOAD, payload * 4);
+                                }
                             } catch (Exception e) {
                                 android.util.Log.w("WifixSpeedtest",
                                     "upload stream " + idx + " excepción: " + e.getMessage());
+                                lastError[0] = e.getMessage();
+                                failures++;
+                                if (failures < MAX_STREAM_FAILURES) backoffSleep(failures);
                             } finally {
-                                if (conn != null) conn.disconnect();
+                                // Sólo se desconecta el socket inservible; el limpio
+                                // queda en el pool de keep-alive.
+                                if (conn != null && !reusable) conn.disconnect();
                             }
                             android.util.Log.i("WifixSpeedtest",
                                 "upload stream " + idx + " code=" + code
-                                + " bytesAcumulados=" + streamBytes);
+                                + " payload=" + payload
+                                + " bytesConfirmados=" + streamBytes);
                         }
+                        if (failures >= MAX_STREAM_FAILURES) gaveUp.incrementAndGet();
+                        liveStreams.decrementAndGet();
                     });
                     workers[i].start();
                 }
 
-                runReporter("upload", bytes, abort, start, minMs, maxMs);
+                runReporter("upload", bytes, abort, start, minMs, maxMs, liveStreams);
 
-                for (Thread w : workers) { try { w.join(2000); } catch (Exception ignored) {} }
+                for (Thread w : workers) { try { w.join(3000); } catch (Exception ignored) {} }
 
                 long elapsed = System.currentTimeMillis() - start;
                 long total = bytes.get();
-                double mbps = elapsed > 0 ? (total * 8.0) / (elapsed / 1000.0) / 1e6 : 0;
+                // Ventana real cubierta por las muestras válidas (los streams se
+                // solapan, por eso es [primer inicio, última respuesta] y no la
+                // suma de duraciones).
+                double windowSecs = samples.get() > 0 && lastSampleNs.get() > firstSampleNs.get()
+                    ? (lastSampleNs.get() - firstSampleNs.get()) / 1e9 : 0;
+                double mbps = windowSecs > 0.2 ? (total * 8.0) / windowSecs / 1e6 : 0;
+                boolean implausible = mbps > MAX_PLAUSIBLE_MBPS;
+                if (implausible) {
+                    // No promediamos basura: se reporta 0 + flag y el JS decide
+                    // (fallback etiquetado) en vez de mostrar 7000 Mbps.
+                    android.util.Log.w("WifixSpeedtest",
+                        "upload agregado imposible (" + mbps + " Mbps) — se reporta 0");
+                    mbps = 0;
+                }
                 android.util.Log.i("WifixSpeedtest",
-                    "upload total bytes=" + total + " elapsedMs=" + elapsed + " mbps=" + mbps);
+                    "upload bytesConfirmados=" + total + " elapsedMs=" + elapsed
+                    + " windowSecs=" + windowSecs + " muestras=" + samples.get()
+                    + " descartadasHttp=" + discardedHttp.get()
+                    + " descartadasImposibles=" + discardedImplausible.get()
+                    + " mbps=" + mbps);
 
                 JSObject result = new JSObject();
                 result.put("uploadMbps", mbps);
                 result.put("uploadBytes", total);
                 result.put("uploadElapsedMs", elapsed);
+                // Campos de diagnóstico (siempre presentes).
+                result.put("uploadWindowMs", (long) (windowSecs * 1000));
+                result.put("uploadSamples", samples.get());
+                result.put("uploadFirstHttpCode", firstBadCode.get());
+                result.put("uploadDiscardedHttp", discardedHttp.get());
+                result.put("uploadDiscardedImplausible", discardedImplausible.get());
+                result.put("uploadStreamsGaveUp", gaveUp.get());
+                result.put("uploadImplausible", implausible);
+                result.put("uploadLastError", lastError[0]);
                 call.resolve(result);
             } catch (Exception e) {
                 call.reject("uploadTest falló: " + e.getMessage(), e);
@@ -868,11 +1060,21 @@ public class NetworkToolsPlugin extends Plugin {
     // runReporter — bucle de ~300ms que mantiene una ventana móvil de 2s y
     // emite "speedtestProgress" con mbps en vivo. Pone abort=true al llegar a
     // minMs (o maxMs como tope duro). Bloquea el hilo llamante hasta abortar.
+    //
+    // Corta ANTES si todos los streams se dieron por vencidos (liveStreams==0):
+    // sin eso, un endpoint que devuelve 307/429 hacía esperar los 15 s completos
+    // martillándolo, y recién ahí se caía al fallback.
+    //
+    // Devuelve { msDelFinDelRampUp, bytesAcumuladosEnEseInstante } para que el
+    // llamante calcule el mbps sobre la ventana estable. Si el test terminó
+    // antes del ramp-up devuelve {0,0}.
     // -----------------------------------------------------------------------
-    private void runReporter(String phase, AtomicLong bytes, AtomicBoolean abort,
-                             long start, int minMs, int maxMs) {
+    private long[] runReporter(String phase, AtomicLong bytes, AtomicBoolean abort,
+                               long start, int minMs, int maxMs,
+                               AtomicInteger liveStreams) {
         // Ventana móvil: arrays paralelos de timestamp/bytes acumulados.
         java.util.ArrayDeque<long[]> window = new java.util.ArrayDeque<>();
+        long rampAtMs = 0, rampBytes = 0;
         while (true) {
             try { Thread.sleep(300); } catch (InterruptedException ignored) {}
             long now = System.currentTimeMillis();
@@ -889,6 +1091,11 @@ public class NetworkToolsPlugin extends Plugin {
                 if (dt > 0) liveMbps = (db * 8.0) / dt / 1e6;
             }
             long elapsed = now - start;
+            // Marca el fin del ramp-up (TCP slow-start): lo anterior no promedia.
+            if (rampAtMs == 0 && elapsed >= RAMP_UP_MS) {
+                rampAtMs = now;
+                rampBytes = acc;
+            }
             JSObject p = new JSObject();
             p.put("phase", phase);
             p.put("mbps", liveMbps);
@@ -900,7 +1107,16 @@ public class NetworkToolsPlugin extends Plugin {
                 abort.set(true);
                 break;
             }
+            // Todos los streams abandonaron: cortar ya y dejar que el JS caiga
+            // al fallback en vez de esperar la ventana completa.
+            if (liveStreams != null && liveStreams.get() <= 0) {
+                android.util.Log.w("WifixSpeedtest",
+                    phase + ": todos los streams abandonaron a los " + elapsed + " ms");
+                abort.set(true);
+                break;
+            }
         }
+        return new long[]{ rampAtMs, rampBytes };
     }
 
     // -----------------------------------------------------------------------
@@ -913,9 +1129,49 @@ public class NetworkToolsPlugin extends Plugin {
         conn.setReadTimeout(15000);
         conn.setUseCaches(false);
         conn.setRequestMethod("GET");
+        conn.setInstanceFollowRedirects(true);
         conn.setRequestProperty("User-Agent", SPEEDTEST_UA);
         conn.setRequestProperty("Cache-Control", "no-cache");
         return conn;
+    }
+
+    /**
+     * GET siguiendo redirecciones A MANO (hasta MAX_REDIRECTS saltos).
+     *
+     * HttpURLConnection NO sigue redirecciones que cambian de esquema
+     * (http→https o https→http): las ignora y devuelve el 3xx crudo. Los
+     * servidores Ookla suelen responder 307 hacia https en los assets de
+     * descarga, y por eso el test moría con "servidor HTTP 307" sin haber
+     * bajado un solo byte. Aquí resolvemos el Location nosotros (absoluto o
+     * relativo) y devolvemos ya la conexión final.
+     *
+     * La conexión devuelta puede traer cualquier código (200, 404, 429…): el
+     * llamante decide. Sólo se garantiza que no es un 3xx con Location.
+     */
+    private HttpURLConnection openGetFollowing(String url) throws Exception {
+        String current = url;
+        for (int hop = 0; hop <= MAX_REDIRECTS; hop++) {
+            HttpURLConnection conn = openGet(current);
+            int code = conn.getResponseCode();
+            if (code == 301 || code == 302 || code == 303 || code == 307 || code == 308) {
+                String loc = conn.getHeaderField("Location");
+                drainError(conn);
+                conn.disconnect();
+                if (loc == null || loc.isEmpty()) {
+                    throw new Exception("redirección " + code + " sin Location");
+                }
+                current = new URL(new URL(current), loc).toString();
+                continue;
+            }
+            return conn;
+        }
+        throw new Exception("demasiadas redirecciones (>" + MAX_REDIRECTS + ")");
+    }
+
+    /** Backoff exponencial por stream: 300ms, 600, 1200, 2400, tope 3000. */
+    private void backoffSleep(int consecutiveFailures) {
+        long ms = Math.min(3000L, 300L * (1L << Math.min(4, Math.max(0, consecutiveFailures - 1))));
+        try { Thread.sleep(ms); } catch (InterruptedException ignored) {}
     }
 
     /** Lee el header de edge de Cloudflare (cf-meta-colo, si no cf-ray). */
@@ -960,9 +1216,11 @@ public class NetworkToolsPlugin extends Plugin {
         try {
             String full = url + (url.contains("?") ? "&" : "?")
                     + "n=" + System.currentTimeMillis() + "_" + n;
-            conn = openGet(full);
+            // Sigue redirecciones (incluido http↔https) antes de juzgar el código:
+            // un 307 ya no cuenta como "servidor vivo" ni como fallo.
+            conn = openGetFollowing(full);
             int code = conn.getResponseCode();
-            if (code < 200 || code >= 400) return false;
+            if (code < 200 || code >= 300) return false;
             InputStream in = conn.getInputStream();
             byte[] buf = new byte[8192];
             while (in.read(buf) != -1) { /* drena */ }

@@ -284,8 +284,10 @@
       // (forma: https://host:puerto/speedtest/upload.php):
       //   base    = url sin "/upload.php"
       //   latencia= base/latency.txt (fallback base/random350x350.jpg)
-      //   bajada  = base/random4000x4000.jpg (Ookla la genera al vuelo)
-      //   subida  = server.url (el upload.php; acepta POST chunked)
+      //   bajada  = el primer endpoint que responda 200 entre
+      //             base/download?size=N y base/random4000x4000.jpg (y sus
+      //             variantes http/https) — ver resolveDownloadEndpoint
+      //   subida  = server.url (el upload.php; POST de payload fijo)
       //
       // Fallback honesto y ETIQUETADO: si la bajada o la subida contra el
       // servidor falla (0 bytes / 0 Mbps / rechazo del plugin), se reintenta
@@ -333,12 +335,18 @@
       const base = server.url.replace(/\/upload\.php$/i, '');
       const SRV_LATENCY = `${base}/latency.txt`;
       const SRV_LATENCY_ALT = `${base}/random350x350.jpg`;
-      const SRV_DOWN = `${base}/random4000x4000.jpg`;
+      // Endpoint de bajada por defecto si el sondeo no encuentra ninguno vivo.
+      const SRV_DOWN_DEFAULT = `${base}/random4000x4000.jpg`;
       const SRV_UP = server.url;
 
       // Endpoints Cloudflare (fallback honesto y etiquetado).
+      // POCAS conexiones y requests GRANDES: speed.cloudflare.com limita por
+      // CANTIDAD de pedidos, no por bytes. Con 6 streams × 25 MB salían ~80
+      // requests en 15 s y devolvía 429; con 4 × 100 MB son ~20.
       const CF_DOWN = 'https://speed.cloudflare.com/__down';
       const CF_UP = 'https://speed.cloudflare.com/__up';
+      const CF_STREAMS = 4;
+      const CF_DOWN_BYTES = 104857600;   // 100 MB por request
 
       const serverName = server.sponsor || server.label || 'Servidor';
       const city = server.city;
@@ -381,13 +389,24 @@
       let measuredVia = 'server';
       let downloadMbps = 0, dlBytes = 0, dlElapsedMs = 0;
       let uploadMbps = 0, ulBytes = 0, ulElapsedMs = 0;
+      let downloadEndpoint = null;   // endpoint de bajada realmente usado
       try {
         // ---------- Fase 3: Download multi-stream (nativo, saturando) ----------
         // 6 conexiones paralelas mínimo 15 s. Satura el link: un solo stream
         // raramente alcanza el bandwidth real por TCP slow-start. El plugin
-        // relanza el GET en bucle por stream hasta minMs; Ookla genera la
-        // imagen random4000x4000.jpg al vuelo (varios MB por request).
+        // relanza el GET en bucle por stream hasta minMs (el servidor genera el
+        // payload al vuelo, decenas de MB por ventana) y promedia sólo la parte
+        // posterior al ramp-up.
         onProgress({ phase: 'download', progress: 0, mbps: 0, elapsedMs: 0 });
+
+        // Sondeo previo del endpoint de bajada: los servidores Ookla conviven
+        // en dos generaciones (/download?size=N y random{N}x{N}.jpg) y algunos
+        // sólo sirven el asset por el otro esquema (de ahí los 307). Probamos
+        // con un GET chico cuál responde 200 ANTES de gastar 15 s contra él.
+        const probe = await resolveDownloadEndpoint(NetworkTools, base);
+        const SRV_DOWN = probe.url || SRV_DOWN_DEFAULT;
+        downloadEndpoint = SRV_DOWN;
+
         // El plugin puede rechazar (call.reject) ante errores de red; lo
         // atrapamos para poder caer a Cloudflare en vez de abortar todo.
         const dl = await NetworkTools.downloadTest({
@@ -404,13 +423,21 @@
         // Si el servidor no entregó nada, caer a Cloudflare (etiquetado).
         if (!dlBytes || !downloadMbps) {
           measuredVia = 'cloudflare-fallback';
-          const dlFile = `${CF_DOWN}?bytes=26214400`;   // 25 MB por request
-          const cf = await NetworkTools.downloadTest({
-            url: dlFile,
-            parallelStreams: 6,
+          const runCf = (streams) => NetworkTools.downloadTest({
+            url: `${CF_DOWN}?bytes=${CF_DOWN_BYTES}`,
+            parallelStreams: streams,
             minMs: 15000,
             maxMs: 22000,
-          });
+          }).catch((e) => ({ __rejected: (e && e.message) ? e.message : String(e) }));
+
+          let cf = await runCf(CF_STREAMS);
+          // 429 = rate-limit de Cloudflare (suele venir de una IP compartida
+          // por CGNAT o de un test anterior). Un solo reintento, con backoff y
+          // la mitad de conexiones: insistir en ráfaga sólo lo prolonga.
+          if ((!cf.downloadBytes || !cf.downloadMbps) && cf.downloadFirstHttpCode === 429) {
+            await new Promise((r) => setTimeout(r, 3000));
+            cf = await runCf(2);
+          }
           downloadMbps = cf && cf.downloadMbps != null ? cf.downloadMbps : 0;
           dlBytes = cf && cf.downloadBytes != null ? cf.downloadBytes : 0;
           dlElapsedMs = cf && cf.downloadElapsedMs != null ? cf.downloadElapsedMs : 0;
@@ -418,17 +445,23 @@
           // Ni el servidor ni Cloudflare entregaron nada: error con motivo real.
           if (!dlBytes || !downloadMbps) {
             const srvMsg = (dl && dl.__rejected)
-              ? `servidor rechazó (${dl.__rejected})`
-              : `servidor HTTP ${dl && dl.downloadFirstHttpCode != null ? dl.downloadFirstHttpCode : -1}` +
-                (dl && dl.downloadLastError ? ` · ${dl.downloadLastError}` : '');
-            const cfCode = cf && cf.downloadFirstHttpCode != null ? cf.downloadFirstHttpCode : -1;
-            const cfErr = cf && cf.downloadLastError ? ` · ${cf.downloadLastError}` : '';
-            throw new Error(`Bajada falló: ${srvMsg}; Cloudflare HTTP ${cfCode}${cfErr}`);
+              ? `rechazó la conexión (${dl.__rejected})`
+              : describeHttpFailure(dl && dl.downloadFirstHttpCode, dl && dl.downloadLastError);
+            const cfMsg = (cf && cf.__rejected)
+              ? `rechazó la conexión (${cf.__rejected})`
+              : describeHttpFailure(cf && cf.downloadFirstHttpCode, cf && cf.downloadLastError);
+            const endpoint = probe.url ? '' : ` · ningún endpoint de bajada respondió 200 (probados: ${probe.tried.length})`;
+            throw new Error(
+              `Bajada falló — ${serverName}: ${srvMsg}${endpoint}; Cloudflare: ${cfMsg}. ` +
+              'Probá otro servidor de la lista.');
           }
         }
 
         // ---------- Fase 4: Upload multi-stream (nativo) ----------
-        // Subida contra el upload.php del servidor (POST chunked continuo).
+        // Subida contra el upload.php del servidor. El plugin mide por REQUEST
+        // COMPLETO (bytes del cuerpo / tiempo hasta la respuesta) y sólo cuenta
+        // las que el servidor confirmó con 2xx: por eso ya no aparecen los
+        // ~7000 Mbps que salían de contar bytes que nunca transitaron.
         onProgress({ phase: 'upload', progress: 0, mbps: 0, elapsedMs: 0 });
         const ul = await NetworkTools.uploadTest({
           url: SRV_UP,
@@ -440,24 +473,35 @@
         ulBytes = ul && ul.uploadBytes != null ? ul.uploadBytes : 0;
         ulElapsedMs = ul && ul.uploadElapsedMs != null ? ul.uploadElapsedMs : 0;
 
-        // Si el servidor no aceptó nada, caer a Cloudflare (etiquetado).
+        // Si el servidor no aceptó nada — o sólo devolvió muestras imposibles,
+        // que el plugin ya descartó y reporta como 0 + uploadImplausible —
+        // caer a Cloudflare (etiquetado).
         if (!ulBytes || !uploadMbps) {
           measuredVia = 'cloudflare-fallback';
           const cf = await NetworkTools.uploadTest({
             url: CF_UP,
-            parallelStreams: 4,
+            parallelStreams: CF_STREAMS,
             minMs: 15000,
             maxMs: 22000,
-          });
+          }).catch((e) => ({ __rejected: (e && e.message) ? e.message : String(e) }));
           uploadMbps = cf && cf.uploadMbps != null ? cf.uploadMbps : 0;
           ulBytes = cf && cf.uploadBytes != null ? cf.uploadBytes : 0;
           ulElapsedMs = cf && cf.uploadElapsedMs != null ? cf.uploadElapsedMs : 0;
           // Ni el servidor ni Cloudflare aceptaron nada: error con motivo real.
           if (!ulBytes || !uploadMbps) {
             const srvMsg = (ul && ul.__rejected)
-              ? `servidor rechazó (${ul.__rejected})`
-              : 'servidor aceptó 0 bytes';
-            throw new Error(`Subida falló: ${srvMsg}; Cloudflare también devolvió 0.`);
+              ? `rechazó la conexión (${ul.__rejected})`
+              : (ul && ul.uploadImplausible)
+                ? 'devolvió mediciones imposibles (cortó la subida sin recibirla)'
+                : (ul && ul.uploadDiscardedImplausible)
+                  ? `${ul.uploadDiscardedImplausible} muestras descartadas por imposibles`
+                  : describeHttpFailure(ul && ul.uploadFirstHttpCode, ul && ul.uploadLastError);
+            const cfMsg = (cf && cf.__rejected)
+              ? `rechazó la conexión (${cf.__rejected})`
+              : describeHttpFailure(cf && cf.uploadFirstHttpCode, cf && cf.uploadLastError);
+            throw new Error(
+              `Subida falló — ${serverName}: ${srvMsg}; Cloudflare: ${cfMsg}. ` +
+              'Probá otro servidor de la lista.');
           }
         }
       } finally {
@@ -480,9 +524,72 @@
         uploadBytes: ulBytes,
         downloadElapsedMs: dlElapsedMs,
         uploadElapsedMs: ulElapsedMs,
+        downloadEndpoint,   // diagnóstico: URL de bajada realmente usada
       };
     }
   };
+
+  // --------------------------------------------------------------------------
+  // Endpoints de bajada de un servidor Ookla
+  // --------------------------------------------------------------------------
+  // Conviven dos generaciones de servidor y no todos sirven ambas rutas:
+  //   - OoklaServer moderno: /download?nocache=X&size=N (devuelve N bytes)
+  //   - clásico (PHP):       /random{N}x{N}.jpg generado al vuelo
+  // Además, varios responden 307 hacia el otro esquema (http↔https), así que
+  // también probamos la variante opuesta del base. Cada candidato trae un
+  // `probe` liviano: se verifica con un GET chico cuál responde 200 antes de
+  // gastar los 15 s del test contra un endpoint que va a fallar.
+  function downloadCandidates(base) {
+    const rnd = () => Math.random().toString(36).slice(2);
+    const bases = [base];
+    if (/^https:/i.test(base)) bases.push(base.replace(/^https:/i, 'http:'));
+    else if (/^http:/i.test(base)) bases.push(base.replace(/^http:/i, 'https:'));
+    const out = [];
+    for (const b of bases) {
+      out.push({
+        probe: `${b}/download?nocache=${rnd()}&size=32768`,
+        test: `${b}/download?nocache=${rnd()}&size=25000000`,
+      });
+      out.push({
+        probe: `${b}/random350x350.jpg`,
+        test: `${b}/random4000x4000.jpg`,
+      });
+    }
+    return out;
+  }
+
+  // Devuelve { url, probe, tried } con el primer endpoint de bajada que
+  // responde 200 (el plugin nativo ya sigue redirecciones). url = null si
+  // ninguno respondió. Corta a los PROBE_BUDGET_MS para no comerse medio
+  // minuto en timeouts si el host directamente no está.
+  async function resolveDownloadEndpoint(NetworkTools, base) {
+    const PROBE_BUDGET_MS = 12000;
+    const deadline = Date.now() + PROBE_BUDGET_MS;
+    const tried = [];
+    for (const c of downloadCandidates(base)) {
+      if (Date.now() > deadline) break;
+      tried.push(c.probe);
+      try {
+        const r = await NetworkTools.httpPing({ url: c.probe, samples: 1 });
+        if (r && r.ok) return { url: c.test, probe: c.probe, tried };
+      } catch (_) { /* siguiente candidato */ }
+    }
+    return { url: null, probe: null, tried };
+  }
+
+  // Traduce el diagnóstico del plugin a algo accionable para el técnico.
+  function describeHttpFailure(code, lastError) {
+    const detail = lastError ? ` · ${lastError}` : '';
+    if (code == null || code === -1) {
+      return `sin respuesta${detail || ' (timeout o conexión rechazada)'}`;
+    }
+    if (code === 429) return `rate-limit (429) — esperá ~1 min y reintentá${detail}`;
+    if (code === 403) return `acceso denegado (403)${detail}`;
+    if (code === 404) return `endpoint inexistente (404)${detail}`;
+    if (code >= 300 && code < 400) return `redirección ${code} sin destino válido${detail}`;
+    if (code >= 500) return `error del servidor (${code})${detail}`;
+    return `HTTP ${code}${detail}`;
+  }
 
   function haversineMeters(lat1, lon1, lat2, lon2) {
     const R = 6371000;
@@ -1798,7 +1905,7 @@
             <div class="speedtest-server-info">
               <strong>${safeText(s.label)}</strong>
               ${sub ? `<span class="speedtest-server-sub">${sub}</span>` : ''}
-              ${isRecommended ? '<span class="speedtest-server-badge">Recomendado · más cercano · mejor ping</span>' : ''}
+              ${isRecommended ? '<span class="speedtest-server-badge">Recomendado · mejor ping</span>' : ''}
             </div>
             <span class="speedtest-server-ping ${s.online ? '' : 'offline'}">${ping}</span>
           </div>`;
