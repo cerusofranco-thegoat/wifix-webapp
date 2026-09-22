@@ -66,6 +66,9 @@ const ctx = {
   clearTimeout,
   fetch: async () => { throw new Error('sin red en el smoke test'); },
   CSS: { escape: (s) => String(s) },
+  // Un contexto `vm` pelado no trae `URL` (el navegador y el WebView sí):
+  // api.js lo usa para validar el override de la URL del backend.
+  URL,
   navigator: { userAgent: 'node' },
   alert() {},
   btoa: (s) => Buffer.from(s, 'binary').toString('base64'),
@@ -482,6 +485,57 @@ check('el perfil trae correo y coordenada del domicilio',
   typeof profile.email === 'string' && isFinite(profile.latitude) && isFinite(profile.longitude));
 check('los campos simulados se marcan como tales',
   ctx.sourceBadge(profile, 'planName').includes('simulado') && ctx.sourceBadge(profile, 'fullName') === '');
+
+console.log('\n== URL del backend configurable ==');
+// Con PUBLIC_BACKEND_URL rellenada, la resolución automática en localhost/APK
+// apunta al backend público del VPS; el LAN queda solo como fallback si la
+// constante vuelve a vaciarse.
+const AUTO_URL = 'https://api-wifix.portaltulpa.com/herramientas/v1';
+const OVERRIDE_KEY = 'wifix.backend.url';
+ctx.localStorage.removeItem(OVERRIDE_KEY);
+check('sin override, en localhost/APK resuelve al backend público del VPS',
+  WifixAPI.getBaseUrl() === AUTO_URL, WifixAPI.getBaseUrl());
+check('el override válido gana sobre la resolución automática',
+  WifixAPI.setBaseUrl('https://wifix.example.com/herramientas/v1') === 'https://wifix.example.com/herramientas/v1' &&
+  WifixAPI.getBaseUrl() === 'https://wifix.example.com/herramientas/v1');
+check('baseUrl no es decorativo: el getter refleja el override',
+  WifixAPI.baseUrl === 'https://wifix.example.com/herramientas/v1');
+check('la barra final del override se normaliza',
+  WifixAPI.setBaseUrl('https://wifix.example.com/api/') === 'https://wifix.example.com/api');
+check('un override sin esquema http/https se rechaza sin pisar el anterior',
+  WifixAPI.setBaseUrl('192.168.1.5:8080') === null &&
+  WifixAPI.getBaseUrlOverride() === 'https://wifix.example.com/api');
+check('un override con esquema peligroso se rechaza',
+  WifixAPI.setBaseUrl('javascript:alert(1)') === null &&
+  WifixAPI.getBaseUrlOverride() === 'https://wifix.example.com/api');
+check('override vacío borra el override y vuelve al automático',
+  WifixAPI.setBaseUrl('') === null && WifixAPI.getBaseUrl() === AUTO_URL);
+
+console.log('\n== Errores de red en español ==');
+WifixAPI.useRealApi = true;
+let netErr = null;
+try {
+  await WifixAPI.login('tec@tulpasolutions.com', 'x');
+} catch (e) {
+  netErr = e;
+}
+WifixAPI.useRealApi = false;
+check('un fallo de fetch se traduce a NETWORK_ERROR',
+  netErr && netErr.code === 'NETWORK_ERROR', netErr && netErr.code);
+check('el mensaje de red está en español, no "Failed to fetch"',
+  netErr && /No se pudo conectar con el servidor/.test(netErr.message), netErr && netErr.message);
+
+console.log('\n== Confirmar cuenta: modo limitado ==');
+check('503 de la operadora habilita el modo limitado',
+  ctx.isUpstreamOrNetworkFailure({ code: 'UPSTREAM_AUTH_ERROR' }) === true);
+check('HTTP 503/502/504 habilitan el modo limitado',
+  ['HTTP_503', 'HTTP_502', 'HTTP_504'].every((c) => ctx.isUpstreamOrNetworkFailure({ code: c }) === true));
+check('un fallo de red habilita el modo limitado',
+  ctx.isUpstreamOrNetworkFailure({ code: 'NETWORK_ERROR' }) === true);
+check('404 (cuenta inexistente) NO habilita el modo limitado',
+  ctx.isUpstreamOrNetworkFailure({ code: 'HTTP_404', message: 'La cuenta no existe.' }) === false);
+check('un error de validación NO habilita el modo limitado',
+  ctx.isUpstreamOrNetworkFailure({ code: 'VALIDATION_ERROR' }) === false);
 
 console.log('\n== Prohibiciones del contrato ==');
 const fuentes = ['api.js', 'app.js'].map((f) => readFileSync(new URL('../' + f, import.meta.url), 'utf8'));

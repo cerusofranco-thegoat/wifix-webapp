@@ -1,8 +1,9 @@
 /* ===========================================================================
  * api.js — Capa de consumo de la API del backend de la app Wifix (Fase 2).
  * Es el ÚNICO punto que sabe si los datos son mock o vienen del servidor real.
- * Para usar el backend real: WifixAPI.useRealApi = true y configurar
- * API_BASE_URL.
+ * Para usar el backend real: WifixAPI.useRealApi = true. La URL se resuelve en
+ * cada request con resolveBackendUrl() (override en localStorage >
+ * PUBLIC_BACKEND_URL > LAN/origen); ver WifixAPI.getBaseUrl/setBaseUrl.
  *
  * Maneja también el token: tras `login()` se guarda en localStorage y se
  * envía como `Authorization: Bearer` en cada llamada protegida. Si el backend
@@ -12,25 +13,80 @@
 (function (global) {
   'use strict';
 
-  // Backend URL: por default deriva del host actual usando puerto 8080.
-  // Excepción: si la app está cargada desde localhost (APK Capacitor) o desde
-  // un archivo (file://), no hay backend ahí — apuntamos al LAN_BACKEND_URL.
-  // Cualquier consumidor puede sobrescribir con `WifixAPI.baseUrl = '...'`.
-  const LAN_BACKEND_URL = 'http://192.168.1.172:8080/herramientas/v1';
+  // ---------------------------------------------------------------------------
+  // Resolución de la URL del backend. Orden de prioridad:
+  //   1. Override manual en localStorage['wifix.backend.url'] (puerta de
+  //      servicio del login: 7 taps sobre el logo).
+  //   2. PUBLIC_BACKEND_URL — el backend HTTPS de producción. Se aplica cuando
+  //      la app corre dentro del APK / localhost / file://, donde no hay un
+  //      origen del que derivar nada.
+  //   3. Fallback LAN: dentro del APK apunta a LAN_BACKEND_URL; servida desde
+  //      un host real, deriva del origen actual con el puerto 8080.
+  // ---------------------------------------------------------------------------
 
-  function defaultBaseUrl() {
+  // Backend de demo en el VPS Quasar (DokPloy + Traefik, TLS de Let's Encrypt).
+  // Vacío = sin backend público, se usa la lógica LAN.
+  const PUBLIC_BACKEND_URL = 'https://api-wifix.portaltulpa.com/herramientas/v1';
+  const LAN_BACKEND_URL = 'http://192.168.1.172:8080/herramientas/v1';
+  const BACKEND_URL_OVERRIDE_KEY = 'wifix.backend.url';
+
+  // Sólo http/https y con host: evita que un override tipeado a mano
+  // ('192.168.1.5:8080', 'javascript:...') rompa todas las llamadas.
+  function normalizeBackendUrl(raw) {
+    if (!raw || typeof raw !== 'string') return null;
+    const value = raw.trim();
+    if (!value) return null;
     try {
-      const host = (window.location.hostname || '').toLowerCase();
-      const proto = window.location.protocol;
-      const inApk = proto === 'file:' || host === 'localhost' || host === '127.0.0.1' || host === '';
-      if (inApk) return LAN_BACKEND_URL;
-      const httpProto = proto === 'https:' ? 'https:' : 'http:';
-      return `${httpProto}//${host}:8080/herramientas/v1`;
+      const parsed = new URL(value);
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+      if (!parsed.hostname) return null;
+      return value.replace(/\/+$/, '');
     } catch (_) {
-      return LAN_BACKEND_URL;
+      return null;
     }
   }
-  const API_BASE_URL = defaultBaseUrl();
+
+  function getBackendUrlOverride() {
+    try { return normalizeBackendUrl(localStorage.getItem(BACKEND_URL_OVERRIDE_KEY)); } catch (_) { return null; }
+  }
+
+  // Devuelve la URL guardada, o null. Sólo un valor vacío borra el override:
+  // una URL inválida se rechaza SIN pisar el override que ya funcionaba (si no,
+  // un typo en el prompt dejaba la app apuntando a otro backend).
+  function setBackendUrlOverride(url) {
+    const raw = (url === null || url === undefined) ? '' : String(url).trim();
+    if (!raw) {
+      try { localStorage.removeItem(BACKEND_URL_OVERRIDE_KEY); } catch (_) { /* no disponible */ }
+      return null;
+    }
+    const normalized = normalizeBackendUrl(raw);
+    if (!normalized) return null;
+    try { localStorage.setItem(BACKEND_URL_OVERRIDE_KEY, normalized); } catch (_) { /* no disponible */ }
+    return normalized;
+  }
+
+  // Se llama en CADA request: así un cambio del override surte efecto sin
+  // recargar la app y no queda ninguna URL cacheada en una constante.
+  function resolveBackendUrl() {
+    const override = getBackendUrlOverride();
+    if (override) return override;
+    let inApk = true;
+    let host = '';
+    let proto = 'file:';
+    try {
+      host = (window.location.hostname || '').toLowerCase();
+      proto = window.location.protocol;
+      inApk = proto === 'file:' || host === 'localhost' || host === '127.0.0.1' || host === '';
+    } catch (_) {
+      inApk = true;
+    }
+    const publicUrl = normalizeBackendUrl(PUBLIC_BACKEND_URL);
+    if (inApk) return publicUrl || LAN_BACKEND_URL;
+    // Servida desde un host real: el backend vive en el mismo host, puerto 8080.
+    const httpProto = proto === 'https:' ? 'https:' : 'http:';
+    return `${httpProto}//${host}:8080/herramientas/v1`;
+  }
+
   const TOKEN_STORAGE_KEY = 'wifix_token';
   const USER_STORAGE_KEY = 'wifix_user';
   // Marca (realm) de la operadora. null = usar el default del backend.
@@ -183,6 +239,16 @@
     } catch (_) { return null; }
   }
 
+  // Error de red (backend caído, sin WiFi/datos, DNS, CORS). Se normaliza a un
+  // Error con `code = 'NETWORK_ERROR'` y mensaje en español; `cause` conserva el
+  // TypeError original para la consola.
+  function networkError(cause) {
+    const err = new Error('No se pudo conectar con el servidor. Revisa tu conexión.');
+    err.code = 'NETWORK_ERROR';
+    err.cause = cause || null;
+    return err;
+  }
+
   // opts.withMeta === true -> devuelve { data, degraded } en vez de data.
   async function fetchJson(method, path, body, opts) {
     const init = { method, headers: { 'Content-Type': 'application/json' } };
@@ -191,7 +257,15 @@
     const brand = getBrand();
     if (brand) init.headers['X-Wifix-Brand'] = brand;
     if (body !== undefined) init.body = JSON.stringify(body);
-    const res = await fetch(API_BASE_URL + path, init);
+    let res;
+    try {
+      res = await fetch(resolveBackendUrl() + path, init);
+    } catch (netErr) {
+      // `fetch` sólo rechaza por fallo de red/CORS/DNS (TypeError). El mensaje
+      // nativo es en inglés ("Failed to fetch"): se traduce acá para que la UI
+      // nunca muestre texto crudo del navegador.
+      throw networkError(netErr);
+    }
     const data = await res.json().catch(function () { return null; });
     if (!res.ok) {
       const code = data && data.code ? data.code : 'HTTP_' + res.status;
@@ -645,7 +719,16 @@
     // true = habla con el backend real (default). Poner false para usar
     // los mocks locales sin backend (útil para demos sin servidor).
     useRealApi: true,
-    baseUrl: API_BASE_URL,
+
+    // URL efectiva del backend. Es un getter: se recalcula en cada lectura, así
+    // que refleja el override de localStorage sin recargar la app. Asignar
+    // `WifixAPI.baseUrl = '...'` guarda el override (equivale a setBaseUrl);
+    // asignar '' o null lo borra y vuelve a la resolución automática.
+    get baseUrl() { return resolveBackendUrl(); },
+    set baseUrl(url) { setBackendUrlOverride(url); },
+    getBaseUrl: resolveBackendUrl,
+    setBaseUrl: setBackendUrlOverride,
+    getBaseUrlOverride: getBackendUrlOverride,
 
     // ---- Sesión ------------------------------------------------------------
     isAuthenticated() {
@@ -790,7 +873,12 @@
         const token = getToken();
         const headers = {};
         if (token) headers['Authorization'] = 'Bearer ' + token;
-        const res = await fetch(API_BASE_URL + '/media', { method: 'POST', body: form, headers: headers });
+        let res;
+        try {
+          res = await fetch(resolveBackendUrl() + '/media', { method: 'POST', body: form, headers: headers });
+        } catch (netErr) {
+          throw networkError(netErr);
+        }
         const data = await res.json().catch(function () { return null; });
         if (!res.ok) {
           if (res.status === 401) { setToken(null); setUser(null); emitUnauthorized(); }

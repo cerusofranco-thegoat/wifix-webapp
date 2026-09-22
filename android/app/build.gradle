@@ -1,5 +1,16 @@
 apply plugin: 'com.android.application'
 
+// --- Firma de release -------------------------------------------------------
+// Las credenciales viven en android/key.properties (gitignored). Si el archivo
+// no existe, `signingConfigs.release` no se define y cualquier tarea de release
+// falla con un mensaje claro en vez de firmar con la clave de debug.
+def keystorePropertiesFile = rootProject.file('key.properties')
+def keystoreProperties = new Properties()
+def hasReleaseKeystore = keystorePropertiesFile.exists()
+if (hasReleaseKeystore) {
+    keystorePropertiesFile.withInputStream { keystoreProperties.load(it) }
+}
+
 android {
     namespace "com.tulpa.wifix"
     compileSdk rootProject.ext.compileSdkVersion
@@ -16,10 +27,26 @@ android {
             ignoreAssetsPattern '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
+    signingConfigs {
+        if (hasReleaseKeystore) {
+            release {
+                storeFile file(keystoreProperties['storeFile'])
+                storePassword keystoreProperties['storePassword']
+                keyAlias keystoreProperties['keyAlias']
+                keyPassword keystoreProperties['keyPassword']
+            }
+        }
+    }
     buildTypes {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            if (hasReleaseKeystore) {
+                signingConfig signingConfigs.release
+            } else {
+                // Sin signingConfig: el build de release aborta antes de empaquetar.
+                signingConfig null
+            }
         }
     }
     buildFeatures {
@@ -46,6 +73,21 @@ dependencies {
     androidTestImplementation "androidx.test.ext:junit:$androidxJunitVersion"
     androidTestImplementation "androidx.test.espresso:espresso-core:$androidxEspressoCoreVersion"
     implementation project(':capacitor-cordova-android-plugins')
+}
+
+// Sin key.properties no hay firma posible: se aborta el build de release con un
+// mensaje explícito, en lugar de generar un artefacto sin firmar (o firmado con
+// la clave de debug) que Play Console rechazaría.
+if (!hasReleaseKeystore) {
+    gradle.taskGraph.whenReady { graph ->
+        def releaseTask = graph.allTasks.find { it.name ==~ /(?i)(assemble|bundle).*Release.*/ }
+        if (releaseTask != null) {
+            throw new GradleException(
+                "No se puede compilar un release firmado: falta android/key.properties.\n" +
+                "Creá el archivo con storeFile/storePassword/keyAlias/keyPassword apuntando\n" +
+                "al keystore de release (respaldado fuera del repo) y volvé a correr la tarea.")
+        }
+    }
 }
 
 apply from: 'capacitor.build.gradle'

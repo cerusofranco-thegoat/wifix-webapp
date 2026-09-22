@@ -84,6 +84,44 @@ loginForm.addEventListener('submit', async (ev) => {
   }
 });
 
+// --- Puerta de servicio: URL del backend ------------------------------------
+// 7 taps seguidos sobre el logo del login abren un prompt con la URL efectiva y
+// permiten reemplazarla (se guarda en localStorage['wifix.backend.url']).
+// Dejar el campo vacío borra el override y vuelve a la resolución automática.
+// Sin UI propia a propósito: es para soporte/demo, no para el técnico.
+const loginLogo = loginScreen.querySelector('.logo');
+if (loginLogo) {
+  const TAPS_REQUERIDOS = 7;
+  const PAUSA_MAX_MS = 1200; // pausa máxima entre taps antes de reiniciar la cuenta
+  let taps = 0;
+  let ultimoTap = 0;
+  loginLogo.addEventListener('click', () => {
+    const ahora = Date.now();
+    if (ahora - ultimoTap > PAUSA_MAX_MS) taps = 0;
+    ultimoTap = ahora;
+    taps += 1;
+    if (taps < TAPS_REQUERIDOS) return;
+    taps = 0;
+    const actual = WifixAPI.getBaseUrl();
+    const override = WifixAPI.getBaseUrlOverride();
+    const entrada = window.prompt(
+      `Backend actual:\n${actual}\n${override ? '(override manual)' : '(automático)'}\n\n` +
+      'Escribí otra URL (http/https) o dejá vacío para usar la automática.',
+      override || actual,
+    );
+    if (entrada === null) return; // Cancelar: no toca nada.
+    const guardada = WifixAPI.setBaseUrl(entrada);
+    if (entrada.trim() && !guardada) {
+      // URL inválida: el override anterior sigue vigente a propósito.
+      loginError.textContent = 'URL inválida: tiene que empezar con http:// o https://';
+      window.alert('URL inválida. Se mantiene el backend anterior:\n' + WifixAPI.getBaseUrl());
+      return;
+    }
+    loginError.textContent = '';
+    window.alert('Backend en uso:\n' + WifixAPI.getBaseUrl());
+  });
+}
+
 logoutBtn.addEventListener('click', () => {
   WifixAPI.logout();
   _fsmHealth = null;
@@ -327,6 +365,7 @@ function invalidateAccountCache() {
   const subGrid = subscreen.querySelector('.sub-grid');
   if (subGrid) {
     subGrid.classList.remove('account-confirmed');
+    subGrid.classList.remove('account-limited');
     subGrid.querySelectorAll('.sub-card').forEach((c) => {
       c.setAttribute('aria-disabled', 'true');
       c.setAttribute('tabindex', '-1');
@@ -407,14 +446,61 @@ confirmAccountBtn.addEventListener('click', async () => {
     }
   } catch (err) {
     console.error('[Wifix] confirm-account:', err);
-    invalidateAccountCache();
-    confirmAccountFeedback.textContent = err.message || 'No se pudo validar la cuenta.';
-    confirmAccountFeedback.className = 'confirm-account-feedback error';
+    if (isUpstreamOrNetworkFailure(err)) {
+      // La operadora (o la red) no responde, pero eso NO es culpa de la cuenta:
+      // Herramientas y Equipos Retirados no dependen de la operadora y tienen
+      // que funcionar igual. Se confirma en modo limitado y se avisa en amarillo.
+      confirmAccountInLimitedMode(cuenta, err);
+    } else {
+      // 404 / cuenta inexistente / credenciales: sí es un error real, no se
+      // habilita nada.
+      invalidateAccountCache();
+      confirmAccountFeedback.textContent = err.message || 'No se pudo validar la cuenta.';
+      confirmAccountFeedback.className = 'confirm-account-feedback error';
+    }
   } finally {
     confirmAccountBtn.disabled = false;
     confirmAccountBtn.textContent = 'Confirmar cuenta';
   }
 });
+
+// ¿El fallo es de la integración/infra (operadora caída, backend caído, sin red)
+// y no de la cuenta? En ese caso la app sigue usable en modo limitado.
+function isUpstreamOrNetworkFailure(err) {
+  if (!err) return false;
+  const code = err.code || '';
+  if (code === 'UPSTREAM_AUTH_ERROR' || code === 'NETWORK_ERROR') return true;
+  if (code === 'HTTP_503' || code === 'HTTP_502' || code === 'HTTP_504') return true;
+  if (err.status === 503 || err.status === 502 || err.status === 504) return true;
+  // Red cruda por si algún fetch fuera de fetchJson no pasó por networkError().
+  if (err instanceof TypeError) return true;
+  return false;
+}
+
+// Confirma la cuenta sin perfil de la operadora: habilita las tarjetas y deja
+// el aviso de degradación. validatedProfile queda null a propósito — los
+// paneles que dependen del perfil ya tienen su propio estado degradado.
+function confirmAccountInLimitedMode(cuenta, err) {
+  validatedProfile = null;
+  validatedAccount = cuenta;
+
+  const subGrid = subscreen.querySelector('.sub-grid');
+  if (subGrid) {
+    subGrid.classList.add('account-confirmed');
+    subGrid.classList.add('account-limited');
+  }
+  enableSubCards();
+
+  confirmAccountFeedback.textContent =
+    `Cuenta ${cuenta} — modo limitado: los datos de la operadora no están disponibles.`;
+  confirmAccountFeedback.className = 'confirm-account-feedback warning';
+
+  const detalle = (err && err.message) ? ` (${err.message})` : '';
+  renderIntegrationWarning(
+    'Los datos de la operadora no están disponibles en este momento' + detalle +
+    '. Herramientas y Equipos Retirados funcionan con normalidad.',
+  );
+}
 
 // === Sub categorías =========================================================
 subCards.forEach(card => {

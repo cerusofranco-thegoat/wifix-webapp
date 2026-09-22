@@ -1164,6 +1164,22 @@ body {
   letter-spacing: 0.2px;
 }
 
+/* Cuenta confirmada en modo limitado: la operadora no respondió, pero las
+   tarjetas quedan habilitadas. Mismo tratamiento amarillo que .detail-warning. */
+.confirm-account-feedback.warning {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border-radius: var(--radius-btn);
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-border);
+  color: var(--warn-text);
+  font-weight: 500;
+  font-size: 12.5px;
+  letter-spacing: 0.2px;
+}
+
 /* Estado visual: cuenta confirmada — las tarjetas pasan de atenuadas a activas */
 .sub-grid:not(.account-confirmed) .sub-card {
   opacity: 0.55;
@@ -1173,6 +1189,10 @@ body {
   opacity: 1;
   pointer-events: auto;
   border-color: var(--success-border);
+}
+/* Modo limitado: habilitadas igual, pero el borde avisa que falta la operadora. */
+.sub-grid.account-confirmed.account-limited .sub-card {
+  border-color: var(--warn-border);
 }
 .sub-grid.account-confirmed .sub-card:hover,
 .sub-grid.account-confirmed .sub-card:focus-visible {

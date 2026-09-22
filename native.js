@@ -3,7 +3,8 @@
  * (NetworkToolsPlugin.java). Sólo activo cuando la app corre dentro del APK.
  *
  * Cuando se detecta Capacitor:
- *  - Apunta WifixAPI.baseUrl al backend LAN configurado en NATIVE_BACKEND.
+ *  - Reporta la URL del backend que resolvió api.js (native.js ya NO la
+ *    sobrescribe: la única fuente es resolveBackendUrl() de api.js).
  *  - Inyecta un botón "Ejecutar prueba automática" en los formularios de
  *    Ping, Traceroute y Mapa de Calor, que llena los campos con datos
  *    reales medidos por el plugin nativo.
@@ -16,14 +17,11 @@
   'use strict';
 
   // --------------------------------------------------------------------------
-  // Configuración del backend en LAN — AJUSTAR a la IP del PC del técnico.
-  // (Sólo se aplica si se está corriendo dentro del APK.)
+  // La URL del backend se resuelve ÚNICAMENTE en api.js (resolveBackendUrl):
+  // override en localStorage['wifix.backend.url'] > PUBLIC_BACKEND_URL > LAN.
+  // Este archivo ya no tiene copia hardcodeada; para cambiar el backend en el
+  // APK se usa la puerta de servicio del login (7 taps sobre el logo).
   // --------------------------------------------------------------------------
-  const NATIVE_BACKEND = {
-    host: '192.168.1.172',
-    port: 8080,
-    basePath: '/herramientas/v1'
-  };
 
   // --------------------------------------------------------------------------
   // Detección de runtime nativo
@@ -738,19 +736,24 @@
   console.info('[WifixNative] Capacitor detectado, activando puente nativo.');
 
   // --------------------------------------------------------------------------
-  // Apuntar el backend a la IP LAN configurada.
+  // Log de diagnóstico: qué backend quedó efectivo. No lo sobrescribe — api.js
+  // es el único dueño de la resolución (índice de tareas: URL configurable).
   // --------------------------------------------------------------------------
-  function applyNativeBackend() {
+  function reportBackend() {
     if (!global.WifixAPI) {
       // api.js aún no se cargó — reintentar en el próximo tick.
-      setTimeout(applyNativeBackend, 50);
+      setTimeout(reportBackend, 50);
       return;
     }
-    const url = `http://${NATIVE_BACKEND.host}:${NATIVE_BACKEND.port}${NATIVE_BACKEND.basePath}`;
-    global.WifixAPI.baseUrl = url;
-    console.info('[WifixNative] WifixAPI.baseUrl =', url);
+    const url = typeof global.WifixAPI.getBaseUrl === 'function'
+      ? global.WifixAPI.getBaseUrl()
+      : global.WifixAPI.baseUrl;
+    const override = typeof global.WifixAPI.getBaseUrlOverride === 'function'
+      ? global.WifixAPI.getBaseUrlOverride()
+      : null;
+    console.info('[WifixNative] backend efectivo =', url, override ? '(override manual)' : '(automático)');
   }
-  applyNativeBackend();
+  reportBackend();
 
   // --------------------------------------------------------------------------
   // Inyección automática de botones "Ejecutar prueba" en los formularios.

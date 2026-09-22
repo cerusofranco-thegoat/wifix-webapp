@@ -17,3 +17,11 @@ android/local.properties
 android/app/build/
 android/build/
 android/captures/
+
+# Firma de release — SECRETOS. Nunca se commitean.
+# Si se pierde wifix-release.keystore, la app en Play Console NO se puede
+# volver a actualizar jamás: hay que respaldarlo fuera del repo.
+android/key.properties
+android/wifix-release.keystore
+*.keystore
+*.jks
