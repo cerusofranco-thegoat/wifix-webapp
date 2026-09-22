@@ -2,6 +2,6 @@
 <resources>
     <string name="app_name">Wifix Certificate</string>
     <string name="title_activity_main">Wifix Certificate</string>
-    <string name="package_name">com.tulpa.wifix</string>
-    <string name="custom_url_scheme">com.tulpa.wifix</string>
+    <string name="package_name">com.tulpa.wifixcertificate</string>
+    <string name="custom_url_scheme">com.tulpa.wifixcertificate</string>
 </resources>

@@ -1,4 +1,4 @@
-package com.tulpa.wifix.plugins;
+package com.tulpa.wifixcertificate.plugins;
 
 import android.Manifest;
 import android.content.BroadcastReceiver;

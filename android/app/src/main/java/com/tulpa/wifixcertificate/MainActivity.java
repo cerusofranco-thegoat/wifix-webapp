@@ -1,9 +1,9 @@
-package com.tulpa.wifix;
+package com.tulpa.wifixcertificate;
 
 import android.os.Bundle;
 
 import com.getcapacitor.BridgeActivity;
-import com.tulpa.wifix.plugins.NetworkToolsPlugin;
+import com.tulpa.wifixcertificate.plugins.NetworkToolsPlugin;
 
 public class MainActivity extends BridgeActivity {
     @Override

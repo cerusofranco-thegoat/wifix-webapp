@@ -12,10 +12,10 @@ if (hasReleaseKeystore) {
 }
 
 android {
-    namespace "com.tulpa.wifix"
+    namespace "com.tulpa.wifixcertificate"
     compileSdk rootProject.ext.compileSdkVersion
     defaultConfig {
-        applicationId "com.tulpa.wifix"
+        applicationId "com.tulpa.wifixcertificate"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode 1
