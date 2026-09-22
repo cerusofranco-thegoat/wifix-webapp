@@ -545,23 +545,31 @@ body {
 }
 .speedtest-server-info strong { color: var(--text-primary); font-size: 12px; }
 .speedtest-server-badge {
-  font-size: 9.5px;
-  letter-spacing: 0.5px;
+  font-size: 9px;
+  line-height: 1.35;
+  letter-spacing: 0.3px;
   text-transform: uppercase;
   color: var(--brand-primary);
   background: var(--surface-tint);
   border: 1px solid var(--border-lavender);
-  padding: 1px 6px;
+  padding: 1px 5px;
   border-radius: var(--radius-pill);
-  display: inline-block;
   margin-top: 2px;
-  width: max-content;
+  /* Antes width:max-content forzaba el ancho del texto y el badge se salía de
+     la fila en pantallas de 360px: ahora se limita al ancho disponible y
+     envuelve a una segunda línea si hace falta. */
+  display: inline-block;
+  align-self: flex-start;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 .speedtest-server-ping {
   font-family: monospace;
   color: var(--text-primary);
   font-weight: 700;
   font-size: 12px;
+  flex: 0 0 auto;
 }
 .speedtest-server-ping.offline {
   color: var(--error-text);
@@ -1338,7 +1346,10 @@ body {
   border-radius: var(--radius-card);
   display: flex;
   align-items: center;
-  gap: 10px;
+  /* En pantallas de 360-412px las pastillas (marca + estado) no caben en una
+     sola línea: se permite que bajen a una segunda fila en vez de desbordar. */
+  flex-wrap: wrap;
+  gap: 8px 10px;
   border: 1px solid var(--border-lavender);
   background: var(--surface-card);
 }
@@ -1347,6 +1358,7 @@ body {
   letter-spacing: 2px;
   text-transform: uppercase;
   color: var(--text-secondary);
+  flex: 0 0 auto;
 }
 .chip-value {
   font-family: var(--font-sans);
@@ -1354,21 +1366,27 @@ body {
   font-size: 14px;
   letter-spacing: 1.2px;
   color: var(--text-primary);
-  flex: 1;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 /* Pastilla de estado (Activo / En línea): verde claro legible. */
 .chip-status {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  font-size: 10px;
-  letter-spacing: 1.2px;
+  gap: 5px;
+  font-size: 9.5px;
+  letter-spacing: 1px;
   text-transform: uppercase;
+  white-space: nowrap;
   color: var(--success-text);
-  padding: 4px 10px;
+  padding: 3px 8px;
   border-radius: var(--radius-pill);
   background: var(--success-bg);
   border: 1px solid var(--success-border);
+  /* No encoger: si se comprime, el texto se sale de la pastilla y del card. */
+  flex: 0 0 auto;
+  max-width: 100%;
 }
 .chip-status .status-dot { width: 6px; height: 6px; }
 
@@ -3656,30 +3674,40 @@ body.console-fullscreen-open { overflow: hidden; }
 }
 
 /* ---- Chip de marca (realm) junto al chip de cuenta ---------------------*/
-.brand-chip-slot { position: relative; display: inline-flex; }
+/* No encoger dentro de .account-chip: si se comprime, el texto desborda el card. */
+.brand-chip-slot {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+  max-width: 100%;
+}
 .brand-chip {
   display: inline-flex;
   flex-direction: column;
   align-items: flex-start;
   gap: 1px;
-  padding: 5px 10px;
+  padding: 3px 8px;
   border-radius: var(--radius-pill);
   background: var(--surface-tint);
   border: 1px solid var(--border-lavender);
   color: var(--brand-primary);
+  max-width: 100%;
 }
 .brand-chip-label {
-  font-size: 8.5px;
-  letter-spacing: 1.2px;
+  font-size: 8px;
+  letter-spacing: 1px;
   text-transform: uppercase;
   opacity: 0.75;
 }
 .brand-chip-value {
   font-family: var(--font-sans);
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 700;
-  letter-spacing: 0.8px;
+  letter-spacing: 0.6px;
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
+/* Solo el chip interactivo conserva el área táctil de 44px (a11y). */
 .brand-chip.selectable {
   min-height: 44px;
   justify-content: center;
