@@ -768,7 +768,8 @@
     btn.type = 'button';
     btn.className = 'save-btn native-run-btn';
     btn.textContent = label;
-    btn.style.background = '#1f6feb';
+    btn.style.background = 'var(--brand-accent)';
+    btn.style.color = 'var(--brand-ink)';
     btn.style.marginBottom = '8px';
 
     const status = document.createElement('div');
@@ -793,11 +794,11 @@
       status.textContent = '';
       try {
         const msg = await onRun(formEl);
-        status.style.color = '#3fb950';
+        status.style.color = 'var(--success-text)';
         status.textContent = msg || 'OK';
       } catch (err) {
         console.error('[WifixNative] ejecución falló:', err);
-        status.style.color = '#f85149';
+        status.style.color = 'var(--error-text)';
         status.textContent = (err && err.message) ? err.message : String(err);
       } finally {
         btn.disabled = false;
@@ -872,7 +873,7 @@
     return `
       <svg viewBox="0 0 200 200" class="wifi-gauge-svg" aria-hidden="true">
         <circle cx="100" cy="100" r="${R}" fill="none"
-                stroke="rgba(255,255,255,0.10)" stroke-width="14"
+                stroke="#ECECED" stroke-width="14"
                 stroke-dasharray="${ARC.toFixed(2)} ${CIRC.toFixed(2)}"
                 transform="rotate(${ROT} 100 100)" />
         <circle cx="100" cy="100" r="${R}" fill="none"
@@ -881,8 +882,8 @@
                 transform="rotate(${ROT} 100 100)" />
         <defs>
           <linearGradient id="wifi-gauge-grad" x1="0" y1="0" x2="1" y2="1">
-            <stop offset="0%" stop-color="#ffb347"/>
-            <stop offset="100%" stop-color="#ff6a3d"/>
+            <stop offset="0%" stop-color="#783484"/>
+            <stop offset="100%" stop-color="#44224C"/>
           </linearGradient>
         </defs>
       </svg>`;
@@ -1090,7 +1091,7 @@
       const el = $(slot);
       if (!el) return;
       el.textContent = msg || '';
-      el.style.color = color || 'rgba(180,210,255,0.7)';
+      el.style.color = color || 'var(--text-secondary)';
     };
     const captureBtn = formEl.querySelector('[data-action="capture-room"]');
     const saveBtn = formEl.querySelector('[data-action="save-heatmap"]');
@@ -1261,8 +1262,8 @@
     captureBtn.addEventListener('click', () => {
       const roomName = formEl.querySelector('[data-field="roomName"]').value.trim();
       const floor = parseInt(formEl.querySelector('[data-field="roomFloor"]').value, 10) || 1;
-      if (!roomName) { setStatus('save-status', 'Ingresá el nombre de la habitación.', '#f85149'); return; }
-      if (!state.latestWifi) { setStatus('save-status', 'Sin lectura WiFi aún — esperá un par de segundos.', '#f85149'); return; }
+      if (!roomName) { setStatus('save-status', 'Ingresá el nombre de la habitación.', 'var(--error-text)'); return; }
+      if (!state.latestWifi) { setStatus('save-status', 'Sin lectura WiFi aún — esperá un par de segundos.', 'var(--error-text)'); return; }
       const w = state.latestWifi;
       const dist = estimateDistanceFromRssi(w.rssiDbm);
 
@@ -1313,7 +1314,7 @@
       persistDraft();
       setStatus('save-status',
         `Habitación "${roomName}" capturada (${w.rssiDbm} dBm${dist != null ? `, ~${dist.toFixed(1)} m est.` : ''}).`,
-        '#3fb950');
+        'var(--success-text)');
     });
 
     function renderRoomsList() {
@@ -1606,12 +1607,12 @@
           }),
         };
         await global.WifixAPI.createWifiHeatmap(state.account, payload);
-        setStatus('save-status', `✓ Medición guardada (${state.rooms.length} habitaciones).`, '#3fb950');
+        setStatus('save-status', `✓ Medición guardada (${state.rooms.length} habitaciones).`, 'var(--success-text)');
         state.rooms = [];
         renderRoomsList();
         clearDraft(state.account);
       } catch (err) {
-        setStatus('save-status', 'Error: ' + (err.message || err), '#f85149');
+        setStatus('save-status', 'Error: ' + (err.message || err), 'var(--error-text)');
       } finally {
         saveBtn.textContent = original;
         saveBtn.disabled = state.rooms.length === 0;
@@ -1645,7 +1646,7 @@
       const draft = loadDraft(state.account);
       if (draft) {
         restoreDraft(draft);
-        setStatus('save-status', 'Borrador restaurado.', '#ffcf80');
+        setStatus('save-status', 'Borrador restaurado.', 'var(--warn-text)');
       }
       if (state.account) {
         try {
@@ -1743,7 +1744,7 @@
 
     function setProgress(pct, hue) {
       $('bar').style.width = `${Math.max(0, Math.min(100, pct))}%`;
-      $('bar').style.background = hue || '#00e0ff';
+      $('bar').style.background = hue || 'var(--brand-primary)';
     }
     function fmtElapsed(ms) {
       const s = Math.floor(ms / 1000);
@@ -1883,7 +1884,7 @@
     runBtn.addEventListener('click', async () => {
       runBtn.disabled = true;
       runBtn.textContent = 'Midiendo…';
-      $('status').style.color = 'rgba(180,210,255,0.7)';
+      $('status').style.color = 'var(--text-secondary)';
       $('dl').textContent = '—';
       $('ul').textContent = '—';
       $('latency').textContent = 'Latencia —';
@@ -1902,22 +1903,22 @@
           onProgress: (p) => {
             if (p.phase === 'discover') {
               $('status').textContent = 'Descubriendo servidores cercanos…';
-              setProgress(4, '#6a5cff');
+              setProgress(4, 'var(--brand-dark)');
             } else if (p.phase === 'latency') {
               $('status').textContent = `Midiendo latencia (${Math.round((p.progress || 0) * 100)}%)…`;
-              setProgress(8 + (p.progress || 0) * 7, '#6a5cff');
+              setProgress(8 + (p.progress || 0) * 7, 'var(--brand-dark)');
             } else if (p.phase === 'download') {
               const mbps = p.mbps != null ? p.mbps.toFixed(1) : '—';
               $('dl').textContent = mbps;
               $('status').textContent = `Descargando · ${mbps} Mbps · ${fmtElapsed(p.elapsedMs || 0)}`;
-              setProgress(15 + (p.progress || 0) * 55, '#00e0ff');
+              setProgress(15 + (p.progress || 0) * 55, 'var(--brand-primary)');
             } else if (p.phase === 'upload') {
               $('status').textContent = `Subiendo · ${fmtElapsed(p.elapsedMs || 0)}`;
               if (p.mbps != null) $('ul').textContent = p.mbps.toFixed(1);
-              setProgress(70 + (p.progress || 0) * 28, '#00ff9d');
+              setProgress(70 + (p.progress || 0) * 28, 'var(--success-fill)');
             } else if (p.phase === 'done') {
               $('status').textContent = 'Listo.';
-              setProgress(100, '#00ff9d');
+              setProgress(100, 'var(--success-fill)');
             }
           },
         };
@@ -1945,10 +1946,10 @@
         const place = [r.city, r.country].filter(Boolean).join(', ');
         if (r.measuredVia === 'cloudflare-fallback') {
           // El servidor elegido no respondió: se cayó a Cloudflare. Avisar.
-          $('status').style.color = '#d29922';
+          $('status').style.color = 'var(--warn-text)';
           $('status').textContent = `⚠ medido vía Cloudflare ${r.colo || ''} — el servidor no respondió · ↓ ${r.downloadMbps} / ↑ ${r.uploadMbps} Mbps · ${latency}`.trim();
         } else {
-          $('status').style.color = '#3fb950';
+          $('status').style.color = 'var(--success-text)';
           const via = [safeText(r.serverName), safeText(place)].filter(Boolean).join(' · ');
           $('status').textContent = `↓ ${r.downloadMbps} / ↑ ${r.uploadMbps} Mbps · ${latency} · ${via}`.trim();
         }
@@ -1961,7 +1962,7 @@
         setField(formEl, 'serverName', r.serverName);
       } catch (err) {
         console.error('[Wifix] speedtest:', err);
-        $('status').style.color = '#f85149';
+        $('status').style.color = 'var(--error-text)';
         $('status').textContent = err.message || String(err);
         setProgress(0);
       } finally {

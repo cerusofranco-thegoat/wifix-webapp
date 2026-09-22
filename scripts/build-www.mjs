@@ -22,6 +22,8 @@ const ASSETS = [
 // Directorios completos que se copian recursivamente a www/
 const DIRS = [
   'icons',
+  // Tipografia Ubuntu auto-hospedada: sin esto el APK pierde la fuente.
+  'fonts',
 ];
 
 // Intenta limpiar www/ completo; si está bloqueado (ej. http-server en Windows),

@@ -624,6 +624,17 @@ function sourceBadge(profile, field) {
   return ' <span class="source-badge" title="Dato simulado: la operadora todavía no lo expone">simulado</span>';
 }
 
+// Mismo criterio que sourceBadge(), pero a nivel de pantalla o panel completo:
+// Red Interna (campos 19-21) y Daños en la red de acceso (campo 14) todavía se
+// alimentan de datos simulados porque la integración con la operadora no existe.
+// Aviso discreto (chip), nunca un banner que tape la pantalla.
+function mockNotice(extraClass = '') {
+  const cls = extraClass ? ` ${extraClass}` : '';
+  return `<span class="mock-notice${cls}" role="note"` +
+    ` title="Estos datos no vienen de la operadora todavía">` +
+    `Datos simulados — integración pendiente</span>`;
+}
+
 function renderClientProfile(profile, cuenta) {
   const phonesHtml = (profile.phones && profile.phones.length)
     ? profile.phones.map(escapeHtml).join('<br/>')
@@ -1653,8 +1664,13 @@ function _ispNetworkLabel(technology) {
   return 'Red de acceso';
 }
 
-/** Paleta por posición de serie, coherente con el resto de la app. */
-const _ISP_COLORS = ['#00e0ff', '#7aa2ff', '#ffb020', '#ff5c7a', '#37d67a'];
+/**
+ * Paleta por posición de serie (identidad Xtrim, tema claro).
+ * La serie principal es el morado de marca; el resto son colores con al menos
+ * 3:1 de contraste sobre la card blanca. El amarillo y el verde de marca NO se
+ * usan como serie: sobre fondo claro no se distinguen.
+ */
+const _ISP_COLORS = ['#783484', '#582C63', '#B45309', '#C81E26', '#364153'];
 
 // --- Gráficos SVG ----------------------------------------------------------
 
@@ -2434,9 +2450,13 @@ function _bootIspPanel(body, cuenta) {
 }
 
 function renderEventsList(events) {
-  if (!events || events.length === 0) return `<div class="detail-empty">Sin eventos registrados.</div>`;
+  // Campo 14: los eventos de la red de acceso siguen siendo simulados.
+  const aviso = mockNotice();
+  if (!events || events.length === 0) {
+    return `${aviso}<div class="detail-empty">Sin eventos registrados.</div>`;
+  }
   const badgeClass = s => s === 'RESUELTO' ? 'badge-resolved' : s === 'PENDIENTE' ? 'badge-pending' : 'badge-fail';
-  return events.map(e => `
+  return aviso + events.map(e => `
     <div class="event-item">
       <span class="event-date">${formatDatePill(e.occurredAt)}</span>
       <div class="event-body">
@@ -2789,7 +2809,9 @@ function openRedInterna() {
   }
   redChip.textContent = cuenta;
 
-  redList.innerHTML = RED_ITEMS.map(item => `
+  // Campos 19-21: equipos LAN, dispositivos WiFi y cambio de SSID todavía se
+  // sirven de datos simulados. Un solo aviso por pantalla, arriba de la lista.
+  redList.innerHTML = mockNotice() + RED_ITEMS.map(item => `
     <div class="servicio-item" data-id="${item.id}">
       <button class="servicio-head" type="button">
         <div class="servicio-icon">${item.icon}</div>

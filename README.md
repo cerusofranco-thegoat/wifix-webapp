@@ -24,5 +24,17 @@ Then open <http://localhost:5173>.
 ## Stack
 
 - Vanilla HTML / CSS / JS — no build step
-- Fonts: Orbitron + Inter
+- Fonts: **Ubuntu** (300/400/500/700) auto-hospedada en `fonts/` — sin Google Fonts,
+  la app se ve igual sin conexión
+- Identidad visual **Xtrim** (tema claro): tokens en el `:root` de `styles.css`
+  (morado `#783484`, CTA amarillo `#FFCF00` con texto `#44224C`, fondo `#F4F0FA`)
 - Phone-aspect frame for desktop preview, full-bleed on mobile
+
+## Iconos
+
+```bash
+node scripts/generate-icons.mjs
+```
+
+Regenera los iconos PWA (`icons/`), los launcher icons de Android
+(`android/.../mipmap-*`) y los splash (`android/.../drawable*`) con la paleta Xtrim.
