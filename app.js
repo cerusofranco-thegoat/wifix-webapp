@@ -310,11 +310,21 @@ window.addEventListener('wifix:integration-unavailable', (ev) => {
   renderIntegrationWarning(detail.message || 'La integración con la operadora no está disponible.');
 });
 
+// ¿Hay que avisar que la operadora no responde? `brands[].available` habla SOLO
+// del token del conector: en modo mock/fixture el backend devuelve
+// `requiresToken: false` y los datos fluyen igual, así que ahí NO se avisa.
+// Si el campo no viene (backend viejo) se mantiene el comportamiento anterior.
+function fsmHealthNeedsWarning(health) {
+  if (!health) return false;
+  if (health.requiresToken === false) return false;
+  const brands = Array.isArray(health.brands) ? health.brands : [];
+  return brands.filter(b => b && b.available === true).length === 0;
+}
+
 // Si al arrancar ninguna marca está disponible, se avisa una sola vez en el
 // panel (nunca un modal: el técnico tiene que poder seguir trabajando).
 function warnIfNoBrandAvailable() {
-  if (!_fsmHealth) return;
-  if (fsmAvailableBrands().length > 0) return;
+  if (!fsmHealthNeedsWarning(_fsmHealth)) return;
   const razones = (_fsmHealth.brands || []).map(b => b && b.reason).filter(Boolean);
   const detalle = razones.length ? ` (${razones.join(', ')})` : '';
   renderIntegrationWarning(

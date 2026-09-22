@@ -463,6 +463,20 @@ console.log('\n== Integración FSM ==');
 const health = await WifixAPI.getFsmHealth();
 check('health informa modo, marca por defecto y marcas',
   typeof health.mode === 'string' && typeof health.defaultBrand === 'string' && Array.isArray(health.brands));
+
+// `brands[].available` habla solo del token del conector: en modo fixture el
+// backend manda requiresToken:false y el banner amarillo NO debe salir.
+const sinMarcas = { brands: [{ brand: 'telenews', available: false, reason: 'token vencido' }] };
+check('sin token y sin marcas disponibles, se avisa (backend viejo sin requiresToken)',
+  ctx.fsmHealthNeedsWarning(sinMarcas) === true);
+check('modo fixture (requiresToken:false) NO pinta el banner de operadora caída',
+  ctx.fsmHealthNeedsWarning({ ...sinMarcas, requiresToken: false, fixtureAccount: '35070291' }) === false);
+check('requiresToken:true sigue avisando si no hay marcas',
+  ctx.fsmHealthNeedsWarning({ ...sinMarcas, requiresToken: true }) === true);
+check('con una marca disponible nunca se avisa',
+  ctx.fsmHealthNeedsWarning({ brands: [{ brand: 'telenews', available: true }] }) === false);
+check('sin health no se avisa nada',
+  ctx.fsmHealthNeedsWarning(null) === false);
 WifixAPI.setBrand('seteinfo');
 check('la marca se guarda y se lee', WifixAPI.getBrand() === 'seteinfo');
 WifixAPI.setBrand(null);
