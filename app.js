@@ -184,22 +184,17 @@ window.addEventListener('wifix:unauthorized', () => {
 });
 
 // === Integración con la operadora (FSM) =====================================
-// Marca activa (realm) y disponibilidad de la integración. `health` es local
-// del backend: NO consulta a la operadora, así que se pide una sola vez por
-// sesión y se cachea en memoria.
+// Disponibilidad de la integración. `health` es local del backend: NO consulta
+// a la operadora, así que se pide una sola vez por sesión y se cachea en
+// memoria. La marca (realm) no se muestra en la UI: api.js usa la que el
+// backend tenga por defecto.
 let _fsmHealth = null;
 let _fsmHealthLoading = null;
 
-function fsmAvailableBrands() {
-  if (!_fsmHealth || !Array.isArray(_fsmHealth.brands)) return [];
-  return _fsmHealth.brands.filter(b => b && b.available === true);
-}
-
-function fsmActiveBrand() {
-  const elegida = WifixAPI.getBrand();
-  if (elegida) return elegida;
-  return (_fsmHealth && _fsmHealth.defaultBrand) || null;
-}
+// Sin selector de marca en la UI, una marca elegida en una versión anterior
+// quedaría fija en localStorage sin que el técnico pueda verla ni cambiarla.
+// Se limpia al arrancar para que siempre aplique la default del backend.
+if (WifixAPI.getBrand()) WifixAPI.setBrand(null);
 
 async function loadFsmHealth() {
   if (_fsmHealth) return _fsmHealth;
@@ -208,122 +203,16 @@ async function loadFsmHealth() {
     try {
       _fsmHealth = await WifixAPI.getFsmHealth();
     } catch (err) {
-      // No bloquea nada: sin health, el chip no se muestra y el resto de la
-      // app (Herramientas, Equipos Retirados) sigue igual.
+      // No bloquea nada: sin health no se avisa y el resto de la app
+      // (Herramientas, Equipos Retirados) sigue igual.
       console.warn('[Wifix] fsm health:', err);
       _fsmHealth = null;
     } finally {
       _fsmHealthLoading = null;
     }
-    renderBrandChips();
     return _fsmHealth;
   })();
   return _fsmHealthLoading;
-}
-
-function renderBrandChips() {
-  const slots = document.querySelectorAll('[data-slot="brand-chip"]');
-  const disponibles = fsmAvailableBrands();
-  const activa = fsmActiveBrand();
-  slots.forEach((slot) => {
-    if (!_fsmHealth || !activa) {
-      slot.innerHTML = '';
-      slot.hidden = true;
-      return;
-    }
-    slot.hidden = false;
-    const seleccionable = disponibles.length > 1;
-    const etiqueta = escapeHtml(activa);
-    if (seleccionable) {
-      slot.innerHTML = `
-        <button type="button" class="brand-chip selectable" data-action="brand-menu"
-          aria-haspopup="true" aria-expanded="false"
-          aria-label="Marca de la operadora: ${etiqueta}. Tocar para cambiar.">
-          <span class="brand-chip-label">Marca</span>
-          <span class="brand-chip-value">${etiqueta}</span>
-        </button>`;
-      const btn = slot.querySelector('[data-action="brand-menu"]');
-      btn.addEventListener('click', () => toggleBrandMenu(slot, btn));
-    } else {
-      slot.innerHTML = `
-        <span class="brand-chip" aria-label="Marca de la operadora: ${etiqueta}">
-          <span class="brand-chip-label">Marca</span>
-          <span class="brand-chip-value">${etiqueta}</span>
-        </span>`;
-    }
-  });
-}
-
-function closeBrandMenus(focusBtn) {
-  const habiaMenu = document.querySelector('.brand-menu') !== null;
-  document.querySelectorAll('.brand-menu').forEach(m => m.remove());
-  document.querySelectorAll('[data-action="brand-menu"]').forEach(b => b.setAttribute('aria-expanded', 'false'));
-  // Devolver el foco al chip para no perder al usuario de teclado.
-  if (habiaMenu && focusBtn && focusBtn.focus) focusBtn.focus();
-}
-
-// Cerrar el selector con Escape o tocando fuera.
-document.addEventListener('keydown', (ev) => {
-  if (ev.key !== 'Escape') return;
-  const abierto = document.querySelector('.brand-menu');
-  if (!abierto) return;
-  const btn = abierto.parentNode ? abierto.parentNode.querySelector('[data-action="brand-menu"]') : null;
-  closeBrandMenus(btn);
-});
-document.addEventListener('click', (ev) => {
-  if (!document.querySelector('.brand-menu')) return;
-  const dentro = ev.target && ev.target.closest && ev.target.closest('.brand-chip-slot');
-  if (dentro) return;
-  closeBrandMenus();
-});
-
-function toggleBrandMenu(slot, btn) {
-  const abierto = slot.querySelector('.brand-menu');
-  closeBrandMenus();
-  if (abierto) return;
-  const activa = fsmActiveBrand();
-  const menu = document.createElement('div');
-  menu.className = 'brand-menu';
-  menu.setAttribute('role', 'menu');
-  menu.innerHTML = fsmAvailableBrands().map(b => `
-    <button type="button" class="brand-menu-item${b.brand === activa ? ' is-active' : ''}"
-      role="menuitemradio" aria-checked="${b.brand === activa ? 'true' : 'false'}"
-      data-brand="${escapeHtml(b.brand)}">${escapeHtml(b.brand)}</button>`).join('');
-  slot.appendChild(menu);
-  btn.setAttribute('aria-expanded', 'true');
-  menu.querySelectorAll('[data-brand]').forEach((item) => {
-    item.addEventListener('click', () => {
-      const marca = item.dataset.brand;
-      closeBrandMenus();
-      applyBrand(marca);
-      // El chip se repinta: se devuelve el foco al nuevo chip.
-      const nuevo = slot.querySelector('[data-action="brand-menu"]');
-      if (nuevo && nuevo.focus) nuevo.focus();
-    });
-  });
-  const primero = menu.querySelector('.brand-menu-item');
-  if (primero) primero.focus();
-}
-
-// Cambiar de marca invalida todo lo que ya se pintó: los datos de una marca no
-// valen para la otra. No se dispara ninguna consulta: se recarga al expandir.
-function applyBrand(brand) {
-  if (!brand || brand === fsmActiveBrand()) return;
-  WifixAPI.setBrand(brand);
-  _napPanelState.naps = [];
-  _napPanelState.selectedNap = null;
-  _napPanelState.degraded = null;
-  _napPanelState.homeCoords = null;
-  validatedProfile = null;
-  validatedAccount = null;
-  document.querySelectorAll('#servicioList [data-slot="body"], #redList [data-slot="body"]').forEach((body) => {
-    delete body.dataset.loaded;
-    body.innerHTML = '<div class="detail-loading">Toca para cargar…</div>';
-    const item = body.closest ? body.closest('.servicio-item') : null;
-    if (item) item.classList.remove('open');
-  });
-  renderIntegrationWarning(null);
-  renderBrandChips();
 }
 
 // Banner de integración no disponible. No bloquea, no cierra sesión, no
@@ -696,7 +585,6 @@ const SERVICIO_ICONS = {
   user:  '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="3.5"/><path d="M4.5 20a7.5 7.5 0 0 1 15 0"/></svg>',
   ports: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 10h.01M11 10h.01M15 10h.01M19 10h.01M7 14h.01M11 14h.01M15 14h.01M19 14h.01"/></svg>',
   alert: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.7L2 18a2 2 0 0 0 1.7 3h16.6A2 2 0 0 0 22 18L13.7 3.7a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg>',
-  note:  '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M9 13h6M9 17h4"/></svg>',
   history:'<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/><path d="M12 8v5l3 2"/></svg>',
   metrics:'<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M7 14l3-3 4 4 5-6"/></svg>',
   wifi:  '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12a10 10 0 0 1 14 0"/><path d="M8.5 15.5a5 5 0 0 1 7 0"/><circle cx="12" cy="19" r="1.2" fill="currentColor"/></svg>',
@@ -749,7 +637,6 @@ async function openDatosPersonales() {
   }
   accountChip.textContent = cuenta;
   detailEyebrow.textContent = currentModule().title;
-  renderBrandChips();
 
   detailPersonales.classList.add('open');
   detailPersonales.setAttribute('aria-hidden', 'false');
@@ -2625,9 +2512,55 @@ function renderEventsList(events) {
     </div>`).join('');
 }
 
-// `result` puede venir como objeto envolvente { items, totalOrders, scanned,
-// truncated, degraded } o, en backends viejos, como array desnudo.
-function renderTasksList(result) {
+// Badge por resultado de la visita. REALIZADA y CANCELADA son neutras: la
+// primera significa que la operadora no informó si fue satisfactoria. Un
+// resultado desconocido también cae en neutro (nunca en rojo por defecto).
+const VISIT_BADGE_CLASS = Object.freeze({
+  SATISFACTORIA: 'badge-resolved',
+  INSATISFACTORIA: 'badge-fail',
+  PENDIENTE: 'badge-pending',
+  CANCELADA: 'badge-neutral',
+  REALIZADA: 'badge-neutral',
+});
+
+function visitBadgeClass(result) {
+  return VISIT_BADGE_CLASS[result] || 'badge-neutral';
+}
+
+function renderVisitItem(t, extraClass) {
+  // ⚠2 FSM no expone el técnico que cerró la tarea: llega null y se muestra
+  // como "—". Queda pendiente pedirlo a la operadora.
+  const tecnico = t.technician || '—';
+  const notas = t.closingNotes ? escapeHtml(t.closingNotes) : '';
+  // Notas bajo demanda: una expansión = una llamada. Nada de precargar.
+  const botonNotas = (!t.notesLoaded && t.workOrder)
+    ? `
+      <button type="button" class="task-notes-btn" data-action="task-notes"
+        data-workorder="${escapeHtml(t.workOrder)}" aria-expanded="false">Ver notas de cierre</button>
+      <div class="task-notes-slot" data-slot="task-notes"></div>`
+    : '';
+  const aviso = t.result === 'REALIZADA'
+    ? '<span class="visit-hint">Resultado no verificado por la operadora</span>'
+    : '';
+  return `
+    <div class="event-item${extraClass ? ' ' + extraClass : ''}" data-workorder="${escapeHtml(t.workOrder || '')}" data-result="${escapeHtml(t.result || '')}">
+      <span class="event-date">${formatDatePill(t.occurredAt)}</span>
+      <div class="event-body">
+        <span class="event-badge ${visitBadgeClass(t.result)}">${escapeHtml(t.result || '—')}</span>
+        <span class="event-title">${escapeHtml(t.taskId || t.workOrder || '—')} · ${escapeHtml(tecnico)}</span>
+        <span class="event-desc"><strong>${escapeHtml(t.reason || '—')}</strong>${notas ? ' — ' + notas : ''}</span>
+        ${aviso}
+        ${botonNotas}
+      </div>
+    </div>`;
+}
+
+// Panel único "Visitas pendientes y anteriores" (GET /accounts/{n}/visits).
+// `result` es { items, pendingCount, totalOrders, scanned, truncated, brand,
+// degraded? }; se tolera el array desnudo. El backend ya ordena: la pendiente
+// primero y el resto por fecha descendente. Aquí solo se separan en grupos
+// sin reordenar, por si llegara más de una pendiente.
+function renderVisitsList(result) {
   const items = Array.isArray(result) ? result : ((result && result.items) || []);
   const truncated = !Array.isArray(result) && result ? result.truncated === true : false;
   const degraded = (!Array.isArray(result) && result && result.degraded) || null;
@@ -2638,35 +2571,28 @@ function renderTasksList(result) {
     : '';
 
   if (items.length === 0) {
-    return `${nota}<div class="detail-empty">Sin tareas registradas.</div>`;
+    return `${nota}<div class="detail-empty">Sin visitas registradas.</div>`;
   }
 
-  const badgeClass = r => r === 'SATISFACTORIA' ? 'badge-resolved' : r === 'PENDIENTE' ? 'badge-pending' : 'badge-fail';
-  const filas = items.map(t => {
-    // ⚠2 FSM no expone el técnico que cerró la tarea: llega null y se muestra
-    // como "—". Queda pendiente pedirlo a la operadora.
-    const tecnico = t.technician || '—';
-    const notas = t.closingNotes ? escapeHtml(t.closingNotes) : '';
-    // Notas bajo demanda: una expansión = una llamada. Nada de precargar.
-    const botonNotas = (!t.notesLoaded && t.workOrder)
-      ? `
-        <button type="button" class="task-notes-btn" data-action="task-notes"
-          data-workorder="${escapeHtml(t.workOrder)}" aria-expanded="false">Ver notas de cierre</button>
-        <div class="task-notes-slot" data-slot="task-notes"></div>`
-      : '';
-    return `
-    <div class="event-item" data-workorder="${escapeHtml(t.workOrder || '')}">
-      <span class="event-date">${formatDatePill(t.occurredAt)}</span>
-      <div class="event-body">
-        <span class="event-badge ${badgeClass(t.result)}">${escapeHtml(t.result || '—')}</span>
-        <span class="event-title">${escapeHtml(t.taskId || t.workOrder || '—')} · ${escapeHtml(tecnico)}</span>
-        <span class="event-desc"><strong>${escapeHtml(t.reason || '—')}</strong>${notas ? ' — ' + notas : ''}</span>
-        ${botonNotas}
-      </div>
-    </div>`;
-  }).join('');
+  const pendientes = items.filter(t => t && t.result === 'PENDIENTE');
+  const anteriores = items.filter(t => t && t.result !== 'PENDIENTE');
 
-  return nota + filas;
+  const bloquePendiente = pendientes.length
+    ? `
+    <section class="visits-group visits-upcoming" aria-label="Próxima visita (pendiente)">
+      <h3 class="visits-heading">Próxima visita (pendiente)</h3>
+      ${pendientes.map(t => renderVisitItem(t, 'visit-upcoming')).join('')}
+    </section>`
+    : '';
+  const bloqueAnteriores = anteriores.length
+    ? `
+    <section class="visits-group" aria-label="Visitas anteriores">
+      ${pendientes.length ? '<h3 class="visits-heading visits-heading-sep">Visitas anteriores</h3>' : ''}
+      ${anteriores.map(t => renderVisitItem(t)).join('')}
+    </section>`
+    : '';
+
+  return nota + bloquePendiente + bloqueAnteriores;
 }
 
 // Notas de cierre de una orden, cargadas solo cuando el técnico las pide.
@@ -2747,11 +2673,9 @@ const SERVICIO_ITEMS = [
   // porque es el contrato publicado; lo que cambia es lo que lee el técnico.
   { id: 'events',  icon: SERVICIO_ICONS.alert,   title: 'Daños (eventos) en la red de acceso',
     load: (cuenta) => WifixAPI.getNodeEvents(cuenta).then(renderEventsList) },
-  // Las dos rutas devuelven { items, totalOrders, truncated, degraded }.
-  { id: 'unsat',   icon: SERVICIO_ICONS.note,    title: 'Tareas insatisfactorias (cierre)',
-    load: (cuenta) => WifixAPI.getUnsatisfactoryTasks(cuenta).then(res => renderTasksList(res)) },
-  { id: 'visits',  icon: SERVICIO_ICONS.history, title: 'Visitas anteriores',
-    load: (cuenta) => WifixAPI.getPreviousVisits(cuenta).then(res => renderTasksList(res)) },
+  // Una sola ruta para la visita pendiente y el historial (campos 15-16).
+  { id: 'visits',  icon: SERVICIO_ICONS.history, title: 'Visitas pendientes y anteriores',
+    load: (cuenta) => WifixAPI.getVisits(cuenta).then(renderVisitsList) },
   { id: 'history', icon: SERVICIO_ICONS.history, title: 'Historial de la app (registros guardados)',
     load: (cuenta) => WifixAPI.getAccountToolHistory(cuenta).then(renderHistorySummary) },
 ];
@@ -2820,7 +2744,6 @@ function openDatosServicio() {
     });
   });
 
-  renderBrandChips();
   warnIfNoBrandAvailable();
 
   detailServicio.classList.add('open');

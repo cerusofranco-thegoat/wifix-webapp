@@ -1126,50 +1126,60 @@
       return base;
     },
 
-    // ---- Tareas y Visitas (campos 15-16) -----------------------------------
-    // Devuelven siempre { items, totalOrders, ... }: el backend pasó de array
-    // desnudo a objeto envolvente y se tolera la forma antigua.
-    async getUnsatisfactoryTasks(accountNumber) {
+    // ---- Visitas pendientes y anteriores (campos 15-16) --------------------
+    // Una sola ruta: { items, pendingCount, totalOrders, scanned, truncated,
+    // brand, degraded? }. Los items ya vienen ordenados por el backend: la
+    // pendiente primero (a lo sumo una: la próxima visita) y luego el resto
+    // por fecha descendente. Se tolera el array desnudo por robustez.
+    async getVisits(accountNumber) {
       if (this.useRealApi) {
-        const r = await fetchJson('GET', '/accounts/' + encodeURIComponent(accountNumber) + '/unsatisfactory-tasks');
+        const r = await fetchJson('GET', '/accounts/' + encodeURIComponent(accountNumber) + '/visits');
         return asItemsEnvelope(r);
       }
       await delay(80);
-      const items = [mockClosedTask(1), mockClosedTask(3)].map(function (t) {
-        t.result = 'INSATISFACTORIA';
-        t.reason = 'CERRADA';
-        t.notesLoaded = true;
-        return t;
-      });
-      return {
-        items: items,
-        scanned: 5,
-        totalOrders: 12,
-        truncated: true,
-        brand: mockBrand(),
-        degraded: {
-          reason: 'TRUNCATED',
-          message: 'Se revisaron las 5 órdenes más recientes de 12. Abre una visita concreta para ver sus notas.',
-        },
-      };
-    },
-    async getPreviousVisits(accountNumber) {
-      if (this.useRealApi) {
-        const r = await fetchJson('GET', '/accounts/' + encodeURIComponent(accountNumber) + '/previous-visits');
-        return asItemsEnvelope(r);
-      }
-      await delay(80);
-      const items = [mockClosedTask(2), mockClosedTask(4), mockClosedTask(6)].map(function (t) {
-        t.taskId = t.workOrder;
-        t.reason = 'INSTALACION';
-        t.closingNotes = '';
-        t.result = 'PENDIENTE';
-        t.notesLoaded = false;
-        return t;
-      });
-      return { items: items, totalOrders: 12, brand: mockBrand() };
+      return mockVisits();
     },
   };
+
+  // Mock de visitas: una pendiente (la más reciente, sin notas de cierre) y el
+  // historial con la mezcla de resultados que devuelve la operadora. Nunca más
+  // de una PENDIENTE.
+  function mockVisits() {
+    const pendiente = mockClosedTask(0);
+    pendiente.occurredAt = new Date(Date.now() - 3 * 3600000).toISOString();
+    pendiente.reason = 'Sin servicio de internet';
+    pendiente.closingNotes = '';
+    pendiente.result = 'PENDIENTE';
+    pendiente.notesLoaded = true;
+
+    const historial = [
+      { seed: 6,  result: 'INSATISFACTORIA', reason: 'Intermitencia en la conexión', notesLoaded: true },
+      { seed: 14, result: 'SATISFACTORIA',   reason: 'WiFi débil en habitaciones',    notesLoaded: false },
+      { seed: 27, result: 'CANCELADA',       reason: 'Cliente ausente',               notesLoaded: true, closingNotes: 'Cliente no se encontraba en el domicilio.' },
+      { seed: 41, result: 'REALIZADA',       reason: 'Cambio de equipo',              notesLoaded: false },
+      { seed: 63, result: 'SATISFACTORIA',   reason: 'Instalación',                   notesLoaded: false },
+    ].map(function (v) {
+      const t = mockClosedTask(v.seed);
+      t.result = v.result;
+      t.reason = v.reason;
+      t.notesLoaded = v.notesLoaded;
+      t.closingNotes = v.notesLoaded ? (v.closingNotes || t.closingNotes) : '';
+      return t;
+    });
+
+    return {
+      items: [pendiente].concat(historial),
+      pendingCount: 1,
+      totalOrders: 14,
+      scanned: 10,
+      truncated: true,
+      brand: mockBrand(),
+      degraded: {
+        reason: 'TRUNCATED',
+        message: 'Se revisaron las 10 órdenes más recientes de 14. Abre una visita concreta para ver sus notas.',
+      },
+    };
+  }
 
   global.WifixAPI = WifixAPI;
 })(window);

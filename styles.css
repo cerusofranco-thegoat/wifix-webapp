@@ -1356,8 +1356,8 @@ body {
   border-radius: var(--radius-card);
   display: flex;
   align-items: center;
-  /* En pantallas de 360-412px las pastillas (marca + estado) no caben en una
-     sola línea: se permite que bajen a una segunda fila en vez de desbordar. */
+  /* En pantallas de 360-412px una cuenta larga + la pastilla de estado no
+     siempre caben en una línea: se permite bajar a una segunda fila. */
   flex-wrap: wrap;
   gap: 8px 10px;
   border: 1px solid var(--border-lavender);
@@ -1710,6 +1710,39 @@ body {
 .badge-resolved { background: var(--success-bg); color: var(--success-text); border: 1px solid var(--success-border); }
 .badge-pending  { background: var(--warn-bg); color: var(--warn-text); border: 1px solid var(--warn-border); }
 .badge-fail     { background: var(--error-bg);  color: var(--error-text); border: 1px solid var(--error-border); }
+/* Neutro: CANCELADA y REALIZADA (resultado no verificado por la operadora). */
+.badge-neutral  { background: var(--gray-50); color: var(--gray-700); border: 1px solid var(--gray-200); }
+
+/* ---- Visitas pendientes y anteriores ----------------------------------*/
+.visits-group { display: flex; flex-direction: column; }
+.visits-heading {
+  margin: 4px 0 6px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--brand-primary);
+}
+.visits-heading-sep {
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-lavender);
+}
+/* La próxima visita se destaca como tarjeta propia. */
+.event-item.visit-upcoming {
+  padding: 10px 12px;
+  border: 1px solid var(--brand-primary);
+  border-left: 4px solid var(--brand-accent);
+  border-radius: var(--radius-btn);
+  background: var(--surface-app);
+}
+.visit-hint {
+  display: block;
+  margin-top: 4px;
+  font-size: 10.5px;
+  font-style: italic;
+  color: var(--text-secondary);
+}
 
 .status-grid {
   display: grid;
@@ -3681,94 +3714,6 @@ body.console-fullscreen-open { overflow: hidden; }
   font-size: 10.5px;
   line-height: 1.5;
   color: var(--text-secondary);
-}
-
-/* ---- Chip de marca (realm) junto al chip de cuenta ---------------------*/
-/* No encoger dentro de .account-chip: si se comprime, el texto desborda el card. */
-.brand-chip-slot {
-  position: relative;
-  display: inline-flex;
-  flex: 0 0 auto;
-  max-width: 100%;
-}
-.brand-chip {
-  display: inline-flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 1px;
-  padding: 3px 8px;
-  border-radius: var(--radius-pill);
-  background: var(--surface-tint);
-  border: 1px solid var(--border-lavender);
-  color: var(--brand-primary);
-  max-width: 100%;
-}
-.brand-chip-label {
-  font-size: 8px;
-  letter-spacing: 1px;
-  text-transform: uppercase;
-  opacity: 0.75;
-}
-.brand-chip-value {
-  font-family: var(--font-sans);
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.6px;
-  max-width: 100%;
-  overflow-wrap: anywhere;
-}
-/* Solo el chip interactivo conserva el área táctil de 44px (a11y). */
-.brand-chip.selectable {
-  min-height: 44px;
-  justify-content: center;
-  cursor: pointer;
-}
-.brand-chip.selectable:hover { background: var(--surface-tint); }
-.brand-chip.selectable:focus-visible {
-  outline: 2px solid var(--brand-primary);
-  outline-offset: 2px;
-}
-.brand-chip.selectable .brand-chip-value::after {
-  content: ' ▾';
-  font-size: 9px;
-  opacity: 0.8;
-}
-.brand-menu {
-  position: absolute;
-  top: calc(100% + 6px);
-  right: 0;
-  z-index: 10;
-  min-width: 140px;
-  padding: 6px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  border-radius: var(--radius-btn);
-  background: var(--surface-card);
-  border: 1px solid var(--brand-primary);
-  box-shadow: var(--shadow-raised);
-}
-.brand-menu-item {
-  min-height: 44px;
-  padding: 8px 12px;
-  border-radius: var(--radius-btn);
-  text-align: left;
-  font-family: var(--font-sans);
-  font-size: 11px;
-  letter-spacing: 0.8px;
-  color: var(--text-primary);
-  background: transparent;
-  border: 1px solid transparent;
-  cursor: pointer;
-}
-.brand-menu-item:hover { background: var(--surface-tint); }
-.brand-menu-item.is-active {
-  border-color: var(--brand-primary);
-  color: var(--brand-primary);
-}
-.brand-menu-item:focus-visible {
-  outline: 2px solid var(--brand-primary);
-  outline-offset: 2px;
 }
 
 /* ---- Campos todavía simulados (no vienen de la operadora) --------------*/

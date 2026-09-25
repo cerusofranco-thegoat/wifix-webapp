@@ -443,18 +443,56 @@ check('mapea los 5 estados + desconocido',
   && ctx.statusTileClass('LO QUE SEA') === 'muted');
 check('status HTML balanceado', balanced(statusHtml) === null, balanced(statusHtml));
 
-console.log('\n== Visitas y tareas (campos 15/16) ==');
-const visits = await WifixAPI.getPreviousVisits('35070291');
-const visitsHtml = ctx.renderTasksList(visits);
-check('acepta la forma { items, totalOrders }', Array.isArray(visits.items));
+console.log('\n== Visitas pendientes y anteriores (campos 15/16) ==');
+const visits = await WifixAPI.getVisits('35070291');
+const visitsHtml = ctx.renderVisitsList(visits);
+check('getVisits devuelve el sobre { items, pendingCount, totalOrders, scanned, truncated, brand }',
+  Array.isArray(visits.items) && typeof visits.pendingCount === 'number'
+  && typeof visits.totalOrders === 'number' && typeof visits.scanned === 'number'
+  && typeof visits.truncated === 'boolean' && typeof visits.brand === 'string');
+check('mock: nunca más de una visita PENDIENTE',
+  visits.items.filter((t) => t.result === 'PENDIENTE').length === 1 && visits.pendingCount === 1);
+check('mock: la pendiente es la primera y la más reciente',
+  visits.items[0].result === 'PENDIENTE'
+  && visits.items.slice(1).every((t) => t.occurredAt <= visits.items[0].occurredAt));
+check('mock: el historial viene por fecha descendente',
+  visits.items.slice(1).every((t, i, arr) => i === 0 || arr[i - 1].occurredAt >= t.occurredAt));
+check('mock: mezcla SATISFACTORIA / INSATISFACTORIA / CANCELADA / REALIZADA',
+  ['SATISFACTORIA', 'INSATISFACTORIA', 'CANCELADA', 'REALIZADA'].every((r) => visits.items.some((t) => t.result === r)));
+const primerItem = visitsHtml.indexOf('<div class="event-item');
+const itemPendiente = visitsHtml.indexOf('data-result="PENDIENTE"');
+check('la pendiente se pinta primero',
+  itemPendiente !== -1 && visitsHtml.lastIndexOf('<div class="event-item', itemPendiente) === primerItem);
+check('la pendiente va destacada con su encabezado',
+  /class="event-item visit-upcoming"[^>]*data-result="PENDIENTE"/.test(visitsHtml)
+  && visitsHtml.indexOf('Próxima visita (pendiente)') < itemPendiente);
+check('solo la pendiente lleva el destacado',
+  (visitsHtml.match(/event-item visit-upcoming/g) || []).length === 1);
+check('separador "Visitas anteriores" después de la pendiente',
+  visitsHtml.indexOf('>Visitas anteriores<') > itemPendiente);
+check('badges por resultado',
+  /badge-pending">PENDIENTE</.test(visitsHtml) && /badge-resolved">SATISFACTORIA</.test(visitsHtml)
+  && /badge-fail">INSATISFACTORIA</.test(visitsHtml) && /badge-neutral">CANCELADA</.test(visitsHtml)
+  && /badge-neutral">REALIZADA</.test(visitsHtml));
+check('REALIZADA aclara que el resultado no está verificado',
+  visitsHtml.includes('Resultado no verificado'));
+check('un resultado desconocido cae en neutro, no en rojo',
+  ctx.visitBadgeClass('LO QUE SEA') === 'badge-neutral');
 check('técnico null se muestra como guion', visitsHtml.includes('· —') && !visitsHtml.includes('null'));
 check('ofrece cargar las notas bajo demanda', visitsHtml.includes('data-action="task-notes"'));
-check('visitas HTML balanceado', balanced(visitsHtml) === null, balanced(visitsHtml));
-const unsat = await WifixAPI.getUnsatisfactoryTasks('35070291');
-const unsatHtml = ctx.renderTasksList(unsat);
 check('pinta el aviso de lista truncada del backend',
-  unsatHtml.includes('detail-note') && unsatHtml.includes('Se revisaron las 5 órdenes'));
-check('tolera el array desnudo antiguo', ctx.renderTasksList([]).includes('Sin tareas registradas'));
+  visitsHtml.includes('detail-note') && visitsHtml.includes('Se revisaron las 10 órdenes'));
+check('visitas HTML balanceado', balanced(visitsHtml) === null, balanced(visitsHtml));
+const soloAnteriores = ctx.renderVisitsList({ items: visits.items.slice(1), pendingCount: 0 });
+check('sin pendiente no hay destacado ni encabezado de pendiente',
+  !soloAnteriores.includes('visit-upcoming') && !soloAnteriores.includes('Próxima visita'));
+const soloPendiente = ctx.renderVisitsList({ items: visits.items.slice(0, 1), pendingCount: 1 });
+check('solo la pendiente: sin separador de anteriores',
+  soloPendiente.includes('Próxima visita') && !soloPendiente.includes('>Visitas anteriores<'));
+check('estado vacío', ctx.renderVisitsList({ items: [] }).includes('Sin visitas registradas.'));
+check('tolera el array desnudo', ctx.renderVisitsList([]).includes('Sin visitas registradas.'));
+check('api.js ya no expone las rutas viejas',
+  typeof WifixAPI.getPreviousVisits === 'undefined' && typeof WifixAPI.getUnsatisfactoryTasks === 'undefined');
 const notes = ctx.renderWorkOrderNotes(await WifixAPI.getWorkOrderTasks('ORDER/424900/2026'));
 check('renderiza las notas de cierre', notes.includes('task-note-date') && notes.includes('ONT'));
 check('notas HTML balanceado', balanced(notes) === null, balanced(notes));
@@ -569,7 +607,7 @@ const MODULE_TABLE = {
   visitas: {
     title: 'Visitas técnicas',
     cards: ['personales', 'servicio', 'red', 'herramientas', 'retirados'],
-    servicio: ['naps', 'status', 'isp', 'events', 'unsat', 'visits', 'history'],
+    servicio: ['naps', 'status', 'isp', 'events', 'visits', 'history'],
   },
   cancelaciones: {
     title: 'Cancelación de servicio',
@@ -658,8 +696,47 @@ check('reabrir el mismo módulo conserva la cuenta confirmada', (() => {
   ctx.selectModule('cancelaciones');
   return vm.runInContext('validatedAccount', ctx) === '35070291';
 })());
+check('Datos del Servicio: un solo panel de visitas con el título nuevo', (() => {
+  ctx.selectModule('visitas');
+  ctx.enableSubCards();
+  ctx.openDatosServicio();
+  const html = servicioListEl.innerHTML;
+  // Deja el módulo como estaba: la verificación siguiente depende de él.
+  ctx.selectModule('cancelaciones');
+  return (html.match(/data-id="visits"/g) || []).length === 1
+    && html.includes('Visitas pendientes y anteriores')
+    && !html.includes('data-id="unsat"') && !html.includes('insatisfactorias');
+})());
+check('ningún módulo referencia el panel eliminado "unsat"',
+  vm.runInContext('Object.values(MODULES).every((m) => !(m.servicio || []).includes("unsat"))', ctx)
+  && vm.runInContext('SERVICIO_ITEMS.every((i) => i.id !== "unsat")', ctx));
 check('un módulo desconocido se ignora',
   ctx.selectModule('asistencia') === false && vm.runInContext('currentCategory', ctx) === 'cancelaciones');
+
+console.log('\n== Sin chip de marca ==');
+{
+  const html = readFileSync(base + 'index.html', 'utf8');
+  const css = readFileSync(base + 'styles.css', 'utf8');
+  const js = readFileSync(base + 'app.js', 'utf8');
+  check('index.html no tiene huecos de chip de marca',
+    !html.includes('brand-chip') && !html.includes('data-slot="brand-chip"'));
+  check('app.js ya no pinta el chip ni el selector de marca',
+    !/brand-chip|brand-menu|renderBrandChips/.test(js) && typeof ctx.renderBrandChips === 'undefined');
+  check('styles.css sin reglas muertas del chip de marca', !/\.brand-(chip|menu)/.test(css));
+  // Abrir las pantallas con un contenedor que registre lo pintado: ningún
+  // hueco debería recibir el chip.
+  const pintado = [];
+  const origQSA = ctx.document.querySelectorAll;
+  ctx.document.querySelectorAll = (sel) => { pintado.push(sel); return origQSA(sel); };
+  ctx.selectModule('visitas');
+  ctx.openDatosServicio();
+  await ctx.openDatosPersonales();
+  ctx.document.querySelectorAll = origQSA;
+  check('abrir Datos del Servicio / Personales no busca huecos de marca',
+    !pintado.some((sel) => String(sel).includes('brand')), pintado.join(' | '));
+  check('Datos del Servicio no pinta "Marca"',
+    !servicioListEl.innerHTML.includes('brand-chip') && !/>\s*Marca\s*</.test(servicioListEl.innerHTML));
+}
 
 console.log('\n== Prohibiciones del contrato ==');
 const fuentes = ['api.js', 'app.js'].map((f) => readFileSync(new URL('../' + f, import.meta.url), 'utf8'));
