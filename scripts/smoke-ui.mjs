@@ -551,6 +551,91 @@ check('404 (cuenta inexistente) NO habilita el modo limitado',
 check('un error de validación NO habilita el modo limitado',
   ctx.isUpstreamOrNetworkFailure({ code: 'VALIDATION_ERROR' }) === false);
 
+console.log('\n== Módulos del menú (qué secciones ve cada uno) ==');
+// Tabla aprobada por Franco: sub-tarjetas visibles y paneles de Datos del
+// Servicio por módulo. `null` en servicio = la tarjeta no se muestra.
+const MODULE_TABLE = {
+  instalaciones: {
+    cards: ['personales', 'servicio', 'herramientas', 'retirados'],
+    servicio: ['naps', 'events'],
+  },
+  visitas: {
+    cards: ['personales', 'servicio', 'red', 'herramientas', 'retirados'],
+    servicio: ['naps', 'status', 'isp', 'events', 'unsat', 'visits', 'history'],
+  },
+  cancelaciones: {
+    cards: ['personales', 'retirados'],
+    servicio: null,
+  },
+};
+
+// Sub-tarjetas falsas con atributos reales, para ver qué deja visible y
+// habilitado app.js. Las `const` del script se leen desde el contexto vm.
+function fakeSubCard(sub) {
+  const el = fakeEl();
+  const attrs = { 'aria-disabled': 'true', tabindex: '-1' };
+  el.dataset = { sub };
+  el.setAttribute = (k, v) => { attrs[k] = String(v); };
+  el.removeAttribute = (k) => { delete attrs[k]; };
+  el.getAttribute = (k) => (k in attrs ? attrs[k] : null);
+  return el;
+}
+const ALL_SUBS = ['personales', 'servicio', 'red', 'herramientas', 'retirados'];
+const fakeSubCards = ALL_SUBS.map(fakeSubCard);
+const fakeGrid = fakeEl();
+fakeGrid.querySelectorAll = () => fakeSubCards;
+const subscreenEl = vm.runInContext('subscreen', ctx);
+subscreenEl.querySelectorAll = () => fakeSubCards;
+subscreenEl.querySelector = () => fakeGrid;
+vm.runInContext('accountInput', ctx).value = '35070291';
+const servicioListEl = vm.runInContext('servicioList', ctx);
+
+check('las tarjetas del menú en index.html coinciden con los módulos',
+  (() => {
+    const html = readFileSync(base + 'index.html', 'utf8');
+    const types = [...html.matchAll(/class="category-card" data-type="([^"]+)"/g)].map((m) => m[1]);
+    return JSON.stringify(types) === JSON.stringify(Object.keys(MODULE_TABLE));
+  })());
+
+for (const [mod, expected] of Object.entries(MODULE_TABLE)) {
+  check(`${mod}: el módulo existe`, ctx.selectModule(mod) === true);
+  // Simula la confirmación de cuenta para ver qué se habilita.
+  ctx.enableSubCards();
+  const visible = fakeSubCards.filter((c) => !c.hidden).map((c) => c.dataset.sub);
+  check(`${mod}: sub-tarjetas visibles`,
+    JSON.stringify(visible) === JSON.stringify(expected.cards), visible.join(','));
+  check(`${mod}: las ocultas llevan aria-hidden y siguen deshabilitadas`,
+    fakeSubCards.filter((c) => c.hidden).every((c) =>
+      c.getAttribute('aria-hidden') === 'true' && c.getAttribute('aria-disabled') === 'true'));
+  check(`${mod}: solo se habilitan las visibles`,
+    fakeSubCards.filter((c) => !c.hidden).every((c) =>
+      c.getAttribute('aria-disabled') === null && c.getAttribute('aria-hidden') === null));
+
+  if (expected.servicio) {
+    servicioListEl.innerHTML = '';
+    ctx.openDatosServicio();
+    const rendered = [...servicioListEl.innerHTML.matchAll(/data-id="([^"]+)"/g)].map((m) => m[1]);
+    check(`${mod}: paneles de Datos del Servicio`,
+      JSON.stringify(rendered) === JSON.stringify(expected.servicio), rendered.join(','));
+  } else {
+    check(`${mod}: sin tarjeta de Datos del Servicio`, !visible.includes('servicio'));
+  }
+}
+
+check('cambiar de módulo resetea la cuenta confirmada', (() => {
+  ctx.selectModule('visitas');
+  vm.runInContext("validatedAccount = '35070291'", ctx);
+  ctx.selectModule('cancelaciones');
+  return vm.runInContext('validatedAccount', ctx) === null;
+})());
+check('reabrir el mismo módulo conserva la cuenta confirmada', (() => {
+  vm.runInContext("validatedAccount = '35070291'", ctx);
+  ctx.selectModule('cancelaciones');
+  return vm.runInContext('validatedAccount', ctx) === '35070291';
+})());
+check('un módulo desconocido se ignora',
+  ctx.selectModule('asistencia') === false && vm.runInContext('currentCategory', ctx) === 'cancelaciones');
+
 console.log('\n== Prohibiciones del contrato ==');
 const fuentes = ['api.js', 'app.js'].map((f) => readFileSync(new URL('../' + f, import.meta.url), 'utf8'));
 check('la webapp nunca envía withStatus',

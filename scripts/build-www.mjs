@@ -14,7 +14,6 @@ const ASSETS = [
   'app.js',
   'api.js',
   'native.js',
-  'asistencia.js',
   'styles.css',
   'manifest.webmanifest',
 ];

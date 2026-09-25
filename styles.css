@@ -903,6 +903,7 @@ body {
 }
 .category-card:nth-child(1) { animation-delay: 0.05s; }
 .category-card:nth-child(2) { animation-delay: 0.18s; }
+.category-card:nth-child(3) { animation-delay: 0.31s; }
 .category-card:hover,
 .category-card:focus-visible {
   transform: translateY(-2px);
@@ -1265,6 +1266,9 @@ body {
 .sub-card:nth-child(4) { animation-delay: 0.32s; }
 .sub-card:nth-child(5) { animation-delay: 0.40s; }
 .sub-card:nth-child(6) { animation-delay: 0.48s; }
+/* Cada módulo oculta las secciones que no le aplican; `display: flex` de
+   .sub-card pisaría el [hidden] del navegador, así que se fuerza aquí. */
+.sub-card[hidden] { display: none; }
 .sub-card:hover,
 .sub-card:focus-visible {
   transform: translateY(-2px);
@@ -2105,7 +2109,7 @@ body {
 /* .ocr-fallback-btn y .scan-serial-btn comparten estilos vía .serial-action-btn */
 
 /* ===========================================================================
-   Utilidades a11y + sub-cards de Visitas Técnicas
+   Utilidades a11y
    =========================================================================== */
 
 /* Utilidad a11y: ocultar visualmente pero mantener accesible */

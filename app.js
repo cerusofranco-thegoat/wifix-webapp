@@ -38,11 +38,37 @@ const redChip = document.getElementById('redChip');
 const redList = document.getElementById('redList');
 const backFromRed = document.getElementById('backFromRed');
 
-const labels = {
-  instalaciones: { eyebrow: 'Categoría', title: 'Instalaciones' },
+// Módulos del menú principal: cada uno decide qué secciones ve el técnico.
+// - cards: sub-tarjetas visibles (data-sub del #subscreen).
+// - servicio: ids de SERVICIO_ITEMS que se muestran en Datos del Servicio;
+//   null = todos. Si la tarjeta 'servicio' no está en cards, no se usa.
+const MODULES = {
+  instalaciones: {
+    eyebrow: 'Categoría', title: 'Instalaciones',
+    cards: ['personales', 'servicio', 'herramientas', 'retirados'],
+    servicio: ['naps', 'events'],
+  },
+  visitas: {
+    eyebrow: 'Categoría', title: 'Visitas técnicas / Migraciones',
+    cards: ['personales', 'servicio', 'red', 'herramientas', 'retirados'],
+    servicio: null,
+  },
+  cancelaciones: {
+    eyebrow: 'Categoría', title: 'Cancelación de servicio',
+    cards: ['personales', 'retirados'],
+    servicio: [],
+  },
 };
 
 let currentCategory = 'instalaciones';
+
+function currentModule() {
+  return MODULES[currentCategory] || MODULES.instalaciones;
+}
+
+function moduleHasCard(sub) {
+  return currentModule().cards.includes(sub);
+}
 
 // === Login y sesión =========================================================
 function showLogin() {
@@ -339,17 +365,24 @@ if (WifixAPI.isAuthenticated()) {
 }
 
 // === Categorías =============================================================
+function selectModule(type) {
+  if (!MODULES[type]) return false;
+
+  // Cambiar de módulo descarta la cuenta confirmada: el técnico vuelve a
+  // confirmarla para no arrastrar el estado de otra gestión.
+  if (type !== currentCategory) invalidateAccountCache();
+  currentCategory = type;
+
+  const meta = currentModule();
+  subEyebrow.textContent = meta.eyebrow;
+  subHeading.textContent = meta.title;
+  applyModuleVisibility();
+  return true;
+}
+
 cards.forEach(card => {
   card.addEventListener('click', () => {
-    const type = card.dataset.type;
-    currentCategory = type;
-
-    // "Instalaciones" (y cualquier otro tipo futuro): comportamiento original.
-    const meta = labels[type];
-    if (meta) {
-      subEyebrow.textContent = meta.eyebrow;
-      subHeading.textContent = meta.title;
-    }
+    if (!selectModule(card.dataset.type)) return;
     subscreen.classList.add('open');
     subscreen.setAttribute('aria-hidden', 'false');
   });
@@ -388,12 +421,28 @@ function invalidateAccountCache() {
   }
 }
 
+// Solo se habilitan las tarjetas del módulo actual: las ocultas siguen
+// deshabilitadas y fuera del orden de tabulación.
 function enableSubCards() {
   const subGrid = subscreen.querySelector('.sub-grid');
   if (!subGrid) return;
   subGrid.querySelectorAll('.sub-card').forEach((c) => {
+    if (!moduleHasCard(c.dataset.sub)) return;
     c.removeAttribute('aria-disabled');
     c.removeAttribute('tabindex');
+  });
+}
+
+// Muestra solo las sub-tarjetas que pertenecen al módulo actual.
+function applyModuleVisibility() {
+  subscreen.querySelectorAll('.sub-card').forEach((c) => {
+    const visible = moduleHasCard(c.dataset.sub);
+    c.hidden = !visible;
+    if (visible) {
+      c.removeAttribute('aria-hidden');
+    } else {
+      c.setAttribute('aria-hidden', 'true');
+    }
   });
 }
 
@@ -410,6 +459,7 @@ clearAccount.addEventListener('click', () => {
 
 // Las tarjetas arrancan deshabilitadas para a11y; se habilitan al confirmar cuenta.
 invalidateAccountCache();
+applyModuleVisibility();
 
 // === Confirmar cuenta ========================================================
 const confirmAccountBtn = document.getElementById('confirmAccount');
@@ -516,6 +566,8 @@ function confirmAccountInLimitedMode(cuenta, err) {
 subCards.forEach(card => {
   card.addEventListener('click', () => {
     const sub = card.dataset.sub;
+    // Una sección que no es del módulo actual no se abre aunque llegue el click.
+    if (!moduleHasCard(sub)) return;
     if (sub === 'personales') openDatosPersonales();
     if (sub === 'servicio') openDatosServicio();
     if (sub === 'red') openRedInterna();
@@ -686,7 +738,7 @@ async function openDatosPersonales() {
     return;
   }
   accountChip.textContent = cuenta;
-  detailEyebrow.textContent = labels[currentCategory].title;
+  detailEyebrow.textContent = currentModule().title;
   renderBrandChips();
 
   detailPersonales.classList.add('open');
@@ -2694,6 +2746,13 @@ const SERVICIO_ITEMS = [
     load: (cuenta) => WifixAPI.getAccountToolHistory(cuenta).then(renderHistorySummary) },
 ];
 
+// Paneles de Datos del Servicio que corresponden al módulo actual.
+function servicioItemsForModule() {
+  const allowed = currentModule().servicio;
+  if (allowed === null) return SERVICIO_ITEMS;
+  return SERVICIO_ITEMS.filter(item => allowed.includes(item.id));
+}
+
 function openDatosServicio() {
   const cuenta = currentAccount();
   if (!cuenta) {
@@ -2702,7 +2761,8 @@ function openDatosServicio() {
   }
   servicioChip.textContent = cuenta;
 
-  servicioList.innerHTML = SERVICIO_ITEMS.map(item => `
+  const items = servicioItemsForModule();
+  servicioList.innerHTML = items.map(item => `
     <div class="servicio-item" data-id="${item.id}">
       <button class="servicio-head" type="button">
         <div class="servicio-icon">${item.icon}</div>
@@ -2716,7 +2776,7 @@ function openDatosServicio() {
 
   servicioList.querySelectorAll('.servicio-item').forEach(node => {
     const id = node.dataset.id;
-    const item = SERVICIO_ITEMS.find(x => x.id === id);
+    const item = items.find(x => x.id === id);
     const head = node.querySelector('.servicio-head');
     const body = node.querySelector('[data-slot="body"]');
 
