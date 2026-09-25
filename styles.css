@@ -870,7 +870,9 @@ body {
   z-index: 1;
   flex: 1;
   min-height: 0;
-  padding: 0 22px;
+  /* Aire arriba/abajo para que el foco (outline + offset) y el hover
+     (translateY -2px) no se recorten en el borde del contenedor con scroll. */
+  padding: 6px 22px 8px;
   display: flex;
   flex-direction: column;
   gap: 16px;
@@ -881,6 +883,9 @@ body {
 .category-card {
   position: relative;
   width: 100%;
+  /* Con 4 tarjetas en pantallas bajas, .categories hace scroll: sin esto las
+     tarjetas (overflow: hidden => min-height 0) se aplastarían y recortarían. */
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 16px;
@@ -904,6 +909,7 @@ body {
 .category-card:nth-child(1) { animation-delay: 0.05s; }
 .category-card:nth-child(2) { animation-delay: 0.18s; }
 .category-card:nth-child(3) { animation-delay: 0.31s; }
+.category-card:nth-child(4) { animation-delay: 0.44s; }
 .category-card:hover,
 .category-card:focus-visible {
   transform: translateY(-2px);

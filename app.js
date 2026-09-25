@@ -42,14 +42,24 @@ const backFromRed = document.getElementById('backFromRed');
 // - cards: sub-tarjetas visibles (data-sub del #subscreen).
 // - servicio: ids de SERVICIO_ITEMS que se muestran en Datos del Servicio;
 //   null = todos. Si la tarjeta 'servicio' no está en cards, no se usa.
+// Instalaciones y Migraciones comparten secciones: en la migración el técnico
+// instala lo nuevo y retira el equipo anterior (Equipos Retirados es clave).
+const INSTALL_SECTIONS = Object.freeze({
+  cards: Object.freeze(['personales', 'servicio', 'herramientas', 'retirados']),
+  servicio: Object.freeze(['naps', 'events']),
+});
+
 const MODULES = {
   instalaciones: {
     eyebrow: 'Categoría', title: 'Instalaciones',
-    cards: ['personales', 'servicio', 'herramientas', 'retirados'],
-    servicio: ['naps', 'events'],
+    ...INSTALL_SECTIONS,
+  },
+  migraciones: {
+    eyebrow: 'Categoría', title: 'Migraciones',
+    ...INSTALL_SECTIONS,
   },
   visitas: {
-    eyebrow: 'Categoría', title: 'Visitas técnicas / Migraciones',
+    eyebrow: 'Categoría', title: 'Visitas técnicas',
     cards: ['personales', 'servicio', 'red', 'herramientas', 'retirados'],
     servicio: null,
   },

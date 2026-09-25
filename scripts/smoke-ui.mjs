@@ -554,16 +554,25 @@ check('un error de validación NO habilita el modo limitado',
 console.log('\n== Módulos del menú (qué secciones ve cada uno) ==');
 // Tabla aprobada por Franco: sub-tarjetas visibles y paneles de Datos del
 // Servicio por módulo. `null` en servicio = la tarjeta no se muestra.
+// El orden de las claves es el orden esperado de las tarjetas en index.html.
 const MODULE_TABLE = {
   instalaciones: {
+    title: 'Instalaciones',
+    cards: ['personales', 'servicio', 'herramientas', 'retirados'],
+    servicio: ['naps', 'events'],
+  },
+  migraciones: {
+    title: 'Migraciones',
     cards: ['personales', 'servicio', 'herramientas', 'retirados'],
     servicio: ['naps', 'events'],
   },
   visitas: {
+    title: 'Visitas técnicas',
     cards: ['personales', 'servicio', 'red', 'herramientas', 'retirados'],
     servicio: ['naps', 'status', 'isp', 'events', 'unsat', 'visits', 'history'],
   },
   cancelaciones: {
+    title: 'Cancelación de servicio',
     cards: ['personales', 'retirados'],
     servicio: null,
   },
@@ -594,11 +603,27 @@ check('las tarjetas del menú en index.html coinciden con los módulos',
   (() => {
     const html = readFileSync(base + 'index.html', 'utf8');
     const types = [...html.matchAll(/class="category-card" data-type="([^"]+)"/g)].map((m) => m[1]);
-    return JSON.stringify(types) === JSON.stringify(Object.keys(MODULE_TABLE));
+    return types.length === 4 && JSON.stringify(types) === JSON.stringify(Object.keys(MODULE_TABLE));
   })());
+check('el menú y MODULES tienen los mismos 4 módulos',
+  JSON.stringify(vm.runInContext('Object.keys(MODULES)', ctx).slice().sort())
+    === JSON.stringify(Object.keys(MODULE_TABLE).sort()));
+check('las tarjetas del menú muestran el título de su módulo', (() => {
+  const html = readFileSync(base + 'index.html', 'utf8');
+  return Object.entries(MODULE_TABLE).every(([mod, { title }]) => {
+    const block = html.split(`data-type="${mod}"`)[1] || '';
+    const h3 = block.match(/<h3>([^<]+)<\/h3>/);
+    return h3 && h3[1] === title;
+  });
+})());
+check('ya no queda el texto combinado "Visitas técnicas / Migraciones"',
+  !readFileSync(base + 'index.html', 'utf8').includes('Visitas técnicas / Migraciones'));
 
+const subHeadingEl = vm.runInContext('subHeading', ctx);
 for (const [mod, expected] of Object.entries(MODULE_TABLE)) {
   check(`${mod}: el módulo existe`, ctx.selectModule(mod) === true);
+  check(`${mod}: título del submenú`,
+    subHeadingEl.textContent === expected.title, subHeadingEl.textContent);
   // Simula la confirmación de cuenta para ver qué se habilita.
   ctx.enableSubCards();
   const visible = fakeSubCards.filter((c) => !c.hidden).map((c) => c.dataset.sub);
