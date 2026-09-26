@@ -8,7 +8,7 @@
  *  - Inyecta un botón "Ejecutar prueba automática" en los formularios de
  *    Ping, Traceroute y Mapa de Calor, que llena los campos con datos
  *    reales medidos por el plugin nativo.
- *  - Expone WifixNative.{ping, traceroute, getWifiInfo, isNative}.
+ *  - Expone WifixNative.{ping, traceroute, getWifiInfo, isNative, openDirections…}.
  *
  * En el navegador (sin Capacitor) este script no hace nada — los formularios
  * funcionan como antes con entrada manual.
@@ -179,6 +179,50 @@
       }
 
       throw new Error('Geolocalización no disponible en este dispositivo.');
+    },
+
+    // URL de "Cómo llegar" en Google Maps (a pie: el técnico camina a la NAP).
+    // Devuelve null si la coordenada no es válida.
+    directionsUrl(lat, lng) {
+      const la = Number(lat);
+      const ln = Number(lng);
+      if (lat === null || lng === null || lat === '' || lng === '' ||
+          !isFinite(la) || !isFinite(ln) || Math.abs(la) > 90 || Math.abs(ln) > 180) {
+        return null;
+      }
+      return 'https://www.google.com/maps/dir/?api=1&destination=' + la + ',' + ln + '&travelmode=walking';
+    },
+
+    // Abre la navegación hacia (lat, lng) FUERA de la app.
+    //  1) APK con @capacitor/app-launcher instalado → AppLauncher.openUrl
+    //     (Android lo entrega a la app de Google Maps si está).
+    //  2) APK sin ese plugin → window.open(url, '_system'). En Capacitor la
+    //     navegación a un host externo la intercepta el bridge y la manda al
+    //     sistema con un Intent ACTION_VIEW. VERIFICAR EN TELÉFONO: si el mapa
+    //     se abre DENTRO del WebView, instalar @capacitor/app-launcher
+    //     (`npm i @capacitor/app-launcher@^6 && npx cap sync android`).
+    //  3) Navegador → pestaña nueva.
+    // Devuelve la URL usada (o null si la coordenada no sirve).
+    async openDirections(lat, lng) {
+      const url = WifixNative.directionsUrl(lat, lng);
+      if (!url) throw new Error('La NAP no tiene coordenadas para calcular la ruta.');
+      if (isNative()) {
+        const cap = global.Capacitor;
+        const disponible = cap.isPluginAvailable ? cap.isPluginAvailable('AppLauncher') : true;
+        const launcher = disponible && cap.Plugins ? cap.Plugins.AppLauncher : null;
+        if (launcher && typeof launcher.openUrl === 'function') {
+          try {
+            await launcher.openUrl({ url: url });
+            return url;
+          } catch (err) {
+            console.warn('[Wifix] AppLauncher.openUrl falló, se usa window.open', err);
+          }
+        }
+        global.open(url, '_system');
+        return url;
+      }
+      global.open(url, '_blank', 'noopener');
+      return url;
     },
 
     // ------------------------------------------------------------------------

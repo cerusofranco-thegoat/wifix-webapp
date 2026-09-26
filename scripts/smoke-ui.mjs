@@ -419,15 +419,361 @@ check('renderPortsTable con detalle', portsHtml.includes('port-grid'));
 check('los ocupados llegan sin estado consultado',
   ports.ports.filter((p) => p.occupied).every((p) => p.clientStatus === null && p.statusPending === true));
 check('tercer estado visual "ocupado sin consultar"', portsHtml.includes('port-cell busy pending'));
-check('la leyenda explica las tres categorías',
-  portsHtml.includes('Ocupado (estado conocido)') && portsHtml.includes('Ocupado, estado sin consultar'));
+check('la leyenda explica las cuatro categorías',
+  ['Libre', 'Cancelado (reutilizable)', 'Ocupado (activo o suspendido)', 'Sin consultar']
+    .every((t) => portsHtml.includes(t)));
 check('ofrece consultar estados solo por acción explícita',
   portsHtml.includes('data-action="port-status"') && portsHtml.includes('Consultar estado de'));
 check('renderPortsTable HTML balanceado', balanced(portsHtml) === null, balanced(portsHtml));
+
+// ---- Color binario de la NAP (regla de Franco) ----------------------------
+check('NAP 8/8 es roja', ctx._napColorClass({ totalPorts: 8, occupiedPorts: 8, freePorts: 0 }) === 'full');
+check('NAP 7/8 es verde', ctx._napColorClass({ totalPorts: 8, occupiedPorts: 7, freePorts: 1 }) === 'free');
+check('sin freePorts se calcula total - ocupados',
+  ctx._napColorClass({ totalPorts: 8, occupiedPorts: 8 }) === 'full'
+  && ctx._napColorClass({ totalPorts: 16, occupiedPorts: 3 }) === 'free');
+check('sin total conocido queda neutro', ctx._napColorClass({ occupiedPorts: 2 }) === 'unknown');
+const bar78 = ctx._napOccupancyBar({ totalPorts: 8, occupiedPorts: 7, freePorts: 1 });
+check('texto "x/y ocupados · n libres" sin porcentaje',
+  bar78.includes('7/8 ocupados · 1 libre') && !/\d+%\s*</.test(bar78));
+check('mock: dentro de 100 m hay una NAP 8/8 y una 7/8',
+  nearby.naps.some((n) => n.totalPorts === 8 && n.occupiedPorts === 8)
+  && nearby.naps.some((n) => n.totalPorts === 8 && n.occupiedPorts === 7));
+check('mock: el detalle de puertos cuadra con el listado',
+  ports.totalPorts === nearby.naps[0].totalPorts && ports.occupiedPorts === nearby.naps[0].occupiedPorts);
+
+// ---- Status por tap: la NAP llena trae algún cancelado ----------------------
+const llena = nearby.naps.find((n) => n.totalPorts === 8 && n.occupiedPorts === 8);
+const portsLlena = await WifixAPI.getNapPorts(String(llena.napId));
+const cuentasLlena = portsLlena.ports.filter((p) => p.occupied).map((p) => p.clientAccountNumber);
+const statusLlena = await WifixAPI.getAccountsStatusBatch(cuentasLlena);
+check('mock: la NAP 8/8 trae al menos un cliente T', statusLlena.items.some((it) => it.statusCode === 'T'));
+const fakeSlot = { querySelectorAll: () => [] };
+ctx._applyPortStatuses(fakeSlot, statusLlena.items, portsLlena);
+check('tras consultar, el cancelado queda como reutilizable',
+  portsLlena.ports.some((p) => ctx._portState(p) === 'cancelado'));
+const gridLlena = ctx.renderPortsTable(portsLlena);
+check('celda cancelada: verde con marca reutilizable',
+  gridLlena.includes('port-cell free reusable') && gridLlena.includes('Cancelado · reutilizable'));
+check('celda activa/suspendida: roja con etiqueta del grupo',
+  gridLlena.includes('port-cell busy status-activo') && gridLlena.includes('port-cell busy status-suspendido'));
+check('celda con fallo de status sigue sin consultar',
+  gridLlena.includes('port-cell busy pending'));
+check('el color de la NAP 8/8 sigue rojo aunque tenga cancelados', ctx._napColorClass(llena) === 'full');
+
+// ---- Resumen GPON: sugerido libre / cancelado ------------------------------
+function fakeScope(naps, cache) {
+  const summary = fakeEl();
+  summary.querySelectorAll = () => [];
+  return {
+    _napData: naps, _napPortsCache: cache, _summary: summary,
+    querySelector: (sel) => (sel === '[data-slot="gpon-summary"]' ? summary : null),
+  };
+}
+const sc1 = fakeScope(nearby.naps, { [String(llena.napId)]: portsLlena });
+vm.runInContext(`_napPanelState.selectedNap = '${llena.napId}'; _napPanelState.selectedPort = null;`, ctx);
+await ctx._renderGponSummary(sc1);
+check('NAP llena: sugiere el primer cancelado (reutilizable)',
+  sc1._summary.innerHTML.includes('reutilizable, cliente cancelado'), sc1._summary.innerHTML.slice(0, 200));
+check('NAP llena: ofrece elegir puertos cancelados',
+  sc1._summary.innerHTML.includes('nap-port-opt reusable') && sc1._summary.innerHTML.includes('type="radio"'));
+check('resumen GPON HTML balanceado', balanced(sc1._summary.innerHTML) === null, balanced(sc1._summary.innerHTML));
+const siete = nearby.naps.find((n) => n.totalPorts === 8 && n.occupiedPorts === 7);
+const sc2 = fakeScope(nearby.naps, {});
+vm.runInContext(`_napPanelState.selectedNap = '${siete.napId}'; _napPanelState.selectedPort = null;`, ctx);
+await ctx._renderGponSummary(sc2);
+check('NAP 7/8: sugiere el puerto libre', /Puerto \d\d \(libre\)/.test(sc2._summary.innerHTML));
+const llenaSinStatus = JSON.parse(JSON.stringify(await WifixAPI.getNapPorts(String(llena.napId))));
+const sc3 = fakeScope(nearby.naps, { [String(llena.napId)]: llenaSinStatus });
+vm.runInContext(`_napPanelState.selectedNap = '${llena.napId}'; _napPanelState.selectedPort = null;`, ctx);
+await ctx._renderGponSummary(sc3);
+check('NAP llena sin status: pide consultar, no inventa puerto',
+  sc3._summary.innerHTML.includes('Consulta el estado de los clientes') && !sc3._summary.innerHTML.includes('type="radio"'));
+vm.runInContext(`_napPanelState.selectedNap = null; _napPanelState.selectedPort = null;`, ctx);
 check('renderPortsTable sin detalle muestra el aviso',
   ctx.renderPortsTable({ napCode: 'X', ports: [], detailAvailable: false, note: 'sin detalle' }).includes('sin detalle'));
 check('camino TEC no ofrece consultar estados',
   !ctx.renderPortsTable(await WifixAPI.getNapPorts('PL2KD9')).includes('port-status-btn'));
+
+
+console.log('\n== NAP del cliente (visita técnica) y mapa ==');
+{
+  const catPrevia = vm.runInContext('currentCategory', ctx);
+  // --- Mock de GET /accounts/:n/current-nap -------------------------------
+  const home = { latitude: -2.247946, longitude: -79.904161 };
+  const cercanasHome = (await WifixAPI.getNearbyNaps(home, { meters: 500, maxRows: 20 })).naps;
+  const found = await WifixAPI.getCurrentNap('35070291');
+  check('getCurrentNap mock: 35070291 encontrada (puerto 7, equipo, status A)',
+    found.found === true && found.portNumber === 7 && found.equipmentId === 'ZTEGD434832'
+    && found.clientStatus && found.clientStatus.code === 'A' && found.nap && found.accountNumber === '35070291');
+  const gemela = cercanasHome.find((n) => n.napId === found.nap.napId);
+  check('getCurrentNap mock: la NAP coincide con mockNearbyNaps (id, código, coords y conteo)',
+    !!gemela && gemela.napCode === found.nap.napCode && gemela.freePorts === found.nap.freePorts
+    && Math.abs(gemela.latitude - found.nap.latitude) < 1e-9 && ctx._napColorClass(found.nap) === 'free');
+  const found2 = await WifixAPI.getCurrentNap('40123456');
+  check('getCurrentNap mock: 40123456 encontrada en la NAP llena (roja), Suspendido',
+    found2.found === true && ctx._napColorClass(found2.nap) === 'full'
+    && ctx.clientStatusGroup(found2.clientStatus.code).key === 'suspendido');
+  const notFound = await WifixAPI.getCurrentNap('99999999');
+  check('getCurrentNap mock: cuenta desconocida → NOT_FOUND con nap null',
+    notFound.found === false && notFound.nap === null && notFound.portNumber === null
+    && notFound.reason === 'NOT_FOUND' && typeof notFound.searchedNaps === 'number');
+  const portsCliente = await WifixAPI.getNapPorts(String(found.nap.napId));
+  check('mock: la grilla de la NAP del cliente trae su cuenta en el puerto 7',
+    portsCliente.ports.some((p) => p.portNumber === 7 && p.occupied && p.clientAccountNumber === '35070291'));
+
+  // --- Modo visita: una sola tarjeta + "Cambiar NAP" -----------------------
+  let llamadas = 0;
+  const getCurrentNapReal = WifixAPI.getCurrentNap;
+  WifixAPI.getCurrentNap = async function (...args) { llamadas++; return getCurrentNapReal.apply(this, args); };
+
+  ctx.selectModule('visitas');
+  const visitaHtml = await ctx.loadNapPanel('35070291');
+  const tarjetas = (visitaHtml.match(/class="nap-card /g) || []).length;
+  check('visita: HTML balanceado', balanced(visitaHtml) === null, balanced(visitaHtml));
+  check('visita: muestra UNA sola tarjeta "NAP del cliente"', tarjetas === 1 && visitaHtml.includes('nap-card nap-current'), `tarjetas=${tarjetas}`);
+  check('visita: puerto del cliente resaltado, status y equipo',
+    visitaHtml.includes('Puerto 07') && visitaHtml.includes('Activo') && visitaHtml.includes('ZTEGD434832'));
+  check('visita: "Cómo llegar" y "Ver puertos" en la tarjeta del cliente',
+    visitaHtml.includes('data-action="nap-directions"') && visitaHtml.includes('data-action="view-ports"'));
+  check('visita: la búsqueda por radio queda oculta tras "Cambiar NAP"',
+    visitaHtml.includes('data-action="nap-toggle-nearby"') && /data-slot="nap-nearby" hidden/.test(visitaHtml)
+    && visitaHtml.includes('aria-expanded="false"'));
+  check('visita: hay contenedor de mapa', visitaHtml.includes('data-slot="nap-map"'));
+  check('visita: loadNapPanel hace exactamente una llamada a current-nap', llamadas === 1, `llamadas=${llamadas}`);
+
+  // --- Apertura real vía openDatosServicio (acordeón con DOM falso) ---------
+  {
+    const tick = () => new Promise((r) => setTimeout(r, 10));
+    const pendientes = [];
+    let llamadasOD = 0;
+    WifixAPI.getCurrentNap = (cuenta) => {
+      llamadasOD++;
+      return new Promise((resolve) => pendientes.push({ cuenta, resolve }));
+    };
+    function servicioNode() {
+      const abiertas = new Set();
+      const head = fakeEl();
+      head.addEventListener = (ev, fn) => { head._fn = fn; };
+      const body = fakeEl();
+      body.isConnected = true;
+      const node = fakeEl();
+      node.dataset = { id: 'naps' };
+      node.classList = {
+        toggle: (c) => (abiertas.has(c) ? abiertas.delete(c) : abiertas.add(c)),
+        contains: (c) => abiertas.has(c),
+        add: (c) => abiertas.add(c),
+        remove: (c) => abiertas.delete(c),
+      };
+      node.querySelector = (sel) => (sel === '.servicio-head' ? head : sel === '[data-slot="body"]' ? body : fakeEl());
+      return { node, body, click: () => head._fn() };
+    }
+    const servicioListEl = vm.runInContext('servicioList', ctx);
+    const qsaOriginal = servicioListEl.querySelectorAll;
+    const cuentaOriginal = vm.runInContext('accountInput.value', ctx);
+    let actual = null;
+    servicioListEl.querySelectorAll = (sel) => (sel === '.servicio-item' && actual ? [actual.node] : []);
+    const abrirDatos = (cuenta) => {
+      vm.runInContext(`accountInput.value = '${cuenta}'`, ctx);
+      actual = servicioNode();
+      ctx.openDatosServicio();
+      return actual;
+    };
+    ctx.selectModule('visitas');
+
+    const A = abrirDatos('35070291');
+    A.click(); A.click(); A.click(); // abrir → cerrar → abrir antes de la respuesta
+    check('openDatosServicio: abrir/cerrar/abrir antes de responder no duplica la carga',
+      llamadasOD === 1, `llamadas=${llamadasOD}`);
+    pendientes[0].resolve(await getCurrentNapReal.call(WifixAPI, '35070291'));
+    await tick();
+    check('openDatosServicio: al responder pinta la tarjeta del cliente',
+      A.body.innerHTML.includes('nap-card nap-current') && A.body.dataset.loaded === '1');
+    A.click(); A.click(); // cerrar y reabrir el panel ya cargado
+    await tick();
+    check('openDatosServicio: reabrir el panel cargado no vuelve a llamar', llamadasOD === 1, `llamadas=${llamadasOD}`);
+
+    // Race: la respuesta de la cuenta anterior llega DESPUÉS de la vigente.
+    const X = abrirDatos('40123456');
+    X.click();
+    X.body.isConnected = false; // Datos del Servicio se regenera para otra cuenta
+    const Y = abrirDatos('35070291');
+    Y.click();
+    pendientes[2].resolve(await getCurrentNapReal.call(WifixAPI, '35070291'));
+    await tick();
+    pendientes[1].resolve(await getCurrentNapReal.call(WifixAPI, '40123456'));
+    await tick();
+    check('race: la respuesta tardía de otra cuenta se descarta (estado del panel vigente intacto)',
+      vm.runInContext('_napPanelState.currentNap && _napPanelState.currentNap.accountNumber', ctx) === '35070291'
+      && Y.body.innerHTML.includes('Puerto 07'));
+    check('race: el panel obsoleto no se pinta ni se marca cargado',
+      !X.body.innerHTML.includes('nap-card') && X.body.dataset.loaded !== '1');
+
+    // Race directa sobre loadNapPanel: la primera apertura queda obsoleta.
+    const p1 = ctx.loadNapPanel('40123456');
+    const p2 = ctx.loadNapPanel('35070291');
+    pendientes[4].resolve(await getCurrentNapReal.call(WifixAPI, '35070291'));
+    const h2 = await p2;
+    pendientes[3].resolve(await getCurrentNapReal.call(WifixAPI, '40123456'));
+    const h1 = await p1;
+    check('race: loadNapPanel obsoleto devuelve null y no pisa el estado',
+      h1 === null && typeof h2 === 'string'
+      && vm.runInContext('_napPanelState.currentNap.accountNumber', ctx) === '35070291');
+
+    servicioListEl.querySelectorAll = qsaOriginal;
+    vm.runInContext(`accountInput.value = '${cuentaOriginal || ''}'`, ctx);
+    WifixAPI.getCurrentNap = async function (...args) { llamadas++; return getCurrentNapReal.apply(this, args); };
+  }
+  check('visita: la grilla marca el puerto del cliente',
+    (() => {
+      const data = JSON.parse(JSON.stringify(portsCliente));
+      ctx._napMarkClientPort(String(found.nap.napId), data);
+      const grid = ctx.renderPortsTable(data);
+      return grid.includes('client-port') && grid.includes('puerto del cliente')
+        && data.ports.filter((p) => p.isClientPort).length === 1;
+    })());
+
+  const noHtml = await ctx.loadNapPanel('99999999');
+  check('visita sin NAP: aviso breve y cae al flujo de NAPs cercanas',
+    noHtml.includes('No se encontró la NAP del cliente') && !noHtml.includes('nap-toggle-nearby')
+    && !/data-slot="nap-nearby" hidden/.test(noHtml) && noHtml.includes('data-action="nap-search"'));
+
+  const razones = { NO_COORDS: 'no tiene coordenadas', NOT_SUPPORTED: 'no soporta esta consulta' };
+  for (const [reason, txt] of Object.entries(razones)) {
+    WifixAPI.getCurrentNap = async () => ({ accountNumber: '1', found: false, nap: null, portNumber: null,
+      equipmentId: null, clientStatus: null, searchedNaps: 0, reason, brand: 'telenews' });
+    const h = await ctx.loadNapPanel('1');
+    check(`visita ${reason}: aviso "${txt}"`, h.includes(txt));
+  }
+  WifixAPI.getCurrentNap = async () => { const e = new Error('No se pudo conectar'); e.code = 'NETWORK_ERROR'; throw e; };
+  const errHtml = await ctx.loadNapPanel('35070291');
+  check('visita con error de red: aviso y flujo normal',
+    errHtml.includes('Sin conexión con el servidor') && errHtml.includes('data-action="nap-search"'));
+  WifixAPI.getCurrentNap = async function (...args) { llamadas++; return getCurrentNapReal.apply(this, args); };
+
+  // --- Misma NAP en la tarjeta del cliente y en la lista: ambas grillas ------
+  {
+    const data = JSON.parse(JSON.stringify(portsCliente));
+    const mk = (loaded) => { const e = fakeEl(); e.dataset = { portsFor: String(found.nap.napId), loaded: loaded ? '1' : '' }; return e; };
+    const tocado = mk(true);
+    const gemelo = mk(true);
+    const sinCargar = mk(false);
+    const panel = { querySelectorAll: (sel) => (sel === '.nap-ports-slot' ? [tocado, gemelo, sinCargar] : []) };
+    tocado.closest = (sel) => (sel === '[data-panel="nap-gpon"]' ? panel : null);
+    const cuentaCli = data.ports.find((p) => p.portNumber === 7).clientAccountNumber;
+    ctx._applyPortStatuses(tocado, [{ accountNumber: cuentaCli, statusCode: 'A' }], data);
+    check('estados: la otra grilla cargada de la misma NAP también se repinta',
+      gemelo.innerHTML.includes('port-grid') && gemelo.innerHTML.includes('Activo') && sinCargar.innerHTML === '');
+  }
+
+  // --- Mapa caído: reintenta al volver la red --------------------------------
+  {
+    const sc = { isConnected: true, querySelector: () => null };
+    vm.runInContext('_napMap.failed = true;', ctx);
+    vm.runInContext('_napMap', ctx).scope = sc;
+    ctx._napMapRetry();
+    check('mapa caído: _napMapRetry limpia el fallo y reintenta', vm.runInContext('_napMap.failed', ctx) === false);
+  }
+
+  // --- Instalaciones: flujo actual (lista) + mapa, sin current-nap ----------
+  llamadas = 0;
+  ctx.selectModule('instalaciones');
+  const instHtml = await ctx.loadNapPanel('35070291');
+  check('instalación: no consulta current-nap', llamadas === 0, `llamadas=${llamadas}`);
+  check('instalación: sin tarjeta del cliente ni "Cambiar NAP", con mapa y búsqueda',
+    !instHtml.includes('nap-card nap-current') && !instHtml.includes('nap-toggle-nearby')
+    && instHtml.includes('data-slot="nap-map"') && instHtml.includes('data-action="nap-search"'));
+  WifixAPI.getCurrentNap = getCurrentNapReal;
+
+  const slots = {
+    '[data-slot="nap-cards"]': fakeEl(),
+    '[data-slot="nap-map"]': fakeEl(),
+    '[data-slot="nap-degraded"]': fakeEl(),
+  };
+  const instScope = {
+    querySelector: (sel) => slots[sel] || null,
+    querySelectorAll: () => [],
+  };
+  vm.runInContext('_napPanelState.coords = { latitude: -2.247946, longitude: -79.904161, accuracy: 5 }; _napPanelState.meters = 100; _napPanelState.maxRows = 5;', ctx);
+  await ctx._napFetchAndRender(instScope);
+  const listaHtml = slots['[data-slot="nap-cards"]'].innerHTML;
+  const nLista = (listaHtml.match(/class="nap-card /g) || []).length;
+  check('instalación: muestra la lista de NAPs cercanas (libres y llenas)',
+    nLista > 1 && listaHtml.includes('nap-state-free') && listaHtml.includes('nap-state-full'), `tarjetas=${nLista}`);
+  check('instalación: cada tarjeta con coordenada tiene "Cómo llegar"',
+    (listaHtml.match(/data-action="nap-directions"/g) || []).length === nLista);
+  check('sin Leaflet el mapa avisa y la lista sigue',
+    slots['[data-slot="nap-map"]'].innerHTML.includes('Mapa no disponible sin conexión') && nLista > 1);
+  check('NAP sin lat/lng: sin "Cómo llegar" ni botón de mapa',
+    !ctx._napDirectionsBtnHtml({ napCode: 'X', latitude: null, longitude: null })
+    && !ctx._napNameHtml({ napCode: 'X', latitude: null, longitude: -79 }, 'X').includes('button'));
+  const popup = ctx._napMapPopupHtml({ napCode: 'NAP-1', latitude: -2.1, longitude: -79.9, totalPorts: 8, occupiedPorts: 7, freePorts: 1 });
+  check('popup del mapa: código, "x/y ocupados · n libres" y Cómo llegar',
+    popup.includes('NAP-1') && popup.includes('7/8 ocupados · 1 libre') && popup.includes('nap-directions'));
+  check('constante de tiles OSM', vm.runInContext('NAP_MAP_TILE_URL', ctx) === 'https://tile.openstreetmap.org/{z}/{x}/{y}.png');
+  vm.runInContext('_napPanelState.coords = null; _napPanelState.currentNap = null; _napPanelState.currentNapError = null; _napPanelState.naps = []; _napPanelState.showNearby = true;', ctx);
+  ctx.selectModule(catPrevia);
+}
+
+console.log('\n== Cómo llegar (native.js) ==');
+{
+  function nativeCtx(capacitor) {
+    const abiertos = [];
+    const c = {
+      console,
+      // Timers inertes: en modo Capacitor native.js programa tareas que
+      // dejarían vivo el proceso del smoke test.
+      setTimeout: () => 0,
+      clearTimeout() {},
+      setInterval: () => 0,
+      clearInterval() {},
+      navigator: { userAgent: 'node' },
+      document: {
+        readyState: 'complete',
+        body: { querySelectorAll: () => [] },
+        addEventListener() {},
+        createElement: () => fakeEl(),
+      },
+      MutationObserver: class { observe() {} disconnect() {} },
+      open: (url, target) => { abiertos.push({ url, target }); return null; },
+      addEventListener() {},
+    };
+    if (capacitor) c.Capacitor = capacitor;
+    c.window = c;
+    c.globalThis = c;
+    vm.createContext(c);
+    vm.runInContext(readFileSync(base + 'native.js', 'utf8'), c, { filename: 'native.js' });
+    return { c, abiertos };
+  }
+  const esperada = 'https://www.google.com/maps/dir/?api=1&destination=-2.247,-79.904&travelmode=walking';
+  const nav = nativeCtx(null);
+  check('directionsUrl arma la URL de Google Maps a pie', nav.c.WifixNative.directionsUrl(-2.247, -79.904) === esperada,
+    nav.c.WifixNative.directionsUrl(-2.247, -79.904));
+  check('directionsUrl rechaza coordenadas nulas o fuera de rango',
+    nav.c.WifixNative.directionsUrl(null, -79) === null && nav.c.WifixNative.directionsUrl(95, 10) === null);
+  await nav.c.WifixNative.openDirections('-2.247', '-79.904');
+  check('navegador: openDirections abre la URL en pestaña nueva',
+    nav.abiertos.length === 1 && nav.abiertos[0].url === esperada && nav.abiertos[0].target === '_blank');
+
+  const sinPlugin = nativeCtx({ isNativePlatform: () => true, isPluginAvailable: () => false, Plugins: {} });
+  await sinPlugin.c.WifixNative.openDirections(-2.247, -79.904);
+  check('APK sin AppLauncher: window.open(url, "_system")',
+    sinPlugin.abiertos.length === 1 && sinPlugin.abiertos[0].url === esperada && sinPlugin.abiertos[0].target === '_system');
+
+  const lanzados = [];
+  const conPlugin = nativeCtx({
+    isNativePlatform: () => true,
+    isPluginAvailable: (n) => n === 'AppLauncher',
+    Plugins: { AppLauncher: { openUrl: async (o) => { lanzados.push(o.url); return { completed: true }; } } },
+  });
+  await conPlugin.c.WifixNative.openDirections(-2.247, -79.904);
+  check('APK con AppLauncher: usa openUrl y no window.open',
+    lanzados.length === 1 && lanzados[0] === esperada && conPlugin.abiertos.length === 0);
+
+  let rechazo = false;
+  try { await nav.c.WifixNative.openDirections(null, null); } catch (_) { rechazo = true; }
+  check('openDirections sin coordenada falla con mensaje', rechazo);
+}
 
 console.log('\n== Estado del cliente (campo 7) ==');
 const contract = await WifixAPI.getContractStatus('35070291');
@@ -436,11 +782,18 @@ check('contractId null se muestra como guion, no como "null"',
   !statusHtml.includes('null') && statusHtml.includes('—'));
 check('muestra la descripción literal de la operadora', statusHtml.includes('Activo'));
 check('muestra la última orden', statusHtml.includes('ORDER/424900/2026'));
-check('mapea los 5 estados + desconocido',
+check('agrupa los 5 estados + desconocido en Activo/Suspendido/Cancelado',
   ctx.statusTileClass('ACTIVA') === 'ok' && ctx.statusTileClass('SUSPENDIDA') === 'warn'
-  && ctx.statusTileClass('TERMINADA') === 'fail' && ctx.statusTileClass('ORDENADA') === 'info'
-  && ctx.statusTileClass('PENDIENTE') === 'warn' && ctx.statusTileClass('DESCONOCIDA') === 'muted'
+  && ctx.statusTileClass('TERMINADA') === 'fail' && ctx.statusTileClass('ORDENADA') === 'ok'
+  && ctx.statusTileClass('PENDIENTE') === 'ok' && ctx.statusTileClass('DESCONOCIDA') === 'muted'
   && ctx.statusTileClass('LO QUE SEA') === 'muted');
+check('clientStatusGroup acepta código o nombre',
+  ['A', 'O', 'P', 'ACTIVA', 'ORDENADA', 'PENDIENTE', 'a'].every((c) => ctx.clientStatusGroup(c).key === 'activo')
+  && ['S', 'SUSPENDIDA'].every((c) => ctx.clientStatusGroup(c).label === 'Suspendido')
+  && ['T', 'TERMINADA'].every((c) => ctx.clientStatusGroup(c).label === 'Cancelado')
+  && ['DESCONOCIDA', '', null, undefined, 'X'].every((c) => ctx.clientStatusGroup(c).key === 'sin-dato'));
+check('el tile muestra la etiqueta del grupo, no el código crudo',
+  statusHtml.includes('<span class="st-value">Activo</span>'));
 check('status HTML balanceado', balanced(statusHtml) === null, balanced(statusHtml));
 
 console.log('\n== Visitas pendientes y anteriores (campos 15/16) ==');

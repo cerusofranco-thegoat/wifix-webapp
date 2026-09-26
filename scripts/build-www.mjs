@@ -23,6 +23,9 @@ const DIRS = [
   'icons',
   // Tipografia Ubuntu auto-hospedada: sin esto el APK pierde la fuente.
   'fonts',
+  // Librerias de terceros vendorizadas (Leaflet para el mapa de NAPs). Tiene
+  // subcarpetas (vendor/leaflet/images): la copia es recursiva.
+  'vendor',
 ];
 
 // Intenta limpiar www/ completo; si está bloqueado (ej. http-server en Windows),
@@ -58,16 +61,25 @@ for (const dir of DIRS) {
     console.warn(`[build-www] skip dir (no existe): ${dir}/`);
     continue;
   }
-  const destDir = path.join(WWW, dir);
+  copied += copyDirRecursive(srcDir, path.join(WWW, dir));
+}
+
+// Copia recursiva archivo por archivo (sin rmSync previo: tolera www/ bloqueado).
+function copyDirRecursive(srcDir, destDir) {
+  let n = 0;
   fs.mkdirSync(destDir, { recursive: true });
   for (const file of fs.readdirSync(srcDir)) {
     const srcFile  = path.join(srcDir, file);
     const destFile = path.join(destDir, file);
-    if (fs.statSync(srcFile).isFile()) {
+    const st = fs.statSync(srcFile);
+    if (st.isDirectory()) {
+      n += copyDirRecursive(srcFile, destFile);
+    } else if (st.isFile()) {
       fs.copyFileSync(srcFile, destFile);
-      copied++;
+      n++;
     }
   }
+  return n;
 }
 
 console.log(`[build-www] ${copied} archivos copiados a www/`);

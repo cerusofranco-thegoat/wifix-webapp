@@ -359,10 +359,13 @@
   }
   // Estados por cuenta (campo 8, paso 2). Determinista por número de cuenta
   // para que la rejilla de puertos no "baile" entre consultas.
+  // Índice = (últimos 2 dígitos de la cuenta) % 6; el 5 simula un fallo.
+  // Incluye T (cancelado) y O/P (cuentan como Activo) para probar la agrupación.
   const MOCK_STATUS_TABLE = [
     { statusCode: 'A', status: 'ACTIVA', statusDescription: 'Activo' },
     { statusCode: 'S', status: 'SUSPENDIDA', statusDescription: 'Suspendido' },
     { statusCode: 'T', status: 'TERMINADA', statusDescription: 'Terminado' },
+    { statusCode: 'O', status: 'ORDENADA', statusDescription: 'Ordenada' },
     { statusCode: 'P', status: 'PENDIENTE', statusDescription: 'Pendiente' },
   ];
   function mockStatusBatch(accounts) {
@@ -377,7 +380,7 @@
           error: 'FSM no devolvió estado para esta cuenta.',
         };
       }
-      const row = MOCK_STATUS_TABLE[seed % MOCK_STATUS_TABLE.length];
+      const row = MOCK_STATUS_TABLE[seed % 6];
       return {
         accountNumber: String(acc),
         status: row.status,
@@ -395,6 +398,15 @@
       failed: failed,
     };
   }
+  // Ocupación de las NAPs mock (índice = napId - MOCK_NAP_BASE_ID). Se comparte
+  // entre el listado y el detalle de puertos para que los conteos cuadren.
+  // Casos de prueba dentro del radio por defecto (100 m):
+  //   [0] 8/8  → llena (roja), con clientes T (cancelado) al consultar estados
+  //   [2] 7/8  → un puerto libre (verde)
+  //   [3] 0/16 → vacía
+  const MOCK_NAP_BASE_ID = 11540;
+  const MOCK_NAP_USED = [8, 3, 7, 0, 2, 1, 6, 8, 5, 0, 3, 7];
+  function mockNapTotal(i) { return i % 2 === 0 ? 8 : 16; }
   // Genera NAPs mock alrededor de una coordenada, con la misma forma que
   // devuelve la API de operadora (/api/tec/naps/{lat},{lng}).
   function mockNearbyNaps(coords, opts) {
@@ -407,15 +419,15 @@
       [20, 0.6], [47, 2.1], [61, 3.4], [73, 4.8], [92, 1.2], [113, 5.6],
       [148, 2.7], [186, 0.2], [231, 4.1], [289, 3.0], [344, 5.1], [412, 1.7],
     ];
-    const used = [4, 3, 2, 0, 2, 1, 6, 8, 5, 0, 3, 7];
+    const used = MOCK_NAP_USED;
     const all = offsets.map(function (pair, i) {
       const dist = pair[0];
       const bearing = pair[1];
       const dLat = (dist * Math.cos(bearing)) / 111320;
       const dLng = (dist * Math.sin(bearing)) / (111320 * Math.cos(lat * Math.PI / 180));
-      const total = i % 2 === 0 ? 8 : 16;
+      const total = mockNapTotal(i);
       return {
-        napId: 11540 + i,
+        napId: MOCK_NAP_BASE_ID + i,
         napCode: 'NAP-' + (12 + i) + '-0' + ((i % 6) + 1),
         networkName: 'OLT-GYE-0' + ((i % 4) + 1) + '/1/2',
         latitude: lat + dLat,
@@ -430,6 +442,51 @@
     // Devuelve TODAS las del radio: getNearbyNaps recorta a maxRows y así sabe
     // si la lista quedó realmente truncada.
     return all.filter(function (n) { return n.distanceMeters <= meters; });
+  }
+  // NAP actual del cliente (GET /accounts/:n/current-nap), modo demo. Dos
+  // cuentas "encontradas" en NAPs del listado mock (mismo napId/código/conteo
+  // que mockNearbyNaps alrededor del domicilio mock), el resto NOT_FOUND:
+  //   35070291 → NAP índice 2 (7/8, verde), puerto 7, cliente Activo
+  //   40123456 → NAP índice 0 (8/8, roja),  puerto 3, cliente Suspendido
+  // mockNapPorts pone esa cuenta en ese puerto para que la grilla cuadre.
+  const MOCK_CURRENT_NAPS = {
+    '35070291': { idx: 2, port: 7, equipmentId: 'ZTEGD434832',
+      status: { code: 'A', name: 'ACTIVA', description: 'Activo' } },
+    '40123456': { idx: 0, port: 3, equipmentId: 'ZTEGD9A1C2F7',
+      status: { code: 'S', name: 'SUSPENDIDA', description: 'Suspendido por mora' } },
+  };
+  function mockCurrentNapFor(idx) {
+    const keys = Object.keys(MOCK_CURRENT_NAPS);
+    for (let i = 0; i < keys.length; i++) {
+      if (MOCK_CURRENT_NAPS[keys[i]].idx === idx) {
+        return Object.assign({ accountNumber: keys[i] }, MOCK_CURRENT_NAPS[keys[i]]);
+      }
+    }
+    return null;
+  }
+  function mockCurrentNap(accountNumber, coords) {
+    const cuenta = String(accountNumber);
+    const home = mockClientProfile(cuenta);
+    const center = coords && isFinite(coords.latitude) && isFinite(coords.longitude)
+      ? coords
+      : { latitude: home.latitude, longitude: home.longitude };
+    const base = { accountNumber: cuenta, brand: mockBrand() };
+    const hit = MOCK_CURRENT_NAPS[cuenta];
+    if (!hit) {
+      return Object.assign(base, {
+        found: false, nap: null, portNumber: null, equipmentId: null,
+        clientStatus: null, searchedNaps: 3, reason: 'NOT_FOUND',
+      });
+    }
+    const nap = mockNearbyNaps(center, { meters: 1000 })[hit.idx];
+    return Object.assign(base, {
+      found: true,
+      nap: nap,
+      portNumber: hit.port,
+      equipmentId: hit.equipmentId,
+      clientStatus: Object.assign({}, hit.status),
+      searchedNaps: hit.idx + 1,
+    });
   }
   // Puertos de una NAP. `napRef` numérico = napId de FSM (detalle real);
   // cualquier otro valor = código de NAP por el camino TEC, sin detalle.
@@ -450,15 +507,38 @@
       };
     }
     const base = Number(ref);
-    const total = 16;
+    const idx = base - MOCK_NAP_BASE_ID;
+    const known = idx >= 0 && idx < MOCK_NAP_USED.length;
+    // NAPs del listado mock: mismo total/ocupados que en mockNearbyNaps.
+    // Cualquier otro napId numérico: 16 puertos, 2 de cada 3 ocupados.
+    const total = known ? mockNapTotal(idx) : 16;
+    const used = known ? MOCK_NAP_USED[idx] : Math.ceil(total * 2 / 3);
     const ports = [];
     for (let i = 0; i < total; i++) {
-      const occupied = i % 3 !== 0;
+      // Permutación (5 es coprimo con 8 y 16): reparte los libres por la NAP
+      // en vez de dejarlos todos al final.
+      const occupied = ((i * 5 + (known ? idx : base)) % total) < used;
+      // Los 2 últimos dígitos de la cuenta fijan el estado mock (ver
+      // mockStatusBatch): así la NAP 8/8 siempre trae algún cancelado (T).
+      const suffix = (i + (known ? idx : base) * 3) % 100;
+      // Puerto del cliente de current-nap (mock): su cuenta y su equipo.
+      const actual = known ? mockCurrentNapFor(idx) : null;
+      if (actual && actual.port === i + 1 && occupied) {
+        ports.push({
+          portNumber: i + 1,
+          occupied: true,
+          clientAccountNumber: actual.accountNumber,
+          equipmentId: actual.equipmentId,
+          clientStatus: null,
+          statusPending: true,
+        });
+        continue;
+      }
       ports.push({
         portNumber: i + 1,
         occupied: occupied,
         // El estado NO se consulta en este paso: llega null y statusPending.
-        clientAccountNumber: occupied ? String(35070000 + ((base * 7 + i * 13) % 900000)) : null,
+        clientAccountNumber: occupied ? String(35070000 + (known ? idx : base % 90) * 100 + suffix) : null,
         equipmentId: occupied ? 'ZTEGD' + (base % 1000) + pad4(i + 1) : null,
         clientStatus: null,
         statusPending: occupied,
@@ -1039,6 +1119,27 @@
         }
         : null;
       return { naps: todas.slice(0, maxRows), degraded: degraded };
+    },
+
+    // NAP a la que está conectado el cliente (visita técnica). coords
+    // opcional ({ latitude, longitude }): el backend exige lat y lng juntos;
+    // sin coords busca alrededor de la coordenada del cliente.
+    // Devuelve el cuerpo tal cual + `degraded` (cuerpo o header X-Wifix-Degraded).
+    async getCurrentNap(accountNumber, coords) {
+      const conCoords = !!(coords && isFinite(coords.latitude) && isFinite(coords.longitude) &&
+        coords.latitude !== null && coords.longitude !== null);
+      if (this.useRealApi) {
+        let path = '/accounts/' + encodeURIComponent(accountNumber) + '/current-nap';
+        if (conCoords) {
+          path += '?lat=' + encodeURIComponent(coords.latitude) +
+            '&lng=' + encodeURIComponent(coords.longitude);
+        }
+        const r = await fetchJson('GET', path, undefined, { withMeta: true });
+        const body = r.data || {};
+        return Object.assign({}, body, { degraded: body.degraded || r.degraded || null });
+      }
+      await delay(80);
+      return Object.assign(mockCurrentNap(accountNumber, conCoords ? coords : null), { degraded: null });
     },
 
     // ---- ISP Monitor por serial GPON / MAC HFC (campos 9-13) --------------

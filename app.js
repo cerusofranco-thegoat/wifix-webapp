@@ -759,29 +759,47 @@ function renderEditProfileForm(profile, cuenta, slot) {
 // ============================================================================
 // Datos del Servicio (campos 6-18) — usa varios endpoints
 // ============================================================================
-// Estados que devuelve la operadora (contrato §4). El contrato amplió la unión
-// de 3 a 5 estados + DESCONOCIDA; cualquier valor no previsto cae en 'muted'.
-const STATUS_CLASS_MAP = {
-  ACTIVA: 'ok',
-  SUSPENDIDA: 'warn',
-  TERMINADA: 'fail',
-  ORDENADA: 'info',
-  PENDIENTE: 'warn',
-  DESCONOCIDA: 'muted',
+// Estados que devuelve la operadora (contrato §4): códigos A/S/T/O/P o nombres
+// ACTIVA/SUSPENDIDA/TERMINADA/ORDENADA/PENDIENTE/DESCONOCIDA. En pantalla solo
+// se muestran TRES grupos (decisión de Franco): Activo / Suspendido / Cancelado.
+// ORDENADA y PENDIENTE cuentan como Activo. Lo no previsto cae en "Sin dato".
+const CLIENT_STATUS_GROUPS = {
+  activo:       { key: 'activo',     label: 'Activo',     short: 'ACT', tile: 'ok' },
+  suspendido:   { key: 'suspendido', label: 'Suspendido', short: 'SUS', tile: 'warn' },
+  cancelado:    { key: 'cancelado',  label: 'Cancelado',  short: 'CAN', tile: 'fail' },
+  'sin-dato':   { key: 'sin-dato',   label: 'Sin dato',   short: '?',   tile: 'muted' },
+};
+const CLIENT_STATUS_TO_GROUP = {
+  A: 'activo', O: 'activo', P: 'activo',
+  ACTIVA: 'activo', ORDENADA: 'activo', PENDIENTE: 'activo',
+  S: 'suspendido', SUSPENDIDA: 'suspendido',
+  T: 'cancelado', TERMINADA: 'cancelado',
 };
 
+// Acepta código (A/S/T/O/P) o nombre (ACTIVA/…); devuelve { key, label, short, tile }.
+function clientStatusGroup(codeOrName) {
+  const k = String(codeOrName === null || codeOrName === undefined ? '' : codeOrName).trim().toUpperCase();
+  return CLIENT_STATUS_GROUPS[CLIENT_STATUS_TO_GROUP[k] || 'sin-dato'];
+}
+
 function statusTileClass(status) {
-  return STATUS_CLASS_MAP[status] || 'muted';
+  return clientStatusGroup(status).tile;
 }
 
 function renderStatusFromContract(contract, account) {
   const accounts = (contract && Array.isArray(contract.accounts)) ? contract.accounts : [];
   const own = accounts.find(a => a.accountNumber === account) || accounts[0] || null;
   const status = own && own.status ? own.status : 'DESCONOCIDA';
-  const statusClass = statusTileClass(status);
-  // Texto literal de la operadora bajo el estado normalizado (puede ser null).
-  const descripcion = own && own.statusDescription
-    ? `<span class="st-sub">${escapeHtml(own.statusDescription)}</span>`
+  const grupo = clientStatusGroup(status);
+  const statusClass = grupo.tile;
+  // Texto literal de la operadora bajo el grupo (p. ej. "Ordenada" bajo Activo),
+  // para que el técnico no pierda el matiz. Si no hay descripción, el estado crudo.
+  // Los nombres canónicos (ACTIVA/SUSPENDIDA/TERMINADA/DESCONOCIDA) no aportan
+  // nada bajo su grupo; ORDENADA/PENDIENTE sí (son "Activo" con matiz).
+  const canonico = ['ACTIVA', 'SUSPENDIDA', 'TERMINADA', 'DESCONOCIDA'].includes(String(status).toUpperCase());
+  const literal = (own && own.statusDescription) || (canonico ? '' : status);
+  const descripcion = literal && literal.toUpperCase() !== grupo.label.toUpperCase()
+    ? `<span class="st-sub">${escapeHtml(literal)}</span>`
     : '';
   const lastWo = own && own.lastWorkOrder
     ? `<div class="mini-row">
@@ -793,14 +811,14 @@ function renderStatusFromContract(contract, account) {
   const filas = accounts.map(a => `
       <div class="mini-row">
         <span class="mr-label">${escapeHtml(a.accountNumber)}</span>
-        <span class="mr-value">${escapeHtml(a.contractId || '—')} · ${escapeHtml(a.status || 'DESCONOCIDA')}</span>
+        <span class="mr-value">${escapeHtml(a.contractId || '—')} · ${escapeHtml(clientStatusGroup(a.status).label)}</span>
       </div>`).join('');
 
   return `
     <div class="status-grid">
       <div class="status-tile ${statusClass}">
         <span class="st-label">Estado</span>
-        <span class="st-value">${escapeHtml(status)}</span>
+        <span class="st-value">${escapeHtml(grupo.label)}</span>
         ${descripcion}
       </div>
       <div class="status-tile">
@@ -822,12 +840,30 @@ let _napPanelState = {
   openedAt: null,
   coords: null,      // { latitude, longitude, accuracy } cuando hay GPS
   selectedNap: null, // napRef seleccionado para GPON (napId o napCode)
+  selectedPort: null, // puerto elegido dentro de la NAP GPON (libre o cancelado)
   naps: [],          // array de NAPs cargadas (se guarda al cargar el panel)
   meters: 100,       // radio de búsqueda (100 / 250 / 500)
   maxRows: 5,        // cuántas NAPs mostrar (5 / 10 / 20)
   degraded: null,    // aviso de degradación de la última consulta
   homeCoords: null,  // coordenada del domicilio que trae la orden (si existe)
+  // --- Visita técnica: NAP actual del cliente (GET /accounts/:n/current-nap)
+  // Se consulta UNA vez por apertura del panel (loadNapPanel); los re-render
+  // leen de aquí y nunca vuelven a llamar al backend.
+  currentNap: null,      // respuesta de current-nap (found true/false) o null
+  currentNapError: null, // Error si la consulta falló (red, 502, 503)
+  showNearby: true,      // lista de NAPs cercanas visible ("Cambiar NAP")
 };
+
+// ¿El panel está en modo "visita con NAP del cliente encontrada"?
+function _napIsVisitFound() {
+  const cur = _napPanelState.currentNap;
+  return !!(cur && cur.found && cur.nap);
+}
+
+// napRef de la NAP del cliente (o '' si no hay).
+function _napCurrentRef() {
+  return _napIsVisitFound() ? _napRef(_napPanelState.currentNap.nap) : '';
+}
 
 // Referencia de la NAP para el backend: napId numérico de FSM cuando existe,
 // si no el código de NAP (camino TEC). Contrato §6.
@@ -843,8 +879,21 @@ async function _napPortsCached(scope, napRef) {
   if (!scope._napPortsCache) scope._napPortsCache = {};
   if (scope._napPortsCache[napRef]) return scope._napPortsCache[napRef];
   const data = await WifixAPI.getNapPorts(napRef);
+  _napMarkClientPort(napRef, data);
   scope._napPortsCache[napRef] = data;
   return data;
+}
+
+// Marca en los datos de puertos cuál es el puerto del cliente de la visita
+// (p.isClientPort). Va en el objeto y no en el DOM para que sobreviva a los
+// repintados de celda de _applyPortStatuses.
+function _napMarkClientPort(napRef, data) {
+  if (!data || !Array.isArray(data.ports) || !_napIsVisitFound()) return;
+  if (String(napRef) !== _napCurrentRef()) return;
+  const puerto = _napPanelState.currentNap.portNumber;
+  data.ports.forEach((p) => {
+    p.isClientPort = puerto !== null && puerto !== undefined && String(p.portNumber) === String(puerto);
+  });
 }
 
 // Fórmula de Haversine: distancia en metros entre dos coordenadas.
@@ -887,24 +936,111 @@ function _napDistanceText(nap) {
   return `${d.toFixed(1)} m`;
 }
 
-// Porcentaje de puertos ocupados (0-100).
-function _napOccupancyPct(nap) {
-  if (!nap.totalPorts) return 0;
-  return Math.round((nap.occupiedPorts / nap.totalPorts) * 100);
+// Puertos libres de la NAP según el conteo de la operadora. Se prefiere
+// freePorts; si no viene, total - ocupados. null = no hay total conocido.
+function _napFreePorts(nap) {
+  if (!nap) return null;
+  if (nap.freePorts !== undefined && nap.freePorts !== null && isFinite(nap.freePorts)) {
+    return Math.max(0, Number(nap.freePorts));
+  }
+  if (!nap.totalPorts || !isFinite(nap.totalPorts)) return null;
+  return Math.max(0, Number(nap.totalPorts) - (Number(nap.occupiedPorts) || 0));
 }
 
-// Renderiza la barra visual de ocupación.
+// Color de la NAP — regla BINARIA de Franco, basada solo en el conteo:
+//   'free'    (verde) si hay ≥1 puerto libre  → 7/8 es verde
+//   'full'    (rojo)  si está llena           → 8/8 es rojo, aunque tenga
+//                                               clientes cancelados reutilizables
+//   'unknown' (gris)  si la operadora no dio total ni libres
+// Reutilizable por tarjeta, resumen GPON y (a futuro) marcadores del mapa.
+function _napColorClass(nap) {
+  const free = _napFreePorts(nap);
+  if (free === null) return 'unknown';
+  return free > 0 ? 'free' : 'full';
+}
+
+// Texto corto del estado de la NAP (badge de la tarjeta).
+function _napColorLabel(nap) {
+  const cls = _napColorClass(nap);
+  if (cls === 'free') return 'Con puertos libres';
+  if (cls === 'full') return 'Llena';
+  return 'Sin dato de puertos';
+}
+
+// Texto "x/y ocupados · n libres" (sin porcentaje).
+function _napOccupancyText(nap) {
+  const free = _napFreePorts(nap);
+  if (free === null) return 'Ocupación no disponible';
+  const occ = Number(nap.occupiedPorts) || 0;
+  const total = Number(nap.totalPorts) || (occ + free);
+  return `${occ}/${total} ocupados · ${free} libre${free === 1 ? '' : 's'}`;
+}
+
+// Renderiza la barra visual de ocupación. El ancho es la proporción ocupada;
+// el color es binario (_napColorClass), no escala por porcentaje.
 function _napOccupancyBar(nap) {
-  const pct = _napOccupancyPct(nap);
-  const cls = pct >= 100 ? 'full' : pct >= 75 ? 'high' : pct >= 50 ? 'mid' : 'low';
-  const free = nap.freePorts !== undefined
-    ? nap.freePorts
-    : Math.max(0, (nap.totalPorts || 0) - (nap.occupiedPorts || 0));
+  const cls = _napColorClass(nap);
+  const texto = _napOccupancyText(nap);
+  const total = Number(nap.totalPorts) || 0;
+  const occ = Number(nap.occupiedPorts) || 0;
+  const width = total > 0 ? Math.min(100, Math.round((occ / total) * 100)) : 0;
+  const aria = total > 0
+    ? `role="progressbar" aria-valuenow="${occ}" aria-valuemin="0" aria-valuemax="${total}" aria-valuetext="${escapeHtml(texto)}"`
+    : 'aria-hidden="true"';
   return `
-    <div class="nap-occ-bar-wrap" role="progressbar" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100" aria-label="Ocupación ${pct}%">
-      <div class="nap-occ-bar ${cls}" style="width:${pct}%"></div>
+    <div class="nap-occ-bar-wrap" ${aria}>
+      <div class="nap-occ-bar ${cls}" style="width:${width}%"></div>
     </div>
-    <span class="nap-occ-label">${nap.occupiedPorts}/${nap.totalPorts} ocupados · ${free} libre${free === 1 ? '' : 's'} · ${pct}%</span>`;
+    <span class="nap-occ-label">${escapeHtml(texto)}</span>`;
+}
+
+// Estado de un puerto para la grilla y la selección GPON:
+//   'libre'         → sin cliente
+//   'cancelado'     → cliente con status Cancelado (T): se puede reutilizar
+//   'ocupado'       → cliente Activo/Suspendido (o status no reconocido)
+//   'sin-consultar' → ocupado y todavía sin status (se pide solo por tap)
+function _portState(p) {
+  if (!p || !p.occupied) return 'libre';
+  if (!p.clientStatus) return 'sin-consultar';
+  return clientStatusGroup(p.clientStatus).key === 'cancelado' ? 'cancelado' : 'ocupado';
+}
+
+// Puertos reutilizables (cliente cancelado) de una NAP ya consultada. Solo
+// mira la caché: nunca dispara llamadas a la operadora.
+function _napReusablePorts(scope, napRef) {
+  const data = scope && scope._napPortsCache ? scope._napPortsCache[napRef] : null;
+  if (!data || !Array.isArray(data.ports)) return [];
+  return data.ports.filter(p => _portState(p) === 'cancelado');
+}
+
+// "N puerto(s) reutilizable(s) (cliente cancelado)". Texto plano.
+function _napReuseText(n) {
+  if (!n) return '';
+  return `${n} puerto${n === 1 ? '' : 's'} reutilizable${n === 1 ? '' : 's'} (cliente cancelado)`;
+}
+
+// ¿La NAP trae una coordenada utilizable (mapa y "Cómo llegar")?
+function _napHasCoords(nap) {
+  return !!nap && nap.latitude !== null && nap.longitude !== null &&
+    nap.latitude !== undefined && nap.longitude !== undefined &&
+    isFinite(nap.latitude) && isFinite(nap.longitude);
+}
+
+// Código de la NAP. Si tiene coordenada es un botón que centra el mapa en
+// ella (acceso por teclado al marcador); si no, texto plano.
+function _napNameHtml(nap, ref) {
+  const code = escapeHtml(nap.napCode || '—');
+  if (!_napHasCoords(nap)) return `<span class="nap-name">${code}</span>`;
+  return `<button type="button" class="nap-name nap-name-btn" data-action="nap-focus" data-nap="${escapeHtml(ref)}"
+            aria-label="Ver ${code} en el mapa">${code}</button>`;
+}
+
+// Botón "Cómo llegar" (Google Maps a pie). Solo si la NAP tiene coordenada.
+function _napDirectionsBtnHtml(nap) {
+  if (!_napHasCoords(nap)) return '';
+  return `<button class="add-row-btn nap-directions-btn" type="button" data-action="nap-directions"
+            data-lat="${escapeHtml(nap.latitude)}" data-lng="${escapeHtml(nap.longitude)}"
+            aria-label="Cómo llegar a ${escapeHtml(nap.napCode || 'la NAP')} (abre Google Maps)">Cómo llegar</button>`;
 }
 
 // Renderiza la lista de tarjetas NAP.
@@ -925,32 +1061,51 @@ function _renderNapCards(naps, scope) {
   slot.innerHTML = sorted.map(n => {
     const ref = _napRef(n);
     const isSelected = _napPanelState.selectedNap === ref;
+    const color = _napColorClass(n);
+    const reutilizables = _napReusablePorts(scope, ref).length;
     // "Red de acceso", nunca "nodo": es el puerto de OLT / la tarjeta de CMTS.
     const red = n.networkName
       ? `<span class="nap-network-name"><span class="nap-network-key">Red de acceso</span>${escapeHtml(n.networkName)}</span>`
       : '';
+    const esDelCliente = !!ref && ref === _napCurrentRef();
     return `
-      <div class="nap-card${isSelected ? ' nap-selected' : ''}" data-nap="${escapeHtml(ref)}">
+      <div class="nap-card nap-state-${color}${isSelected ? ' nap-selected' : ''}" data-nap="${escapeHtml(ref)}">
         <div class="nap-head">
-          <span class="nap-name">${escapeHtml(n.napCode || '—')}</span>
-          ${isSelected ? '<span class="nap-selected-badge">GPON seleccionada</span>' : ''}
+          ${_napNameHtml(n, ref)}
+          <span class="nap-badges">
+            <span class="nap-state-badge ${color}">${escapeHtml(_napColorLabel(n))}</span>
+            ${esDelCliente ? '<span class="nap-client-badge">NAP del cliente</span>' : ''}
+            ${isSelected ? '<span class="nap-selected-badge">GPON seleccionada</span>' : ''}
+          </span>
         </div>
         <span class="nap-distance">${_napDistanceText(n)}</span>
         ${red}
         ${_napOccupancyBar(n)}
+        <div class="nap-reuse-note" data-slot="nap-reuse" role="status"${reutilizables ? '' : ' hidden'}>${escapeHtml(_napReuseText(reutilizables))}</div>
         <div class="nap-actions">
           <button class="add-row-btn nap-ports-btn" type="button" data-action="view-ports" data-nap="${escapeHtml(ref)}">Ver puertos</button>
           <button class="add-row-btn nap-gpon-btn" type="button" data-action="select-gpon" data-nap="${escapeHtml(ref)}"
             aria-pressed="${isSelected}">
             ${isSelected ? 'Seleccionada' : 'Seleccionar para GPON'}
           </button>
+          ${_napDirectionsBtnHtml(n)}
         </div>
         <div class="nap-ports-slot" data-ports-for="${escapeHtml(ref)}" data-slot="ports-${escapeHtml(ref)}"></div>
       </div>`;
   }).join('');
 }
 
+// Texto de un puerto elegible para GPON.
+function _gponPortText(p) {
+  return _portState(p) === 'cancelado'
+    ? `Puerto ${pad(p.portNumber)} (reutilizable, cliente cancelado)`
+    : `Puerto ${pad(p.portNumber)} (libre)`;
+}
+
 // Actualiza el bloque resumen de la NAP seleccionada para GPON.
+// Puerto sugerido: el primer libre; si no hay libres y ya se consultaron los
+// status, el primer puerto con cliente Cancelado (reutilizable). El técnico
+// puede elegir cualquier puerto libre o cancelado (_napPanelState.selectedPort).
 async function _renderGponSummary(scope) {
   const summarySlot = scope.querySelector('[data-slot="gpon-summary"]');
   if (!summarySlot) return;
@@ -961,7 +1116,10 @@ async function _renderGponSummary(scope) {
     return;
   }
   summarySlot.hidden = false;
-  summarySlot.innerHTML = `<div class="detail-loading">Obteniendo puerto sugerido…</div>`;
+  // Con caché el repintado es inmediato: no se muestra "cargando" (evita
+  // parpadeo y pérdida de foco al elegir puerto).
+  const enCache = !!(scope._napPortsCache && scope._napPortsCache[napRef]);
+  if (!enCache) summarySlot.innerHTML = `<div class="detail-loading">Obteniendo puerto sugerido…</div>`;
 
   try {
     const data = await _napPortsCached(scope, napRef);
@@ -970,27 +1128,74 @@ async function _renderGponSummary(scope) {
     const napCode = (nap && nap.napCode) || (data && data.napCode) || napRef;
     const dist = nap ? _napDistanceToNap(nap) : null;
     const distTxt = dist !== null ? `${dist.toFixed(1)} m` : '—';
-    const occ = nap ? `${nap.occupiedPorts}/${nap.totalPorts}` : '—';
+    const occ = nap ? _napOccupancyText(nap) : '—';
+    const color = nap ? _napColorClass(nap) : 'unknown';
 
-    // Puerto libre sugerido: primer puerto con occupied=false.
+    const ports = (data && Array.isArray(data.ports)) ? data.ports : [];
+    const libres = ports.filter(p => _portState(p) === 'libre');
+    const reutilizables = ports.filter(p => _portState(p) === 'cancelado');
+    const sinConsultar = ports.filter(p => _portState(p) === 'sin-consultar').length;
+    const elegibles = libres.concat(reutilizables)
+      .sort((a, b) => Number(a.portNumber) - Number(b.portNumber));
+    const sugerido = libres[0] || reutilizables[0] || null;
+
+    // Puerto elegido: el que marcó el técnico si sigue siendo elegible; si no,
+    // el sugerido.
+    let elegido = elegibles.find(p => String(p.portNumber) === String(_napPanelState.selectedPort)) || null;
+    if (!elegido) elegido = sugerido;
+    _napPanelState.selectedPort = elegido ? elegido.portNumber : null;
+
     // Si la operadora no expone el detalle puerto a puerto, se informa el
     // número de puertos libres que sí viene en el listado de NAPs.
-    const freePort = data.ports ? data.ports.find(p => !p.occupied) : null;
     let freeTxt;
-    if (freePort) {
-      freeTxt = `Puerto ${pad(freePort.portNumber)} (libre)`;
+    if (sugerido) {
+      freeTxt = _gponPortText(sugerido);
     } else if (data.detailAvailable === false) {
-      const libres = nap
-        ? (nap.freePorts !== undefined ? nap.freePorts : Math.max(0, nap.totalPorts - nap.occupiedPorts))
-        : null;
-      freeTxt = libres === null
+      const n = nap ? _napFreePorts(nap) : null;
+      freeTxt = n === null
         ? 'Detalle por puerto no disponible'
-        : `${libres} puerto${libres === 1 ? '' : 's'} libre${libres === 1 ? '' : 's'} (sin detalle por puerto)`;
+        : `${n} puerto${n === 1 ? '' : 's'} libre${n === 1 ? '' : 's'} (sin detalle por puerto)`;
+    } else if (sinConsultar > 0) {
+      freeTxt = 'Sin puertos libres. Consulta el estado de los clientes en «Ver puertos» para buscar puertos reutilizables.';
     } else {
-      freeTxt = 'Sin puertos libres disponibles';
+      freeTxt = 'Sin puertos libres ni reutilizables';
     }
+    const sugeridoCls = !sugerido ? ' is-none' : (_portState(sugerido) === 'cancelado' ? ' is-reusable' : '');
 
-    // TODO: a futuro -> enviar selección a API GPON Xtreme (POST .../assign-nap)
+    const reuseRow = reutilizables.length ? `
+        <div class="nap-gpon-summary-row">
+          <span class="nap-gpon-key">Reutilizables</span>
+          <span class="nap-gpon-val nap-gpon-reuse">${escapeHtml(_napReuseText(reutilizables.length))}</span>
+        </div>` : '';
+
+    // Selector de puerto: radios nativos (teclado y lector de pantalla gratis).
+    const picker = elegibles.length ? `
+        <fieldset class="nap-port-picker">
+          <legend class="nap-gpon-key">Elegir puerto</legend>
+          <div class="nap-port-options">
+            ${elegibles.map((p) => {
+              const reuse = _portState(p) === 'cancelado';
+              const checked = !!elegido && String(elegido.portNumber) === String(p.portNumber);
+              return `
+            <label class="nap-port-opt ${reuse ? 'reusable' : 'free'}${checked ? ' is-checked' : ''}">
+              <input type="radio" name="gpon-port" value="${escapeHtml(p.portNumber)}"
+                data-action="gpon-port"${checked ? ' checked' : ''}
+                aria-label="${escapeHtml(_gponPortText(p))}">
+              <span class="nap-port-opt-num" aria-hidden="true">${pad(p.portNumber)}</span>
+              <small aria-hidden="true">${reuse ? 'Cancelado' : 'Libre'}</small>
+            </label>`;
+            }).join('')}
+          </div>
+        </fieldset>` : '';
+
+    // Solo se muestra si el técnico eligió un puerto distinto del sugerido.
+    const elegidoRow = (elegido && elegido !== sugerido) ? `
+        <div class="nap-gpon-summary-row">
+          <span class="nap-gpon-key">Puerto elegido</span>
+          <span class="nap-gpon-val nap-gpon-free-port${_portState(elegido) === 'cancelado' ? ' is-reusable' : ''}">${escapeHtml(_gponPortText(elegido))}</span>
+        </div>` : '';
+
+    // TODO: a futuro -> enviar selección (NAP + puerto) a API GPON Xtreme (POST .../assign-nap)
 
     summarySlot.innerHTML = `
       <div class="nap-gpon-summary">
@@ -1010,16 +1215,51 @@ async function _renderGponSummary(scope) {
         </div>
         <div class="nap-gpon-summary-row">
           <span class="nap-gpon-key">Puertos</span>
-          <span class="nap-gpon-val">${escapeHtml(occ)}</span>
+          <span class="nap-gpon-val"><span class="nap-state-badge ${color}">${escapeHtml(nap ? _napColorLabel(nap) : 'Sin dato de puertos')}</span> ${escapeHtml(occ)}</span>
         </div>
+        ${reuseRow}
         <div class="nap-gpon-summary-row">
           <span class="nap-gpon-key">Puerto sugerido</span>
-          <span class="nap-gpon-val nap-gpon-free-port">${escapeHtml(freeTxt)}</span>
+          <span class="nap-gpon-val nap-gpon-free-port${sugeridoCls}">${escapeHtml(freeTxt)}</span>
         </div>
+        ${elegidoRow}
+        ${picker}
       </div>`;
+
+    summarySlot.querySelectorAll('[data-action="gpon-port"]').forEach((radio) => {
+      radio.addEventListener('change', async () => {
+        if (!radio.checked) return;
+        _napPanelState.selectedPort = radio.value;
+        // Solo repinta desde la caché: elegir puerto no llama a la operadora.
+        await _renderGponSummary(scope);
+        const again = Array.from(summarySlot.querySelectorAll('[data-action="gpon-port"]'))
+          .find(r => r.value === radio.value);
+        if (again) again.focus();
+      });
+    });
   } catch (err) {
     summarySlot.innerHTML = `<div class="detail-error">${escapeHtml(err.message || 'Error al cargar puertos')}</div>`;
   }
+}
+
+// Tras consultar status en la grilla de una NAP: actualiza el aviso de
+// reutilizables de su tarjeta (SIN cambiar el color: la regla es por conteo)
+// y, si es la NAP elegida para GPON, recalcula el puerto sugerido.
+function _napAfterStatuses(slot) {
+  if (!slot || !slot.closest) return;
+  const scope = slot.closest('[data-panel="nap-gpon"]');
+  const napRef = slot.dataset ? slot.dataset.portsFor : null;
+  if (!scope || !napRef) return;
+  const n = _napReusablePorts(scope, napRef).length;
+  const cards = scope.querySelectorAll ? scope.querySelectorAll('.nap-card') : [];
+  cards.forEach((card) => {
+    if (card.dataset.nap !== napRef) return;
+    const note = card.querySelector('[data-slot="nap-reuse"]');
+    if (!note) return;
+    note.textContent = _napReuseText(n);
+    note.hidden = n === 0;
+  });
+  if (_napPanelState.selectedNap === napRef) _renderGponSummary(scope);
 }
 
 // Consulta las NAPs cercanas a la coordenada capturada y pinta las tarjetas.
@@ -1031,9 +1271,12 @@ async function _napFetchAndRender(scope) {
   const coords = _napPanelState.coords;
 
   _napRenderDegradedNote(scope, null);
+  // La distancia de la NAP del cliente depende de la coordenada del técnico.
+  _napRenderCurrent(scope);
 
   if (!coords) {
     slot.innerHTML = `<div class="detail-empty">Captura tu ubicación (GPS o lat/lng manual) para buscar las NAPs del sector.</div>`;
+    _napRenderMap(scope);
     return;
   }
 
@@ -1054,19 +1297,24 @@ async function _napFetchAndRender(scope) {
 
     if (_napPanelState.naps.length === 0) {
       slot.innerHTML = `<div class="detail-empty">No hay NAPs registradas a ${_napPanelState.meters} m de esta coordenada. Prueba con un radio mayor.</div>`;
+      _napRenderMap(scope);
       return;
     }
     // Si la NAP seleccionada ya no está en el resultado, se limpia la selección.
     if (_napPanelState.selectedNap &&
         !_napPanelState.naps.some(n => _napRef(n) === _napPanelState.selectedNap)) {
       _napPanelState.selectedNap = null;
+      _napPanelState.selectedPort = null;
       await _renderGponSummary(scope);
     }
     _renderNapCards(_napPanelState.naps, scope);
     _wireNapCardButtons(scope, _napPanelState.naps);
+    _napRenderMap(scope);
   } catch (err) {
     console.error('[Wifix] NAPs cercanas', err);
     slot.innerHTML = renderPanelError(err, 'No se pudieron consultar las NAPs.');
+    _napPanelState.naps = [];
+    _napRenderMap(scope);
   }
 }
 
@@ -1096,7 +1344,19 @@ function _wireNapPanel(scope) {
     lngInput.value = lng;
     gpsStatus.textContent = `Ubicación capturada (precisión ±${acc != null ? acc.toFixed(0) : '?'}m)`;
     gpsStatus.className = 'nap-gps-status ok';
-    _napFetchAndRender(scope);
+    _napAfterCoordsChange(scope);
+  }
+
+  // Visita con la NAP del cliente y la lista cercana oculta: la coordenada
+  // solo mueve al técnico en el mapa y recalcula la distancia (no se consulta
+  // la operadora). En los demás casos se buscan las NAPs cercanas como antes.
+  function _napAfterCoordsChange(sc) {
+    if (_napIsVisitFound() && !_napPanelState.showNearby) {
+      _napRenderCurrent(sc);
+      _napRenderMap(sc);
+      return;
+    }
+    _napFetchAndRender(sc);
   }
 
   gpsBtn.addEventListener('click', async () => {
@@ -1135,7 +1395,7 @@ function _wireNapPanel(scope) {
     if (!adoptInputCoords()) return;
     gpsStatus.textContent = 'Coordenadas ingresadas manualmente.';
     gpsStatus.className = 'nap-gps-status ok';
-    _napFetchAndRender(scope);
+    _napAfterCoordsChange(scope);
   }
   latInput.addEventListener('change', onManualCoords);
   lngInput.addEventListener('change', onManualCoords);
@@ -1180,6 +1440,54 @@ function _wireNapPanel(scope) {
       _napFetchAndRender(scope);
     });
   }
+
+  // --- "Cambiar NAP" (visita): despliega la búsqueda de NAPs cercanas ------
+  const toggleBtn = scope.querySelector('[data-action="nap-toggle-nearby"]');
+  const nearbyWrap = scope.querySelector('[data-slot="nap-nearby"]');
+  if (toggleBtn && nearbyWrap) {
+    toggleBtn.addEventListener('click', () => {
+      const abrir = !_napPanelState.showNearby;
+      _napPanelState.showNearby = abrir;
+      nearbyWrap.hidden = !abrir;
+      toggleBtn.setAttribute('aria-expanded', abrir ? 'true' : 'false');
+      toggleBtn.textContent = abrir ? 'Ocultar NAPs cercanas' : 'Cambiar NAP';
+      if (!abrir) {
+        _napRenderMap(scope);
+        return;
+      }
+      // Abrir es un gesto explícito: se busca con la coordenada que haya
+      // (GPS, manual o la del domicilio precargada). Solo la primera vez.
+      if (!nearbyWrap.dataset.searched && adoptInputCoords()) {
+        nearbyWrap.dataset.searched = '1';
+        _napFetchAndRender(scope);
+      } else {
+        _napRenderMap(scope);
+      }
+    });
+  }
+
+  // --- Delegación: "Cómo llegar" y centrar mapa desde la tarjeta -----------
+  // Las tarjetas se regeneran con innerHTML: un solo listener en el panel.
+  scope.addEventListener('click', (ev) => {
+    const t = ev.target;
+    if (!t || !t.closest) return;
+    const dir = t.closest('[data-action="nap-directions"]');
+    if (dir) {
+      ev.stopPropagation();
+      _napOpenDirections(dir.dataset.lat, dir.dataset.lng, dir);
+      return;
+    }
+    const foco = t.closest('[data-action="nap-focus"]');
+    if (foco) {
+      _napMapFocus(foco.dataset.nap, true);
+      return;
+    }
+    // Tap en la zona "neutra" de la tarjeta (no en botones ni en la grilla).
+    const card = t.closest('.nap-card');
+    if (card && !t.closest('button, a, input, select, label, .nap-ports-slot')) {
+      _napMapFocus(card.dataset.nap, true);
+    }
+  });
 }
 
 function _wireNapCardButtons(scope, naps) {
@@ -1193,12 +1501,420 @@ function _wireNapCardButtons(scope, naps) {
     btn.parentNode.replaceChild(fresh, btn);
     fresh.addEventListener('click', async (ev) => {
       ev.stopPropagation();
+      if (_napPanelState.selectedNap !== fresh.dataset.nap) _napPanelState.selectedPort = null;
       _napPanelState.selectedNap = fresh.dataset.nap;
       _renderNapCards(naps, scope);
       _wireNapCardButtons(scope, naps);
+      _napMapFocus(fresh.dataset.nap, false);
       await _renderGponSummary(scope);
     });
   });
+}
+
+// ---------------------------------------------------------------------------
+// Visita técnica — NAP actual del cliente (GET /accounts/:n/current-nap)
+// ---------------------------------------------------------------------------
+
+// Texto del aviso cuando no se encontró la NAP del cliente o la consulta falló.
+// Devuelve '' si no corresponde aviso (no es visita o se encontró).
+function _napCurrentNoticeText() {
+  const err = _napPanelState.currentNapError;
+  if (err) {
+    if (err.code === 'NETWORK_ERROR') {
+      return 'Sin conexión con el servidor: no se pudo consultar la NAP del cliente.';
+    }
+    return `No se pudo consultar la NAP del cliente (${err.message || 'error de la operadora'}).`;
+  }
+  const cur = _napPanelState.currentNap;
+  if (!cur || cur.found) return '';
+  if (cur.reason === 'NO_COORDS') return 'El cliente no tiene coordenadas registradas: no se pudo ubicar su NAP.';
+  if (cur.reason === 'NOT_SUPPORTED') return 'La fuente de NAPs de esta operadora no soporta esta consulta.';
+  return 'No se encontró la NAP del cliente en las NAPs cercanas.';
+}
+
+function _napCurrentNoticeHtml() {
+  const txt = _napCurrentNoticeText();
+  if (!txt) return '';
+  return `<div class="nap-current-note" role="status">${escapeHtml(txt)} Se muestran las NAPs cercanas.</div>`;
+}
+
+// Distancia del técnico (GPS/manual) a la NAP del cliente. La que trae
+// current-nap es desde el centro de búsqueda (el domicilio), no desde el técnico.
+function _napDistanceFromTech(nap) {
+  const c = _napPanelState.coords;
+  if (!c || !_napHasCoords(nap)) return null;
+  return _napHaversineMeters(c.latitude, c.longitude, Number(nap.latitude), Number(nap.longitude));
+}
+
+function _napDistanceFromTechText(nap) {
+  const d = _napDistanceFromTech(nap);
+  return d !== null ? `${d.toFixed(1)} m desde tu ubicación` : 'Captura tu ubicación para ver la distancia';
+}
+
+// Tarjeta única "NAP del cliente" (visita técnica con la NAP encontrada).
+function _renderCurrentNapCard() {
+  if (!_napIsVisitFound()) return _napCurrentNoticeHtml();
+  const cur = _napPanelState.currentNap;
+  const n = cur.nap;
+  const ref = _napRef(n);
+  const color = _napColorClass(n);
+  const red = n.networkName
+    ? `<span class="nap-network-name"><span class="nap-network-key">Red de acceso</span>${escapeHtml(n.networkName)}</span>`
+    : '';
+  const tienePuerto = cur.portNumber !== null && cur.portNumber !== undefined;
+  const puerto = tienePuerto
+    ? `<div class="nap-client-port"><span class="nap-client-port-num">Puerto ${escapeHtml(pad(cur.portNumber))}</span> del cliente</div>`
+    : '<div class="nap-client-port is-unknown">Puerto del cliente no informado</div>';
+  const st = cur.clientStatus;
+  const grupo = clientStatusGroup(st ? (st.code || st.name) : null);
+  // Texto literal de la operadora bajo el grupo, si aporta (p. ej. "Suspendido por mora").
+  const literal = st && st.description && String(st.description).toUpperCase() !== grupo.label.toUpperCase()
+    ? ` <span class="nap-client-status-sub">(${escapeHtml(st.description)})</span>` : '';
+  const degraded = cur.degraded && cur.degraded.message
+    ? `<div class="nap-degraded-note" role="status">${escapeHtml(cur.degraded.message)}</div>` : '';
+  const equipo = cur.equipmentId ? `
+        <span class="nap-client-equipment">
+          <span class="nap-client-key">Equipo</span><span class="mono">${escapeHtml(cur.equipmentId)}</span>
+        </span>` : '';
+  return `
+    ${degraded}
+    <div class="nap-card nap-current nap-state-${color}" data-nap="${escapeHtml(ref)}">
+      <div class="nap-head">
+        ${_napNameHtml(n, ref)}
+        <span class="nap-badges">
+          <span class="nap-state-badge ${color}">${escapeHtml(_napColorLabel(n))}</span>
+        </span>
+      </div>
+      <span class="nap-distance" data-slot="nap-current-distance">${escapeHtml(_napDistanceFromTechText(n))}</span>
+      ${red}
+      ${_napOccupancyBar(n)}
+      ${puerto}
+      <div class="nap-client-meta">
+        <span class="nap-client-status ${escapeHtml(grupo.tile)}">
+          <span class="nap-client-key">Cliente</span>${escapeHtml(grupo.label)}${literal}
+        </span>${equipo}
+      </div>
+      <div class="nap-actions">
+        <button class="add-row-btn nap-ports-btn" type="button" data-action="view-ports" data-nap="${escapeHtml(ref)}"
+          aria-expanded="false">Ver puertos</button>
+        ${_napDirectionsBtnHtml(n)}
+      </div>
+      <div class="nap-ports-slot" data-ports-for="${escapeHtml(ref)}" data-slot="ports-${escapeHtml(ref)}"></div>
+    </div>`;
+}
+
+// Actualiza la distancia de la tarjeta del cliente sin regenerarla: así no se
+// pierde la grilla de puertos si ya estaba abierta.
+function _napRenderCurrent(scope) {
+  if (!_napIsVisitFound() || !scope || !scope.querySelector) return;
+  const dist = scope.querySelector('[data-slot="nap-current-distance"]');
+  if (dist) dist.textContent = _napDistanceFromTechText(_napPanelState.currentNap.nap);
+}
+
+// "Ver puertos" de la tarjeta del cliente (misma grilla que la lista).
+function _wireNapCurrentCard(scope) {
+  if (!_napIsVisitFound()) return;
+  wireNapPortsButtons(scope);
+}
+
+// "Cómo llegar": abre Google Maps fuera de la app (ver WifixNative.openDirections).
+async function _napOpenDirections(lat, lng, btn) {
+  try {
+    if (typeof WifixNative !== 'undefined' && WifixNative && WifixNative.openDirections) {
+      await WifixNative.openDirections(lat, lng);
+      return;
+    }
+    const url = `https://www.google.com/maps/dir/?api=1&destination=${Number(lat)},${Number(lng)}&travelmode=walking`;
+    window.open(url, '_blank', 'noopener');
+  } catch (err) {
+    console.error('[Wifix] Cómo llegar', err);
+    if (btn) btn.setAttribute('title', err.message || 'No se pudo abrir la ruta.');
+    alert(err.message || 'No se pudo abrir la ruta.');
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Mapa de NAPs (Leaflet 1.9.4 vendorizado en vendor/leaflet/)
+// ---------------------------------------------------------------------------
+// Tiles públicos de OpenStreetMap: aptos para uso bajo (política de uso de OSM).
+// Si crece el tráfico, cambiar a un proveedor con clave (MapTiler, Carto…):
+// basta con esta URL y la atribución.
+const NAP_MAP_TILE_URL = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
+const NAP_MAP_ATTRIBUTION = '© OpenStreetMap';
+const NAP_MAP_UNAVAILABLE = 'Mapa no disponible sin conexión';
+// Tiles fallidos (sin ninguno cargado) para dar el mapa por caído.
+const NAP_MAP_MAX_TILE_ERRORS = 4;
+
+function _napMapEmptyState() {
+  return {
+    map: null, el: null, layer: null, markers: {}, ro: null,
+    tileErrors: 0, tileLoads: 0, failed: false, scope: null,
+  };
+}
+
+// Una sola instancia por panel. Si el panel se regenera (se reabre Datos del
+// Servicio), el contenedor viejo queda desconectado y la instancia se destruye.
+let _napMap = _napMapEmptyState();
+
+function _napMapDestroy() {
+  try { if (_napMap.ro) _napMap.ro.disconnect(); } catch (_) { /* ignore */ }
+  try { if (_napMap.map) _napMap.map.remove(); } catch (_) { /* ignore */ }
+  _napMap = _napMapEmptyState();
+}
+
+function _napMapLeafletReady() {
+  return typeof L !== 'undefined' && !!L && typeof L.map === 'function';
+}
+
+// Aviso en lugar del mapa. La lista de NAPs sigue funcionando.
+// `failedScope`: recuerda que los tiles de ESTE panel no cargan, para no
+// reintentar en cada repintado.
+function _napMapShowUnavailable(slot, failedScope) {
+  _napMapDestroy();
+  if (failedScope) {
+    _napMap.failed = true;
+    _napMap.scope = failedScope;
+  }
+  if (slot) slot.innerHTML = `<div class="nap-map-unavailable" role="status">${NAP_MAP_UNAVAILABLE}</div>`;
+}
+
+// NAPs a pintar: en visita, la del cliente (+ las cercanas si se desplegó
+// "Cambiar NAP"); en instalación/migración, las cercanas. Sin coordenada se omiten.
+function _napMapNaps() {
+  const out = [];
+  const vistos = {};
+  const add = (n) => {
+    if (!_napHasCoords(n)) return;
+    const ref = _napRef(n);
+    if (vistos[ref]) return;
+    vistos[ref] = true;
+    out.push(n);
+  };
+  const visita = _napIsVisitFound();
+  if (visita) add(_napPanelState.currentNap.nap);
+  if (!visita || _napPanelState.showNearby) (_napPanelState.naps || []).forEach(add);
+  return out;
+}
+
+const _NAP_MAP_HOME_SVG = '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false">' +
+  '<path fill="currentColor" d="M12 3 2 12h3v8h5v-5h4v5h5v-8h3z"/></svg>';
+
+// Contenido del popup de una NAP (todo el texto pasa por escapeHtml).
+function _napMapPopupHtml(n) {
+  const esCliente = _napRef(n) === _napCurrentRef();
+  return `
+    <div class="nap-map-popup">
+      <strong class="nap-map-popup-code">${escapeHtml(n.napCode || '—')}</strong>
+      ${esCliente ? '<span class="nap-client-badge">NAP del cliente</span>' : ''}
+      <span class="nap-map-popup-occ">${escapeHtml(_napOccupancyText(n))}</span>
+      ${_napDirectionsBtnHtml(n)}
+    </div>`;
+}
+
+// Pinta (o repinta) el mapa del panel. Reutiliza la instancia si el
+// contenedor sigue en el DOM; si no, la destruye y crea una nueva.
+function _napRenderMap(scope) {
+  if (!scope || !scope.querySelector) return;
+  const slot = scope.querySelector('[data-slot="nap-map"]');
+  if (!slot) return;
+
+  const offline = typeof navigator !== 'undefined' && !!navigator && navigator.onLine === false;
+  if (!_napMapLeafletReady() || offline || (_napMap.failed && _napMap.scope === scope)) {
+    // Se recuerda el panel para reintentar cuando vuelva la red (_napMapRetry).
+    _napMapShowUnavailable(slot, scope);
+    return;
+  }
+
+  const tech = _napPanelState.coords;
+  const home = _napPanelState.homeCoords;
+  const naps = _napMapNaps();
+  if (!tech && !home && naps.length === 0) {
+    _napMapDestroy();
+    slot.innerHTML = '<div class="nap-map-empty">El mapa aparece al capturar tu ubicación o al buscar NAPs.</div>';
+    return;
+  }
+
+  // ¿Sigue viva la instancia en este mismo contenedor?
+  const viva = !!(_napMap.map && _napMap.el && _napMap.el.isConnected && slot.contains(_napMap.el));
+  if (!viva && !_napMapCreate(scope, slot)) return;
+
+  // Marcadores (se regeneran en cada repintado; la instancia se reutiliza).
+  _napMap.layer.clearLayers();
+  _napMap.markers = {};
+  if (home) {
+    L.marker([home.latitude, home.longitude], {
+      icon: L.divIcon({ className: 'nap-map-home', html: _NAP_MAP_HOME_SVG, iconSize: [28, 28], iconAnchor: [14, 14] }),
+      title: 'Domicilio del cliente', alt: 'Domicilio del cliente', keyboard: false,
+    }).bindTooltip('Domicilio del cliente').addTo(_napMap.layer);
+  }
+  const clienteRef = _napCurrentRef();
+  naps.forEach((n) => {
+    const ref = _napRef(n);
+    const color = _napColorClass(n);
+    const esCliente = !!clienteRef && ref === clienteRef;
+    const seleccionada = ref === _napPanelState.selectedNap;
+    const size = esCliente ? 28 : 22;
+    const etiqueta = `${n.napCode || 'NAP'} · ${_napColorLabel(n)}${esCliente ? ' · NAP del cliente' : ''}`;
+    const m = L.marker([Number(n.latitude), Number(n.longitude)], {
+      icon: L.divIcon({
+        className: `nap-map-pin ${color}${esCliente ? ' is-client' : ''}${seleccionada ? ' is-selected' : ''}`,
+        html: '<span></span>',
+        iconSize: [size, size],
+        iconAnchor: [size / 2, size / 2],
+        popupAnchor: [0, -size / 2],
+      }),
+      title: etiqueta,
+      alt: etiqueta,
+      riseOnHover: true,
+      zIndexOffset: esCliente ? 500 : 0,
+    });
+    m.bindPopup(_napMapPopupHtml(n), { closeButton: true, autoPanPadding: [16, 16] });
+    m.on('click', () => _napFocusCard(scope, ref));
+    m.addTo(_napMap.layer);
+    _napMap.markers[ref] = m;
+  });
+  if (tech) {
+    L.circleMarker([tech.latitude, tech.longitude], {
+      radius: 8, color: '#FFFFFF', weight: 3, fillColor: '#1A73E8', fillOpacity: 1,
+    }).bindTooltip('Tu ubicación').addTo(_napMap.layer);
+  }
+
+  _napMap.map.invalidateSize();
+  _napMapFit();
+}
+
+// Crea la instancia L.map dentro del slot. false si no se pudo.
+function _napMapCreate(scope, slot) {
+  _napMapDestroy();
+  slot.innerHTML = `
+    <div class="nap-map" role="region" aria-label="Mapa de NAPs: tu ubicación, domicilio del cliente y NAPs"></div>
+    <div class="nap-map-legend" aria-hidden="true">
+      <span><span class="nap-map-dot tech"></span>Tú</span>
+      <span><span class="nap-map-dot home"></span>Domicilio</span>
+      <span><span class="nap-map-dot free"></span>Con libres</span>
+      <span><span class="nap-map-dot full"></span>Llena</span>
+      <span><span class="nap-map-dot unknown"></span>Sin dato</span>
+    </div>`;
+  const el = slot.querySelector('.nap-map');
+  let map;
+  try {
+    map = L.map(el, { zoomControl: true, attributionControl: true });
+  } catch (err) {
+    console.error('[Wifix] mapa NAP', err);
+    _napMapShowUnavailable(slot, null);
+    return false;
+  }
+  // Sin el prefijo "Leaflet | " (el crédito obligatorio es el de OSM; Leaflet
+  // queda en vendor/leaflet/LICENSE).
+  if (map.attributionControl && map.attributionControl.setPrefix) map.attributionControl.setPrefix(false);
+  const tiles = L.tileLayer(NAP_MAP_TILE_URL, { maxZoom: 19, attribution: NAP_MAP_ATTRIBUTION });
+  tiles.on('tileload', () => { _napMap.tileLoads++; });
+  tiles.on('tileerror', () => {
+    _napMap.tileErrors++;
+    // Solo se da por caído si NINGÚN tile cargó: un tile suelto que falla
+    // no justifica esconder el mapa.
+    if (_napMap.tileLoads === 0 && _napMap.tileErrors >= NAP_MAP_MAX_TILE_ERRORS && !_napMap.failed) {
+      _napMap.failed = true;
+      // Diferido: destruir el mapa dentro de su propio evento de tile deja
+      // a Leaflet operando sobre una instancia ya removida.
+      setTimeout(() => _napMapShowUnavailable(slot, scope), 0);
+    }
+  });
+  tiles.addTo(map);
+  // "Cómo llegar" del popup: Leaflet corta la propagación del click dentro
+  // del popup (la delegación del panel no lo ve), así que se conecta al abrir.
+  map.on('popupopen', (e) => {
+    const root = e.popup && e.popup.getElement ? e.popup.getElement() : null;
+    const btn = root ? root.querySelector('[data-action="nap-directions"]') : null;
+    if (btn && !btn.dataset.wired) {
+      btn.dataset.wired = '1';
+      btn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        _napOpenDirections(btn.dataset.lat, btn.dataset.lng, btn);
+      });
+    }
+  });
+  _napMap.map = map;
+  _napMap.el = el;
+  _napMap.scope = scope;
+  _napMap.layer = L.layerGroup().addTo(map);
+  // Contenedor oculto/colapsado al crearse (tamaño 0) o que cambia de ancho
+  // (rotación): cuando toma tamaño real se recalcula y se reencuadra.
+  if (typeof ResizeObserver !== 'undefined') {
+    let ultimo = el.clientWidth + 'x' + el.clientHeight;
+    _napMap.ro = new ResizeObserver(() => {
+      const ahora = el.clientWidth + 'x' + el.clientHeight;
+      if (ahora === ultimo) return;
+      const eraCero = /^0x|x0$/.test(ultimo);
+      ultimo = ahora;
+      _napMapInvalidate(eraCero);
+    });
+    _napMap.ro.observe(el);
+  }
+  return true;
+}
+
+// Encuadra todos los puntos (técnico, domicilio y NAPs).
+function _napMapFit() {
+  const map = _napMap.map;
+  if (!map || !_napMap.layer) return;
+  const pts = [];
+  _napMap.layer.eachLayer((ly) => { if (ly.getLatLng) pts.push(ly.getLatLng()); });
+  if (pts.length === 0) return;
+  if (pts.length === 1) {
+    map.setView(pts[0], 18);
+    return;
+  }
+  map.fitBounds(L.latLngBounds(pts), { padding: [28, 28], maxZoom: 18 });
+}
+
+// Recalcula el tamaño (panel recién abierto/expandido). `refit` reencuadra.
+function _napMapInvalidate(refit) {
+  if (_napMap.failed) {
+    _napMapRetry();
+    return;
+  }
+  if (!_napMap.map || !_napMap.el || !_napMap.el.isConnected) return;
+  try {
+    _napMap.map.invalidateSize();
+    if (refit) _napMapFit();
+  } catch (_) { /* contenedor aún sin tamaño */ }
+}
+
+// Reintenta el mapa caído (tiles fallidos / sin red / sin Leaflet) si el panel
+// sigue en pantalla y hay red. Lo disparan el evento `online` y reabrir el panel.
+function _napMapRetry() {
+  const sc = _napMap.scope;
+  if (!_napMap.failed || !sc || !sc.isConnected) return;
+  if (typeof navigator !== 'undefined' && navigator && navigator.onLine === false) return;
+  _napMap.failed = false;
+  _napRenderMap(sc);
+}
+if (typeof window !== 'undefined' && window.addEventListener) {
+  window.addEventListener('online', () => _napMapRetry());
+}
+
+// Tarjeta → mapa: centra en la NAP y (opcional) abre su popup.
+function _napMapFocus(ref, openPopup) {
+  const m = _napMap.markers ? _napMap.markers[ref] : null;
+  if (!m || !_napMap.map) return;
+  _napMap.map.setView(m.getLatLng(), Math.max(_napMap.map.getZoom() || 0, 17));
+  if (openPopup) m.openPopup();
+}
+
+// Mapa → tarjeta: resalta la tarjeta de la NAP y la trae a la vista. Si la
+// NAP está dos veces (tarjeta del cliente y lista), gana la primera visible.
+function _napFocusCard(scope, ref) {
+  if (!scope || !scope.querySelectorAll) return;
+  let objetivo = null;
+  scope.querySelectorAll('.nap-card').forEach((card) => {
+    const es = !objetivo && card.dataset.nap === ref && !card.closest('[hidden]');
+    card.classList.toggle('nap-map-focus', es);
+    if (es) objetivo = card;
+  });
+  if (objetivo && objetivo.scrollIntoView) {
+    objetivo.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
 }
 
 // Renderiza el panel NAP completo (devuelve HTML string + activa lógica tras inserción).
@@ -1235,8 +1951,13 @@ function renderNapPanel() {
     gpsStatusCls = '';
   }
 
+  // Visita técnica con la NAP del cliente encontrada: una sola tarjeta y la
+  // búsqueda por radio queda detrás de "Cambiar NAP". Sin NAP (o con error)
+  // el panel es el mismo de instalaciones, con un aviso arriba.
+  const visita = _napIsVisitFound();
+
   return `
-    <div class="nap-panel" data-panel="nap-gpon">
+    <div class="nap-panel${visita ? ' nap-panel-visit' : ''}" data-panel="nap-gpon">
 
       <!-- 1) Cabecera de tarea -->
       <div class="nap-task-header">
@@ -1269,7 +1990,19 @@ function renderNapPanel() {
         </div>
       </div>
 
-      <!-- 3) Radio de búsqueda y cantidad de resultados -->
+      ${visita ? `
+      <!-- 3) NAP del cliente (visita técnica) -->
+      <div class="nap-section-title">NAP del cliente</div>
+      <div data-slot="nap-map" class="nap-map-slot"></div>
+      <div data-slot="nap-current">${_renderCurrentNapCard()}</div>
+      <button type="button" class="add-row-btn nap-toggle-nearby-btn" data-action="nap-toggle-nearby"
+        aria-expanded="${_napPanelState.showNearby ? 'true' : 'false'}" aria-controls="napNearbySection">
+        ${_napPanelState.showNearby ? 'Ocultar NAPs cercanas' : 'Cambiar NAP'}
+      </button>` : `
+      <div data-slot="nap-current">${_napCurrentNoticeHtml()}</div>`}
+
+      <div class="nap-nearby" id="napNearbySection" data-slot="nap-nearby"${visita && !_napPanelState.showNearby ? ' hidden' : ''}>
+      <!-- 4) Radio de búsqueda y cantidad de resultados -->
       <div class="nap-radius-control">
         <div class="nap-radius-group" role="group" aria-label="Radio de búsqueda">
           <span class="nap-radius-label">Radio</span>
@@ -1288,7 +2021,8 @@ function renderNapPanel() {
         </div>
       </div>
 
-      <!-- 4) Tarjetas de NAPs -->
+      <!-- 5) Mapa + tarjetas de NAPs -->
+      ${visita ? '' : '<div data-slot="nap-map" class="nap-map-slot"></div>'}
       <div class="nap-section-title">NAPs disponibles en el sector</div>
       <div data-slot="nap-degraded" hidden></div>
       <div data-slot="nap-cards">
@@ -1296,8 +2030,9 @@ function renderNapPanel() {
           ? 'Toca «Buscar NAPs» para consultar el sector de la coordenada del domicilio.'
           : 'Captura tu ubicación (GPS o lat/lng manual) para buscar las NAPs del sector.'}</div>
       </div>
+      </div>
 
-      <!-- 5) Bloque resumen GPON -->
+      <!-- 6) Bloque resumen GPON -->
       <div data-slot="gpon-summary" hidden></div>
 
     </div>`;
@@ -1305,11 +2040,22 @@ function renderNapPanel() {
 
 // Wrapper que arma el panel completo (usado en SERVICIO_ITEMS.load).
 // La consulta a la operadora ocurre cuando el técnico captura la coordenada.
+// Secuencia de aperturas del panel NAP: una respuesta tardía de current-nap
+// (p. ej. de la cuenta anterior) no debe pisar el estado del panel vigente.
+let _napLoadSeq = 0;
+
+// Devuelve el HTML del panel, o null si la apertura quedó obsoleta (otra
+// apertura empezó mientras se esperaba la respuesta): el llamador no pinta.
 async function loadNapPanel(cuenta) {
+  const seq = ++_napLoadSeq;
   // Resetear selección y resultados al abrir (se mantienen coords y taskId).
   _napPanelState.selectedNap = null;
+  _napPanelState.selectedPort = null;
   _napPanelState.naps = [];
   _napPanelState.degraded = null;
+  _napPanelState.currentNap = null;
+  _napPanelState.currentNapError = null;
+  _napPanelState.showNearby = true;
   // Coordenada del domicilio: sale del perfil que ya se cargó al confirmar la
   // cuenta. NO se pide de nuevo: cero llamadas extra a la operadora.
   _napPanelState.homeCoords = null;
@@ -1322,6 +2068,23 @@ async function loadNapPanel(cuenta) {
       accuracy: null,
     };
   }
+  // Visitas técnicas: primero la NAP a la que YA está conectado el cliente.
+  // Una sola llamada por apertura del panel: los re-render leen el estado.
+  if (currentCategory === 'visitas' && cuenta) {
+    try {
+      // Sin coordenada del domicilio, el backend no puede ubicar la NAP: si el
+      // técnico ya tiene GPS de una apertura anterior, se usa como centro.
+      const centro = !_napPanelState.homeCoords && _napPanelState.coords ? _napPanelState.coords : null;
+      const res = await WifixAPI.getCurrentNap(cuenta, centro);
+      if (seq !== _napLoadSeq) return null;
+      _napPanelState.currentNap = res;
+    } catch (err) {
+      if (seq !== _napLoadSeq) return null;
+      console.error('[Wifix] NAP actual del cliente', err);
+      _napPanelState.currentNapError = err;
+    }
+    _napPanelState.showNearby = !_napIsVisitFound();
+  }
   return renderNapPanel();
 }
 
@@ -1331,26 +2094,60 @@ function _bootNapPanel(body) {
   const panel = body.querySelector('[data-panel="nap-gpon"]');
   if (!panel) return;
   _wireNapPanel(panel);
-  // Si ya había una coordenada de una apertura anterior, se reconsulta sola.
-  if (_napPanelState.coords) _napFetchAndRender(panel);
+  _wireNapCurrentCard(panel);
+  // Si ya había una coordenada de una apertura anterior, se reconsulta sola
+  // (salvo en visita con la lista cercana oculta: ahí no hace falta).
+  if (_napPanelState.coords && _napPanelState.showNearby) {
+    const wrap = panel.querySelector('[data-slot="nap-nearby"]');
+    if (wrap && wrap.dataset) wrap.dataset.searched = '1';
+    _napFetchAndRender(panel);
+  } else {
+    _napRenderMap(panel);
+  }
 }
 
-// Celda de puerto. Tres estados visuales:
-//   libre · ocupado con estado conocido (A/S/T/O/P) · ocupado sin consultar.
+// Celda de puerto. Cuatro estados visuales (ver _portState):
+//   libre (verde) · cancelado (verde, "reutilizable") · ocupado activo o
+//   suspendido (rojo) · ocupado sin consultar (gris punteado).
 // El estado del cliente NO llega en este paso (contrato §6): los ocupados
 // vienen con clientStatus null + statusPending true hasta que el técnico pida
 // la consulta explícitamente.
 function _renderPortCell(p) {
-  const pendiente = !!p.occupied && !p.clientStatus;
-  const cls = !p.occupied ? 'free' : (pendiente ? 'busy pending' : 'busy');
+  const estado = _portState(p);
   const cuenta = p.clientAccountNumber ? String(p.clientAccountNumber) : '';
+  const grupo = p.clientStatus ? clientStatusGroup(p.clientStatus) : null;
+  const base = 'Puerto ' + pad(p.portNumber);
+  let cls;
   let title;
-  if (!p.occupied) title = 'Puerto ' + pad(p.portNumber) + ' · libre';
-  else if (pendiente) title = 'Puerto ' + pad(p.portNumber) + ' · ' + (cuenta || 'ocupado') + ' · estado sin consultar';
-  else title = 'Puerto ' + pad(p.portNumber) + ' · ' + (cuenta || 'ocupado') + ' · ' + p.clientStatus;
-  const marca = p.clientStatus
-    ? '<small>' + escapeHtml(p.clientStatus) + '</small>'
-    : (pendiente ? '<small aria-hidden="true">·</small>' : '');
+  let marca;
+  if (estado === 'libre') {
+    cls = 'free';
+    title = base + ' · libre';
+    marca = '';
+  } else if (estado === 'sin-consultar') {
+    cls = 'busy pending';
+    title = base + ' · ' + (cuenta || 'ocupado') + ' · estado sin consultar';
+    if (p.statusError) title += ' · ' + p.statusError;
+    marca = '<small aria-hidden="true">·</small>';
+  } else if (estado === 'cancelado') {
+    cls = 'free reusable';
+    title = base + ' · ' + (cuenta || 'ocupado') + ' · Cancelado · reutilizable';
+    marca = '<small aria-hidden="true">' + escapeHtml(grupo.short) + '</small>';
+  } else {
+    cls = 'busy status-' + grupo.key;
+    title = base + ' · ' + (cuenta || 'ocupado') + ' · ' + grupo.label;
+    marca = '<small aria-hidden="true">' + escapeHtml(grupo.short) + '</small>';
+  }
+  // Visita técnica: el puerto del cliente se resalta (marco) sin perder su color.
+  if (p.isClientPort) {
+    cls += ' client-port';
+    title += ' · puerto del cliente';
+  }
+  // Texto literal de la operadora (p. ej. "Ordenada" dentro de Activo).
+  if (grupo && p.clientStatusDescription &&
+      String(p.clientStatusDescription).toUpperCase() !== grupo.label.toUpperCase()) {
+    title += ' (' + p.clientStatusDescription + ')';
+  }
   // El color por sí solo no comunica: el estado va también en el texto
   // accesible de la celda para lectores de pantalla.
   return `
@@ -1358,8 +2155,21 @@ function _renderPortCell(p) {
           ${cuenta ? `data-account="${escapeHtml(cuenta)}"` : ''}
           ${p.equipmentId ? `data-equipment="${escapeHtml(p.equipmentId)}"` : ''}
           title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}">
-          ${pad(p.portNumber)}${marca}
+          <span aria-hidden="true">${pad(p.portNumber)}</span>${marca}
         </div>`;
+}
+
+// Cuentas distintas con status aún sin consultar. Se calcula desde los puertos
+// (no desde statusFanOut.pendingAccounts) porque la grilla se re-pinta desde la
+// caché y ese contador del servidor queda desactualizado tras consultar.
+function _portsPendingAccounts(ports) {
+  const vistas = {};
+  (ports || []).forEach((p) => {
+    if (p && p.occupied && p.statusPending !== false && !p.clientStatus && p.clientAccountNumber) {
+      vistas[String(p.clientAccountNumber)] = true;
+    }
+  });
+  return Object.keys(vistas).length;
 }
 
 function renderPortsTable(napPorts) {
@@ -1370,7 +2180,7 @@ function renderPortsTable(napPorts) {
     return `<div class="detail-empty port-note">${escapeHtml(note)}</div>`;
   }
   const fanOut = napPorts.statusFanOut || { supported: false, pendingAccounts: 0, batchLimit: 12 };
-  const pendientes = Number(fanOut.pendingAccounts) || 0;
+  const pendientes = _portsPendingAccounts(napPorts.ports);
   // El botón es la ÚNICA vía para consultar estados: nunca se dispara solo.
   const accionEstados = (fanOut.supported && pendientes > 0)
     ? `
@@ -1388,44 +2198,65 @@ function renderPortsTable(napPorts) {
     </div>
     <div class="port-legend">
       <span><span class="dot free"></span>Libre</span>
-      <span><span class="dot busy"></span>Ocupado (estado conocido)</span>
-      <span><span class="dot pending"></span>Ocupado, estado sin consultar</span>
+      <span><span class="dot reusable"></span>Cancelado (reutilizable)</span>
+      <span><span class="dot busy"></span>Ocupado (activo o suspendido)</span>
+      <span><span class="dot pending"></span>Sin consultar</span>
+      ${napPorts.ports.some(p => p.isClientPort) ? '<span><span class="dot client"></span>Puerto del cliente</span>' : ''}
     </div>
     ${accionEstados}`;
 }
 
 // Repinta las celdas con el estado que devolvió la operadora. Las cuentas que
 // fallaron quedan en el estado neutro con el mensaje de error en el title.
+// Primero se actualiza el objeto en memoria (es el mismo de la caché de
+// puertos) y luego cada celda se vuelve a generar con _renderPortCell, así la
+// grilla y el resumen GPON leen siempre la misma fuente.
 function _applyPortStatuses(slot, items, portsData) {
+  const ports = (portsData && Array.isArray(portsData.ports)) ? portsData.ports : [];
   (items || []).forEach((item) => {
     if (!item || !item.accountNumber) return;
     const cuenta = String(item.accountNumber);
+    ports.forEach((p) => {
+      if (!p.clientAccountNumber || String(p.clientAccountNumber) !== cuenta) return;
+      if (item.error) {
+        p.statusError = item.error;
+        return;
+      }
+      p.clientStatus = item.statusCode || item.status || null;
+      p.clientStatusDescription = item.statusDescription || null;
+      p.statusError = null;
+      p.statusPending = false;
+    });
     const celdas = slot.querySelectorAll('.port-cell[data-account]');
     celdas.forEach((cell) => {
       if (cell.dataset.account !== cuenta) return;
-      const numero = cell.dataset.port || '';
-      if (item.error) {
-        // Queda en el estado neutro: el error va en el texto de la celda.
-        cell.title = `Puerto ${pad(numero)} · ${cuenta} · ${item.error}`;
-        cell.setAttribute('aria-label', cell.title);
+      const p = ports.find(x => String(x.portNumber) === String(cell.dataset.port));
+      if (p) {
+        cell.outerHTML = _renderPortCell(p);
         return;
       }
-      const code = item.statusCode || '';
-      cell.classList.remove('pending');
-      cell.innerHTML = `${pad(numero)}${code ? '<small>' + escapeHtml(code) + '</small>' : ''}`;
-      const desc = item.statusDescription ? ` (${item.statusDescription})` : '';
-      cell.title = `Puerto ${pad(numero)} · ${cuenta} · ${item.status || code || '—'}${desc}`;
+      // Sin objeto en memoria (no debería pasar): solo se anota el error/estado.
+      const numero = cell.dataset.port || '';
+      const txt = item.error || clientStatusGroup(item.statusCode || item.status).label;
+      cell.title = `Puerto ${pad(numero)} · ${cuenta} · ${txt}`;
       cell.setAttribute('aria-label', cell.title);
     });
-    // Mantener el objeto en memoria alineado con lo que se ve en pantalla.
-    if (portsData && Array.isArray(portsData.ports) && !item.error) {
-      portsData.ports.forEach((p) => {
-        if (p.clientAccountNumber && String(p.clientAccountNumber) === cuenta) {
-          p.clientStatus = item.statusCode || null;
-          p.statusPending = false;
-        }
-      });
-    }
+  });
+  _napSyncTwinGrids(slot, portsData);
+}
+
+// La misma NAP puede estar abierta dos veces (tarjeta "NAP del cliente" y la
+// lista de "Cambiar NAP"): las demás grillas cargadas de esa NAP se regeneran
+// desde el mismo objeto de puertos para que no queden desactualizadas.
+function _napSyncTwinGrids(slot, portsData) {
+  if (!slot || !slot.closest || !slot.dataset) return;
+  const scope = slot.closest('[data-panel="nap-gpon"]');
+  const napRef = slot.dataset.portsFor;
+  if (!scope || !napRef || !scope.querySelectorAll) return;
+  scope.querySelectorAll('.nap-ports-slot').forEach((other) => {
+    if (other === slot || other.dataset.portsFor !== napRef || other.dataset.loaded !== '1') return;
+    other.innerHTML = renderPortsTable(portsData);
+    _wirePortStatusButton(other, portsData);
   });
 }
 
@@ -1464,6 +2295,8 @@ function _wirePortStatusButton(slot, portsData) {
         resueltas += Number(res && res.resolved) || 0;
         fallidas += Number(res && res.failed) || 0;
       }
+      // Aviso de reutilizables en la tarjeta + recálculo del sugerido GPON.
+      _napAfterStatuses(slot);
       btn.remove();
       if (note) {
         note.textContent = fallidas > 0
@@ -2717,7 +3550,13 @@ function openDatosServicio() {
     head.addEventListener('click', async () => {
       const wasOpen = node.classList.contains('open');
       node.classList.toggle('open');
-      if (!wasOpen && !body.dataset.loaded) {
+      // Reabrir el panel NAP ya cargado: el mapa estuvo dentro de un
+      // contenedor colapsado; tras la transición (0.35s) se recalcula.
+      if (!wasOpen && id === 'naps' && body.dataset.loaded) {
+        setTimeout(() => _napMapInvalidate(true), 380);
+      }
+      // abrir→cerrar→abrir antes de que responda: no se lanza una 2ª carga.
+      if (!wasOpen && !body.dataset.loaded && !body.dataset.loading) {
         // Al abrir el panel NAP por primera vez, asegurar que el taskId
         // se genere fresco (renderNapPanel lo crea si es null).
         if (id === 'naps') {
@@ -2725,8 +3564,14 @@ function openDatosServicio() {
           _napPanelState.openedAt = null;
         }
         body.innerHTML = `<div class="detail-loading">Cargando…</div>`;
+        body.dataset.loading = '1';
         try {
-          body.innerHTML = await item.load(cuenta);
+          const html = await item.load(cuenta);
+          // Respuesta obsoleta (loadNapPanel → null) o Datos del Servicio se
+          // regeneró mientras tanto (body fuera del DOM): no se pinta ni se
+          // arranca nada, así no se toca el estado ni el mapa del panel vivo.
+          if (html === null || !body.isConnected) return;
+          body.innerHTML = html;
           body.dataset.loaded = '1';
           if (id === 'naps') {
             _bootNapPanel(body);
@@ -2738,7 +3583,9 @@ function openDatosServicio() {
           }
         } catch (err) {
           console.error('[Wifix] servicio', id, err);
-          body.innerHTML = renderPanelError(err, 'Error al cargar');
+          if (body.isConnected) body.innerHTML = renderPanelError(err, 'Error al cargar');
+        } finally {
+          delete body.dataset.loading;
         }
       }
     });
@@ -2768,6 +3615,10 @@ function _findPortsSlot(scope, btn, napRef) {
 
 function wireNapPortsButtons(scope) {
   scope.querySelectorAll('[data-action="view-ports"]').forEach((btn) => {
+    // Idempotente: la tarjeta "NAP del cliente" sobrevive a cada búsqueda y
+    // no debe acumular listeners (dos toggles = no se abre nunca).
+    if (btn.dataset.wired === '1') return;
+    btn.dataset.wired = '1';
     btn.addEventListener('click', async (ev) => {
       ev.stopPropagation();
       const napRef = btn.dataset.nap;

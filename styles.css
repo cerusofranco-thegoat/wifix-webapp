@@ -1616,6 +1616,8 @@ body {
   aspect-ratio: 1;
   border-radius: 4px;
   display: flex;
+  flex-direction: column;
+  line-height: 1;
   align-items: center;
   justify-content: center;
   font-size: 9px;
@@ -1635,7 +1637,8 @@ body {
 }
 .port-legend {
   display: flex;
-  gap: 14px;
+  flex-wrap: wrap;
+  gap: 6px 14px;
   margin-top: 10px;
   font-size: 10px;
   letter-spacing: 0.8px;
@@ -1652,6 +1655,12 @@ body {
 }
 .port-legend .dot.free { background: var(--success-fill); }
 .port-legend .dot.busy { background: var(--error-fill); }
+/* Cliente cancelado: el puerto se puede reutilizar -> verde con borde marcado. */
+.port-cell.free.reusable { border: 2px solid var(--success-border); }
+.port-legend .dot.reusable {
+  background: var(--success-bg);
+  border: 2px solid var(--success-border);
+}
 
 .event-item {
   display: flex;
@@ -3070,10 +3079,11 @@ body.console-fullscreen-open { overflow: hidden; }
   border-radius: var(--radius-pill);
   transition: width 0.3s ease;
 }
-.nap-occ-bar.low  { background: var(--success-fill); }
-.nap-occ-bar.mid  { background: var(--brand-accent); }
-.nap-occ-bar.high { background: var(--error-fill); }
-.nap-occ-bar.full { background: var(--error-fill); }
+/* Color BINARIO (regla de Franco): verde si queda >=1 puerto libre, rojo si
+   esta llena. Gris solo si la operadora no dio el conteo. */
+.nap-occ-bar.free    { background: var(--success-fill); }
+.nap-occ-bar.full    { background: var(--error-fill); }
+.nap-occ-bar.unknown { background: var(--gray-400); }
 .nap-occ-label {
   font-size: 10px;
   color: var(--text-secondary);
@@ -3160,6 +3170,97 @@ body.console-fullscreen-open { overflow: hidden; }
   font-family: var(--font-sans);
   font-size: 11px;
   font-weight: 700;
+}
+.nap-gpon-free-port.is-none {
+  color: var(--text-secondary);
+  font-weight: 400;
+}
+.nap-gpon-reuse {
+  color: var(--success-text);
+  font-size: 11px;
+}
+
+/* ---- Estado binario de la NAP en la tarjeta (verde libre / rojo llena) ---
+   Va DESPUES de .nap-card.nap-selected para que el borde izquierdo de color
+   se mantenga aunque la tarjeta este seleccionada para GPON. */
+.nap-card.nap-state-free    { border-left: 4px solid var(--success-fill); }
+.nap-card.nap-state-full    { border-left: 4px solid var(--error-fill); }
+.nap-card.nap-state-unknown { border-left: 4px solid var(--gray-400); }
+.nap-badges {
+  display: inline-flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 4px;
+}
+.nap-state-badge {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  border-radius: var(--radius-pill);
+  padding: 2px 8px;
+  white-space: nowrap;
+}
+.nap-state-badge.free    { background: var(--success-bg); color: var(--success-text); border: 1px solid var(--success-border); }
+.nap-state-badge.full    { background: var(--error-bg);   color: var(--error-text);   border: 1px solid var(--error-border); }
+.nap-state-badge.unknown { background: var(--gray-50);    color: var(--gray-700);     border: 1px solid var(--gray-200); }
+.nap-reuse-note {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--success-text);
+  background: var(--success-bg);
+  border: 1px dashed var(--success-border);
+  border-radius: var(--radius-btn);
+  padding: 4px 8px;
+  margin: 2px 0 4px;
+}
+.nap-reuse-note[hidden] { display: none; }
+
+/* ---- Selector de puerto para GPON (libres + cancelados) ----------------*/
+.nap-port-picker {
+  border: 0;
+  margin: 8px 0 0;
+  padding: 0;
+  min-width: 0;
+}
+.nap-port-picker legend { padding: 0; margin-bottom: 6px; }
+.nap-port-options {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+}
+.nap-port-opt {
+  position: relative;
+  min-height: 44px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-btn);
+  background: var(--success-bg);
+  border: 1px solid var(--success-border);
+  color: var(--success-text);
+  font-family: var(--font-sans);
+  cursor: pointer;
+}
+.nap-port-opt.reusable { border: 2px solid var(--success-border); }
+.nap-port-opt input {
+  position: absolute;
+  opacity: 0;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+}
+.nap-port-opt-num { font-size: 13px; font-weight: 700; }
+.nap-port-opt small { font-size: 8.5px; letter-spacing: 0.6px; text-transform: uppercase; }
+.nap-port-opt.is-checked {
+  background: var(--brand-primary);
+  border-color: var(--brand-primary);
+  color: var(--text-on-brand);
+}
+.nap-port-opt:focus-within {
+  outline: 2px solid var(--brand-primary);
+  outline-offset: 2px;
 }
 
 /* ==========================================================================
@@ -3816,3 +3917,195 @@ body.console-fullscreen-open { overflow: hidden; }
   line-height: 1.5;
   color: var(--text-primary);
 }
+
+/* ==========================================================================
+   Mapa de NAPs (Leaflet 1.9.4 vendorizado) y visita técnica: NAP del cliente
+   ========================================================================== */
+.nap-map-slot { margin-top: 10px; }
+.nap-map {
+  width: 100%;
+  height: clamp(220px, 34vh, 260px);
+  border-radius: var(--radius-btn);
+  border: 1px solid var(--border-lavender);
+  background: var(--gray-100);
+  overflow: hidden;
+  /* Contiene los z-index internos de Leaflet (400-1000): sin esto el mapa
+     se pinta encima de cabeceras fijas y modales de la app. */
+  position: relative;
+  z-index: 0;
+  isolation: isolate;
+}
+.nap-map.leaflet-container { font-family: var(--font-sans); }
+.nap-map .leaflet-control-attribution { font-size: 10px; }
+.nap-map .leaflet-control-zoom a { width: 36px; height: 36px; line-height: 36px; }
+.nap-map-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin: 6px 0 8px;
+  font-size: 10px;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+.nap-map-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  margin-right: 4px;
+  vertical-align: middle;
+}
+.nap-map-dot.tech    { background: #1A73E8; }
+.nap-map-dot.home    { background: var(--brand-primary); }
+.nap-map-dot.free    { background: #2E9E3A; }
+.nap-map-dot.full    { background: #D92D35; }
+.nap-map-dot.unknown { background: var(--gray-500); }
+.nap-map-unavailable,
+.nap-map-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 64px;
+  padding: 10px 12px;
+  border-radius: var(--radius-btn);
+  border: 1px dashed var(--gray-200);
+  background: var(--gray-50);
+  color: var(--gray-700);
+  font-size: 11.5px;
+  text-align: center;
+}
+
+/* Marcadores (divIcon). El color es el mismo criterio binario de la tarjeta. */
+.nap-map-pin > span {
+  display: block;
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
+  border-radius: 50%;
+  border: 3px solid #FFFFFF;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+}
+.nap-map-pin.free > span    { background: #2E9E3A; }
+.nap-map-pin.full > span    { background: #D92D35; }
+.nap-map-pin.unknown > span { background: var(--gray-500); }
+.nap-map-pin.is-client > span { outline: 3px solid var(--brand-primary); outline-offset: 1px; }
+.nap-map-pin.is-selected > span { outline: 3px dashed var(--brand-primary); outline-offset: 1px; }
+.nap-map-pin:focus-visible { outline: 3px solid var(--brand-accent); border-radius: 50%; }
+.nap-map-home {
+  display: flex !important;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  border-radius: 50%;
+  background: var(--brand-primary);
+  color: var(--text-on-brand);
+  border: 2px solid #FFFFFF;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+}
+.nap-map-popup {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  min-width: 150px;
+  font-family: var(--font-sans);
+}
+.nap-map-popup-code { font-size: 13px; color: var(--brand-primary); letter-spacing: 0.8px; }
+.nap-map-popup-occ { font-size: 12px; color: var(--text-primary); }
+.nap-map-popup .nap-directions-btn { margin-top: 4px; }
+
+/* "Cómo llegar": CTA amarillo (fondo) con texto morado profundo. */
+.nap-directions-btn {
+  min-height: 36px;
+  background: var(--brand-accent);
+  border: 1px solid var(--brand-accent);
+  color: var(--brand-ink);
+  font-weight: 700;
+}
+.nap-directions-btn:hover { background: var(--brand-accent); filter: brightness(0.96); }
+
+/* Código de NAP como botón: centra el mapa en la NAP (acceso por teclado). */
+.nap-name-btn {
+  background: none;
+  border: 0;
+  padding: 4px 0;
+  min-height: 32px;
+  cursor: pointer;
+  text-align: left;
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+}
+.nap-name-btn:focus-visible { outline: 2px solid var(--brand-primary); outline-offset: 2px; }
+.nap-card.nap-map-focus { box-shadow: 0 0 0 3px var(--brand-primary); }
+
+.nap-client-badge {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  background: var(--brand-primary);
+  color: var(--text-on-brand);
+  border-radius: var(--radius-pill);
+  padding: 2px 8px;
+  white-space: nowrap;
+}
+
+/* Tarjeta única "NAP del cliente" */
+.nap-card.nap-current { background: var(--surface-card); }
+.nap-client-port {
+  margin-top: 8px;
+  padding: 6px 10px;
+  border-radius: var(--radius-btn);
+  background: var(--surface-tint);
+  border: 1px solid var(--brand-primary);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+.nap-client-port.is-unknown { border-style: dashed; color: var(--text-secondary); }
+.nap-client-port-num {
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  color: var(--brand-primary);
+}
+.nap-client-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  margin-top: 8px;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+.nap-client-key {
+  display: block;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+.nap-client-status.ok    { color: var(--success-text); }
+.nap-client-status.warn  { color: var(--warn-text); }
+.nap-client-status.fail  { color: var(--error-text); }
+.nap-client-status.muted { color: var(--text-primary); }
+.nap-client-status-sub { font-weight: 500; color: var(--text-secondary); }
+.nap-client-equipment .mono { font-family: ui-monospace, 'Roboto Mono', monospace; letter-spacing: 0.3px; }
+.nap-current-note {
+  margin: 8px 0 2px;
+  padding: 8px 10px;
+  border-radius: var(--radius-btn);
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--warn-text);
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-border);
+}
+.nap-toggle-nearby-btn { display: block; width: 100%; min-height: 40px; margin-top: 10px; }
+.nap-nearby[hidden] { display: none; }
+
+/* Puerto del cliente en la grilla: marco morado, conserva su color de estado. */
+.port-cell.client-port { outline: 3px solid var(--brand-primary); outline-offset: 1px; }
+.port-legend .dot.client { background: transparent; border: 2px solid var(--brand-primary); }

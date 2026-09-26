@@ -1,0 +1,2 @@
+Leaflet 1.9.4 — copiado de npm pack leaflet@1.9.4 (dist/leaflet.js, dist/leaflet.css, dist/images). Licencia BSD-2-Clause en LICENSE.
+Nota: se quitó la línea sourceMappingURL de leaflet.js (el .map no se empaqueta en el APK).
