@@ -344,6 +344,29 @@
       brand: mockBrand(),
     };
   }
+  // Whitelist de clientes reales de Xtrim (GET /accounts/:n/whitelist), modo
+  // demo. enforce:true como en producción: cualquier otra cuenta queda fuera.
+  //   35070291 → ACTIVO (importada)
+  //   40123456 → ACTIVO (agregada a mano: source EXTRA)
+  //   35070288 → SUSPENDIDO por mora (accessType 'Mora Dia 31')
+  const MOCK_WHITELIST = {
+    '35070291': { source: 'IMPORT', status: 'ACTIVO', city: 'GUAYAQUIL', node: 'GYE-NORTE-04',
+      businessType: 'RESIDENCIAL', accountType: 'POSTPAGO', accessType: 'Normal' },
+    '40123456': { source: 'EXTRA', status: 'ACTIVO', city: 'QUITO', node: 'UIO-CENTRO-02',
+      businessType: 'RESIDENCIAL', accountType: 'POSTPAGO', accessType: 'Normal' },
+    '35070288': { source: 'IMPORT', status: 'SUSPENDIDO', city: 'GUAYAQUIL', node: 'GYE-SUR-11',
+      businessType: 'RESIDENCIAL', accountType: 'POSTPAGO', accessType: 'Mora Dia 31' },
+  };
+  const MOCK_WHITELIST_IMPORTED_AT = '2026-09-24T14:30:00.000Z';
+  function mockWhitelist(accountNumber) {
+    const cuenta = String(accountNumber || '').trim();
+    const hit = MOCK_WHITELIST[cuenta];
+    if (!hit) {
+      return { accountNumber: cuenta, listed: false, importedAt: MOCK_WHITELIST_IMPORTED_AT, enforce: true };
+    }
+    return Object.assign({ accountNumber: cuenta, listed: true }, hit,
+      { importedAt: MOCK_WHITELIST_IMPORTED_AT, enforce: true });
+  }
   // Estado de la integración. No toca la operadora: es información local.
   function mockFsmHealth() {
     const in24h = new Date(Date.now() + 86400000).toISOString();
@@ -1016,6 +1039,19 @@
       }
       await delay(80);
       return mockContractStatus(accountNumber);
+    },
+
+    // ---- Whitelist de clientes Xtrim ---------------------------------------
+    // Cuerpo tal cual del backend: { accountNumber, listed: true|false|null,
+    // source?, status?, city?, node?, businessType?, accountType?, accessType?,
+    // importedAt, enforce, reason? }. Los errores (404 de un backend sin la
+    // ruta, 5xx, red) se propagan: app.js los trata como "no se pudo validar".
+    async checkWhitelist(accountNumber) {
+      if (this.useRealApi) {
+        return fetchJson('GET', '/accounts/' + encodeURIComponent(accountNumber) + '/whitelist');
+      }
+      await delay(60);
+      return mockWhitelist(accountNumber);
     },
 
     // ---- Integración FSM ---------------------------------------------------

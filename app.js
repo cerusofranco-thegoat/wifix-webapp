@@ -296,6 +296,8 @@ backBtn.addEventListener('click', () => {
 const accountInput = document.getElementById('accountInput');
 const clearAccount = document.getElementById('clearAccount');
 const inputWrap = accountInput.closest('.input-wrap');
+// Línea de la whitelist de Xtrim bajo el feedback de Confirmar cuenta.
+const confirmAccountWhitelist = document.getElementById('confirmAccountWhitelist');
 
 // Cache del perfil validado. Se invalida al cambiar el número de cuenta.
 let validatedProfile = null;
@@ -318,6 +320,16 @@ function invalidateAccountCache() {
     feedback.textContent = '';
     feedback.className = 'confirm-account-feedback';
   }
+  clearWhitelistLine();
+  accountInput.removeAttribute('aria-invalid');
+  accountInput.removeAttribute('aria-describedby');
+}
+
+function clearWhitelistLine() {
+  if (!confirmAccountWhitelist) return;
+  confirmAccountWhitelist.innerHTML = '';
+  confirmAccountWhitelist.className = 'confirm-account-whitelist';
+  confirmAccountWhitelist.hidden = true;
 }
 
 // Solo se habilitan las tarjetas del módulo actual: las ocultas siguen
@@ -364,64 +376,215 @@ applyModuleVisibility();
 const confirmAccountBtn = document.getElementById('confirmAccount');
 const confirmAccountFeedback = document.getElementById('confirmAccountFeedback');
 
-confirmAccountBtn.addEventListener('click', async () => {
+confirmAccountBtn.addEventListener('click', () => { confirmAccountFlow(); });
+
+// Confirma la cuenta: perfil de la operadora + whitelist de Xtrim EN PARALELO.
+// La whitelist se resuelve primero (es local del backend, rápida); si bloquea,
+// no se espera al perfil. Si no bloquea, el flujo sigue exactamente como antes
+// (incluido el modo limitado ante 503/red) y se agrega la línea de whitelist.
+async function confirmAccountFlow() {
   const cuenta = currentAccount();
   if (!cuenta) {
     confirmAccountFeedback.textContent = 'Ingresá el número de cuenta.';
     confirmAccountFeedback.className = 'confirm-account-feedback error';
     return;
   }
+  const category = currentCategory;
 
   confirmAccountBtn.disabled = true;
   confirmAccountBtn.textContent = 'Validando…';
   confirmAccountFeedback.textContent = '';
   confirmAccountFeedback.className = 'confirm-account-feedback';
+  clearWhitelistLine();
+  accountInput.removeAttribute('aria-invalid');
+  accountInput.removeAttribute('aria-describedby');
+
+  const whitelistPromise = fetchWhitelist(cuenta);
+  const profilePromise = WifixAPI.getClientProfile(cuenta);
+  // Si la whitelist bloquea, nadie espera al perfil: que su rechazo no quede
+  // como "unhandled rejection" en consola.
+  profilePromise.catch(() => {});
 
   try {
-    const profile = await WifixAPI.getClientProfile(cuenta);
-    validatedProfile = profile;
-    validatedAccount = cuenta;
-
-    const subGrid = subscreen.querySelector('.sub-grid');
-    if (subGrid) subGrid.classList.add('account-confirmed');
-    enableSubCards();
-
-    confirmAccountFeedback.textContent = `Cuenta confirmada — ${profile.fullName || '—'}`;
-    confirmAccountFeedback.className = 'confirm-account-feedback success';
-
-    // Estado del cliente: UNA sola llamada adicional. Si falla no invalida la
-    // confirmación — el técnico ya tiene el nombre y puede seguir trabajando.
-    try {
-      const contract = await WifixAPI.getContractStatus(cuenta);
-      const accounts = (contract && Array.isArray(contract.accounts)) ? contract.accounts : [];
-      const own = accounts.find(a => a.accountNumber === cuenta) || accounts[0] || null;
-      const estado = own && own.status ? own.status : '—';
-      confirmAccountFeedback.textContent =
-        `Cuenta confirmada — ${profile.fullName || '—'} · ${estado}`;
-    } catch (statusErr) {
-      console.warn('[Wifix] contract-status en confirmación:', statusErr);
-      confirmAccountFeedback.textContent =
-        `Cuenta confirmada — ${profile.fullName || '—'} · —`;
+    const wl = whitelistOutcome(await whitelistPromise, category);
+    if (wl.block) {
+      blockAccountConfirmation(cuenta, wl.body);
+      return;
     }
-  } catch (err) {
-    console.error('[Wifix] confirm-account:', err);
-    if (isUpstreamOrNetworkFailure(err)) {
-      // La operadora (o la red) no responde, pero eso NO es culpa de la cuenta:
-      // Herramientas y Equipos Retirados no dependen de la operadora y tienen
-      // que funcionar igual. Se confirma en modo limitado y se avisa en amarillo.
-      confirmAccountInLimitedMode(cuenta, err);
-    } else {
-      // 404 / cuenta inexistente / credenciales: sí es un error real, no se
-      // habilita nada.
-      invalidateAccountCache();
-      confirmAccountFeedback.textContent = err.message || 'No se pudo validar la cuenta.';
-      confirmAccountFeedback.className = 'confirm-account-feedback error';
+
+    try {
+      const profile = await profilePromise;
+      validatedProfile = profile;
+      validatedAccount = cuenta;
+
+      const subGrid = subscreen.querySelector('.sub-grid');
+      if (subGrid) subGrid.classList.add('account-confirmed');
+      enableSubCards();
+
+      confirmAccountFeedback.textContent = `Cuenta confirmada — ${profile.fullName || '—'}`;
+      confirmAccountFeedback.className = 'confirm-account-feedback success';
+      renderWhitelistLine(wl, cuenta);
+
+      // Estado del cliente: UNA sola llamada adicional. Si falla no invalida la
+      // confirmación — el técnico ya tiene el nombre y puede seguir trabajando.
+      try {
+        const contract = await WifixAPI.getContractStatus(cuenta);
+        const accounts = (contract && Array.isArray(contract.accounts)) ? contract.accounts : [];
+        const own = accounts.find(a => a.accountNumber === cuenta) || accounts[0] || null;
+        const estado = own && own.status ? own.status : '—';
+        confirmAccountFeedback.textContent =
+          `Cuenta confirmada — ${profile.fullName || '—'} · ${estado}`;
+      } catch (statusErr) {
+        console.warn('[Wifix] contract-status en confirmación:', statusErr);
+        confirmAccountFeedback.textContent =
+          `Cuenta confirmada — ${profile.fullName || '—'} · —`;
+      }
+    } catch (err) {
+      console.error('[Wifix] confirm-account:', err);
+      if (isUpstreamOrNetworkFailure(err)) {
+        // La operadora (o la red) no responde, pero eso NO es culpa de la cuenta:
+        // Herramientas y Equipos Retirados no dependen de la operadora y tienen
+        // que funcionar igual. Se confirma en modo limitado y se avisa en amarillo.
+        confirmAccountInLimitedMode(cuenta, err);
+        renderWhitelistLine(wl, cuenta);
+      } else {
+        // 404 / cuenta inexistente / credenciales: sí es un error real, no se
+        // habilita nada.
+        invalidateAccountCache();
+        confirmAccountFeedback.textContent = err.message || 'No se pudo validar la cuenta.';
+        confirmAccountFeedback.className = 'confirm-account-feedback error';
+      }
     }
   } finally {
     confirmAccountBtn.disabled = false;
     confirmAccountBtn.textContent = 'Confirmar cuenta';
   }
-});
+}
+
+// === Whitelist de clientes Xtrim =============================================
+// GET /accounts/:n/whitelist. Cache por cuenta durante la sesión: re-renderizar
+// o re-confirmar la misma cuenta no repite la llamada (se guarda la promesa, así
+// dos clics seguidos tampoco duplican). Solo se cachea una respuesta con
+// veredicto (listed true/false): un error, un 404 de backend viejo o la lista
+// vacía (listed:null) se descartan para poder reintentar en la próxima.
+const WHITELIST_CACHE_TTL_MS = 15 * 60 * 1000;
+const whitelistCache = new Map();
+
+function fetchWhitelist(cuenta) {
+  const hit = whitelistCache.get(cuenta);
+  if (hit && Date.now() - hit.at < WHITELIST_CACHE_TTL_MS) return hit.promise;
+
+  const promise = Promise.resolve()
+    .then(() => WifixAPI.checkWhitelist(cuenta))
+    .then((body) => {
+      const data = body || {};
+      if (data.listed !== true && data.listed !== false) whitelistCache.delete(cuenta);
+      return { ok: true, body: data };
+    })
+    .catch((err) => {
+      console.warn('[Wifix] whitelist:', err);
+      whitelistCache.delete(cuenta);
+      return { ok: false, error: err };
+    });
+  whitelistCache.set(cuenta, { promise, at: Date.now() });
+  return promise;
+}
+
+// Traduce la respuesta a lo que ve el técnico. Pura (sin DOM) para el smoke.
+//   listed            → chip "Cliente Xtrim · <estado>", continúa
+//   blocked           → no está y enforce:true: NO se confirma
+//   not-listed        → no está y enforce:false: aviso, continúa
+//   not-listed-cancel → no está, pero en Cancelaciones es lo esperable: info
+//   unknown           → lista vacía / 404 / 5xx / red: aviso discreto, continúa
+function whitelistOutcome(result, category) {
+  if (!result || !result.ok) return { kind: 'unknown', block: false, body: null };
+  const b = result.body || {};
+  if (b.listed === true) return { kind: 'listed', block: false, body: b };
+  if (b.listed === false) {
+    // Los clientes cancelados salen de la base: en Cancelaciones NUNCA se bloquea.
+    if (category === 'cancelaciones') return { kind: 'not-listed-cancel', block: false, body: b };
+    if (b.enforce === true) return { kind: 'blocked', block: true, body: b };
+    return { kind: 'not-listed', block: false, body: b };
+  }
+  return { kind: 'unknown', block: false, body: b };
+}
+
+// Fecha/hora de Ecuador continental (UTC-5 fijo, sin horario de verano). Se
+// calcula a mano para no depender de los datos de zona horaria del WebView.
+function formatDateEcuador(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return String(iso);
+  const ec = new Date(d.getTime() - 5 * 3600000);
+  return `${pad(ec.getUTCDate())}/${pad(ec.getUTCMonth() + 1)}/${ec.getUTCFullYear()} ` +
+    `${pad(ec.getUTCHours())}:${pad(ec.getUTCMinutes())}`;
+}
+
+function whitelistNotListedMessage(cuenta, body) {
+  const fecha = formatDateEcuador(body && body.importedAt);
+  const actualizada = fecha ? ` (actualizada al ${fecha})` : '';
+  return `La cuenta ${cuenta} no está en la base de clientes de Xtrim${actualizada}. Verifica el número.`;
+}
+
+// 'Mora Dia 31', 'MORA 60'… El resto de tipos de acceso no se muestra.
+function whitelistMora(body) {
+  const acc = body && body.accessType ? String(body.accessType).trim() : '';
+  return /^mora/i.test(acc) ? acc : '';
+}
+
+// HTML de la línea de whitelist (sin DOM, para el smoke).
+function whitelistLineHtml(wl, cuenta) {
+  if (wl.kind === 'listed') {
+    const b = wl.body;
+    const grupo = clientStatusGroup(b.status);
+    // ORDENADO/PENDIENTE cuentan como Activo: se conserva el matiz entre paréntesis.
+    const literal = String(b.status || '').trim().toUpperCase();
+    const matiz = (literal === 'ORDENADO' || literal === 'PENDIENTE')
+      ? ` (${literal.charAt(0)}${literal.slice(1).toLowerCase()})` : '';
+    const mora = whitelistMora(b);
+    const partes = [
+      `<span class="wl-chip ${grupo.tile}">Cliente Xtrim · ${escapeHtml(grupo.label + matiz)}</span>`,
+    ];
+    if (b.city) partes.push(`<span class="wl-meta">${escapeHtml(b.city)}</span>`);
+    if (mora) partes.push(`<span class="wl-mora">${escapeHtml(mora)}</span>`);
+    return partes.join('');
+  }
+  if (wl.kind === 'not-listed') {
+    return `<span class="wl-text">${escapeHtml(whitelistNotListedMessage(cuenta, wl.body))}</span>`;
+  }
+  if (wl.kind === 'not-listed-cancel') {
+    return `<span class="wl-text">La cuenta ${escapeHtml(cuenta)} no figura en la base de clientes activos de Xtrim — es lo esperable en una cancelación.</span>`;
+  }
+  return '<span class="wl-text">No se pudo validar contra la base de clientes.</span>';
+}
+
+const WHITELIST_LINE_CLASS = {
+  listed: 'is-listed',
+  'not-listed': 'is-warning',
+  'not-listed-cancel': 'is-info',
+  unknown: 'is-muted',
+};
+
+function renderWhitelistLine(wl, cuenta) {
+  if (!confirmAccountWhitelist || !wl || wl.block) return;
+  confirmAccountWhitelist.innerHTML = whitelistLineHtml(wl, cuenta);
+  confirmAccountWhitelist.className =
+    `confirm-account-whitelist ${WHITELIST_LINE_CLASS[wl.kind] || 'is-muted'}`;
+  confirmAccountWhitelist.hidden = false;
+}
+
+// La cuenta no está en la base de Xtrim y el backend exige la lista: no se
+// confirma nada. El mensaje va en el feedback (role="alert") y el foco se
+// queda en el campo de cuenta, marcado como inválido, para corregir el número.
+function blockAccountConfirmation(cuenta, body) {
+  invalidateAccountCache();
+  confirmAccountFeedback.textContent = whitelistNotListedMessage(cuenta, body);
+  confirmAccountFeedback.className = 'confirm-account-feedback error';
+  accountInput.setAttribute('aria-invalid', 'true');
+  accountInput.setAttribute('aria-describedby', 'confirmAccountFeedback');
+  // preventScroll: el campo ya está a la vista; que el foco no desplace el marco.
+  accountInput.focus({ preventScroll: true });
+}
 
 // ¿El fallo es de la integración/infra (operadora caída, backend caído, sin red)
 // y no de la cuenta? En ese caso la app sigue usable en modo limitado.
@@ -772,7 +935,9 @@ const CLIENT_STATUS_GROUPS = {
 const CLIENT_STATUS_TO_GROUP = {
   A: 'activo', O: 'activo', P: 'activo',
   ACTIVA: 'activo', ORDENADA: 'activo', PENDIENTE: 'activo',
-  S: 'suspendido', SUSPENDIDA: 'suspendido',
+  // La whitelist de Xtrim (GET /accounts/:n/whitelist) usa el masculino.
+  ACTIVO: 'activo', ORDENADO: 'activo',
+  S: 'suspendido', SUSPENDIDA: 'suspendido', SUSPENDIDO: 'suspendido',
   T: 'cancelado', TERMINADA: 'cancelado',
 };
 

@@ -1083,6 +1083,11 @@ body {
   border-color: var(--brand-primary);
   box-shadow: 0 0 0 3px var(--surface-tint);
 }
+/* Cuenta rechazada por la whitelist: el borde refuerza el mensaje de error. */
+.input-wrap:has(input[aria-invalid="true"]) {
+  border-color: var(--error-border);
+  box-shadow: 0 0 0 3px var(--error-bg);
+}
 .input-icon {
   display: flex;
   color: var(--brand-primary);
@@ -1193,6 +1198,77 @@ body {
   font-weight: 500;
   font-size: 12.5px;
   letter-spacing: 0.2px;
+}
+
+/* Whitelist de clientes Xtrim: línea bajo el feedback de Confirmar cuenta.
+   Chip con el grupo de estado (verde Activo / ámbar Suspendido) + ciudad + mora. */
+.confirm-account-whitelist {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.4;
+  letter-spacing: 0.2px;
+  padding: 0 2px;
+}
+.confirm-account-whitelist[hidden] { display: none; }
+.confirm-account-whitelist .wl-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--gray-200);
+  background: var(--gray-50);
+  color: var(--gray-700);
+  font-weight: 600;
+  font-size: 12px;
+}
+.confirm-account-whitelist .wl-chip.ok {
+  background: var(--success-bg);
+  border-color: var(--success-border);
+  color: var(--success-text);
+}
+.confirm-account-whitelist .wl-chip.warn {
+  background: var(--warn-bg);
+  border-color: var(--warn-border);
+  color: var(--warn-text);
+}
+.confirm-account-whitelist .wl-chip.fail {
+  background: var(--error-bg);
+  border-color: var(--error-border);
+  color: var(--error-text);
+}
+.confirm-account-whitelist .wl-meta {
+  color: var(--gray-600);
+  font-weight: 500;
+}
+.confirm-account-whitelist .wl-mora {
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-border);
+  color: var(--warn-text);
+  font-weight: 600;
+}
+.confirm-account-whitelist.is-warning {
+  padding: 8px 12px;
+  border-radius: var(--radius-btn);
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-border);
+  color: var(--warn-text);
+  font-weight: 500;
+}
+.confirm-account-whitelist.is-info {
+  padding: 8px 12px;
+  border-radius: var(--radius-btn);
+  background: var(--surface-tint);
+  border: 1px solid var(--border-lavender);
+  color: var(--brand-deep);
+}
+.confirm-account-whitelist.is-muted {
+  color: var(--gray-600);
 }
 
 /* Estado visual: cuenta confirmada — las tarjetas pasan de atenuadas a activas */

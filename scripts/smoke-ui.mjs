@@ -1091,6 +1091,188 @@ console.log('\n== Sin chip de marca ==');
     !servicioListEl.innerHTML.includes('brand-chip') && !/>\s*Marca\s*</.test(servicioListEl.innerHTML));
 }
 
+console.log('\n== Whitelist de clientes Xtrim en Confirmar cuenta ==');
+{
+  const api = ctx.WifixAPI;
+  const input = vm.runInContext('accountInput', ctx);
+  const feedback = vm.runInContext('confirmAccountFeedback', ctx);
+  const line = vm.runInContext('confirmAccountWhitelist', ctx);
+  const cache = vm.runInContext('whitelistCache', ctx);
+  const attrs = {};
+  let focused = 0;
+  input.setAttribute = (k, v) => { attrs[k] = String(v); };
+  input.removeAttribute = (k) => { delete attrs[k]; };
+  input.getAttribute = (k) => (k in attrs ? attrs[k] : null);
+  input.focus = () => { focused += 1; };
+
+  // Los fallos simulados loguean warn/error a propósito: se silencian acá.
+  const origWarn = console.warn;
+  const origError = console.error;
+  console.warn = () => {};
+  console.error = () => {};
+  const origCheck = api.checkWhitelist;
+  const origProfile = api.getClientProfile;
+  let calls = 0;
+
+  // Confirma `cuenta` en `mod`. `impl` reemplaza a checkWhitelist (null = mock).
+  async function confirmWith(cuenta, mod, impl, opts = {}) {
+    ctx.selectModule(mod);
+    input.value = cuenta;
+    ctx.invalidateAccountCache();
+    if (!opts.keepCache) cache.clear();
+    focused = 0;
+    calls = 0;
+    api.checkWhitelist = async function (n) {
+      calls += 1;
+      return impl ? impl(n) : origCheck.call(api, n);
+    };
+    await ctx.confirmAccountFlow();
+    return {
+      feedback: feedback.textContent,
+      feedbackClass: feedback.className,
+      line: line.innerHTML,
+      lineClass: line.className,
+      lineHidden: line.hidden,
+      validated: vm.runInContext('validatedAccount', ctx),
+      calls,
+      focused,
+      invalid: attrs['aria-invalid'] || null,
+    };
+  }
+
+  check('mock whitelist: 35070291 ACTIVO / 40123456 EXTRA / 35070288 mora / resto fuera', await (async () => {
+    const a = await origCheck.call(api, '35070291');
+    const b = await origCheck.call(api, '40123456');
+    const c = await origCheck.call(api, '35070288');
+    const d = await origCheck.call(api, '99999999');
+    return a.listed === true && a.status === 'ACTIVO' && a.enforce === true
+      && b.listed === true && b.source === 'EXTRA'
+      && c.status === 'SUSPENDIDO' && /^Mora/.test(c.accessType)
+      && d.listed === false && d.enforce === true && !!d.importedAt;
+  })());
+
+  const activo = await confirmWith('35070291', 'instalaciones', null);
+  check('listed activo: confirma la cuenta', activo.validated === '35070291'
+    && activo.feedbackClass.includes('success'), activo.feedback);
+  check('listed activo: chip verde "Cliente Xtrim · Activo" + ciudad',
+    activo.line.includes('wl-chip ok') && activo.line.includes('Cliente Xtrim · Activo')
+    && activo.line.includes('GUAYAQUIL') && !activo.lineHidden, activo.line);
+  check('listed activo: sin mora si accessType no es "Mora…"', !activo.line.includes('wl-mora'));
+  check('listed activo: una sola llamada a la whitelist', activo.calls === 1, String(activo.calls));
+
+  const susp = await confirmWith('35070288', 'visitas', null);
+  check('listed suspendido: confirma igual', susp.validated === '35070288');
+  check('listed suspendido: chip ámbar + mora visible',
+    susp.line.includes('wl-chip warn') && susp.line.includes('Cliente Xtrim · Suspendido')
+    && susp.line.includes('wl-mora') && susp.line.includes('Mora Dia 31'), susp.line);
+
+  const ordenado = await confirmWith('11110000', 'instalaciones', (n) => ({
+    accountNumber: n, listed: true, source: 'IMPORT', status: 'ORDENADO', city: 'QUITO',
+    accessType: 'Normal', importedAt: '2026-09-24T14:30:00.000Z', enforce: true,
+  }));
+  check('listed ORDENADO cuenta como Activo (con el matiz)',
+    ordenado.line.includes('wl-chip ok') && ordenado.line.includes('Activo (Ordenado)'), ordenado.line);
+
+  const bloq = await confirmWith('99999999', 'instalaciones', null);
+  check('no listed + enforce: NO confirma', bloq.validated === null);
+  check('no listed + enforce: mensaje con cuenta y fecha en hora Ecuador',
+    bloq.feedback === 'La cuenta 99999999 no está en la base de clientes de Xtrim (actualizada al 24/09/2026 09:30). Verifica el número.'
+    && bloq.feedbackClass.includes('error'), bloq.feedback);
+  check('no listed + enforce: el mensaje va en el contenedor role="alert"',
+    /id="confirmAccountFeedback"[^>]*role="alert"|role="alert"[^>]*id="confirmAccountFeedback"/
+      .test(readFileSync(base + 'index.html', 'utf8')));
+  check('no listed + enforce: foco en el campo de cuenta marcado aria-invalid',
+    bloq.focused === 1 && bloq.invalid === 'true', `focus=${bloq.focused} invalid=${bloq.invalid}`);
+  check('no listed + enforce: sin línea de whitelist aparte', bloq.lineHidden === true);
+  let profileCalls = 0;
+  api.getClientProfile = async function (n) { profileCalls += 1; return origProfile.call(api, n); };
+  const bloq2 = await confirmWith('99999999', 'migraciones', null);
+  api.getClientProfile = origProfile;
+  check('no listed + enforce: también bloquea en Migraciones', bloq2.validated === null);
+  check('el perfil se pide en paralelo (no espera a la whitelist)', profileCalls === 1);
+
+  const cancel = await confirmWith('99999999', 'cancelaciones', null);
+  check('no listed en Cancelaciones: NO bloquea', cancel.validated === '99999999'
+    && cancel.feedbackClass.includes('success'), cancel.feedback);
+  check('no listed en Cancelaciones: aviso informativo', cancel.lineClass.includes('is-info')
+    && cancel.line.includes('cancelación') && cancel.focused === 0 && cancel.invalid === null, cancel.line);
+
+  const soft = await confirmWith('99999999', 'instalaciones', (n) => ({
+    accountNumber: n, listed: false, importedAt: '2026-09-24T14:30:00.000Z', enforce: false,
+  }));
+  check('no listed + enforce:false: avisa pero confirma', soft.validated === '99999999'
+    && soft.lineClass.includes('is-warning') && soft.line.includes('no está en la base de clientes de Xtrim'),
+    soft.line);
+
+  const empty = await confirmWith('99999999', 'instalaciones', (n) => ({
+    accountNumber: n, listed: null, reason: 'WHITELIST_EMPTY', importedAt: null, enforce: false,
+  }));
+  check('lista vacía: no bloquea y avisa discreto', empty.validated === '99999999'
+    && empty.lineClass.includes('is-muted') && empty.line.includes('No se pudo validar contra la base de clientes'));
+  check('lista vacía: no se cachea (se reintenta en la próxima)', !cache.has('99999999'));
+
+  const e404 = await confirmWith('99999999', 'instalaciones', () => {
+    const e = new Error('Not Found'); e.code = 'HTTP_404'; throw e;
+  });
+  check('404 (backend sin la ruta): no bloquea', e404.validated === '99999999'
+    && e404.line.includes('No se pudo validar'));
+
+  const eRed = await confirmWith('99999999', 'instalaciones', () => {
+    const e = new Error('Sin red'); e.code = 'NETWORK_ERROR'; throw e;
+  });
+  check('error de red: no bloquea', eRed.validated === '99999999' && eRed.line.includes('No se pudo validar'));
+
+  // Modo limitado (503 de la operadora) intacto + whitelist en paralelo.
+  api.getClientProfile = async () => { const e = new Error('Operadora caída'); e.code = 'HTTP_503'; throw e; };
+  const lim = await confirmWith('35070291', 'instalaciones', null);
+  const limErr = await confirmWith('99999998', 'instalaciones', () => { throw new Error('500'); });
+  const limBloq = await confirmWith('99999997', 'instalaciones', null);
+  api.getClientProfile = origProfile;
+  check('503 + listed: modo limitado intacto y chip visible',
+    lim.validated === '35070291' && lim.feedback.includes('modo limitado') && lim.line.includes('Cliente Xtrim'));
+  check('503 + whitelist caída: modo limitado, sin bloqueo',
+    limErr.validated === '99999998' && limErr.feedback.includes('modo limitado') && limErr.line.includes('No se pudo validar'));
+  check('503 + no listed enforce: la whitelist bloquea igual', limBloq.validated === null
+    && limBloq.feedback.includes('no está en la base de clientes'));
+
+  // Cache por cuenta: re-confirmar y re-renderizar no repite la llamada.
+  await confirmWith('35070291', 'instalaciones', null);
+  const again = await confirmWith('35070291', 'instalaciones', null, { keepCache: true });
+  check('re-confirmar la misma cuenta usa la cache (0 llamadas nuevas)', again.calls === 0
+    && again.line.includes('Cliente Xtrim'), String(again.calls));
+  ctx.renderWhitelistLine(ctx.whitelistOutcome({ ok: true, body: { listed: true, status: 'ACTIVO' } }, 'instalaciones'), '35070291');
+  check('re-renderizar no llama a la whitelist', calls === 0);
+  check('dos confirmaciones simultáneas: una sola llamada', await (async () => {
+    cache.clear();
+    let n = 0;
+    api.checkWhitelist = async (c) => { n += 1; return origCheck.call(api, c); };
+    input.value = '40123456';
+    await Promise.all([ctx.confirmAccountFlow(), ctx.confirmAccountFlow()]);
+    return n === 1;
+  })());
+
+  api.checkWhitelist = origCheck;
+  // Ruta real: GET /accounts/:n/whitelist y 404 → "no se pudo validar".
+  const origFetch = ctx.fetch;
+  let pedido = null;
+  ctx.fetch = async (url, init) => { pedido = { url, init }; return { ok: false, status: 404, json: async () => null }; };
+  api.useRealApi = true;
+  const real = await api.checkWhitelist('35070291').then(() => 'ok', (e) => e.code);
+  api.useRealApi = false;
+  ctx.fetch = origFetch;
+  check('API real: GET /accounts/:n/whitelist y 404 se propaga como error',
+    pedido && pedido.init.method === 'GET' && /\/accounts\/35070291\/whitelist$/.test(pedido.url) && real === 'HTTP_404',
+    pedido && pedido.url);
+
+  api.checkWhitelist = origCheck;
+  cache.clear();
+  console.warn = origWarn;
+  console.error = origError;
+  input.value = '';
+  ctx.invalidateAccountCache();
+  ctx.selectModule('instalaciones');
+}
+
 console.log('\n== Prohibiciones del contrato ==');
 const fuentes = ['api.js', 'app.js'].map((f) => readFileSync(new URL('../' + f, import.meta.url), 'utf8'));
 check('la webapp nunca envía withStatus',
