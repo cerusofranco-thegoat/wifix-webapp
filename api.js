@@ -308,7 +308,38 @@
   function mockWorkOrderId(seed) {
     return 'ORDER/' + (424900 + (seed || 0)) + '/2026';
   }
+  // Cuentas mock sin identidad en FSM (contrato client-profile con FSM en vivo):
+  //   50000001 → FSM no devolvió nada: identidad null + degraded FSM_NO_DATA
+  //   50000002 → igual, pero el nombre sale de la whitelist (sources WHITELIST)
+  const MOCK_FSM_NO_DATA = {
+    '50000001': { fullName: null, nameSource: 'NONE',
+      message: 'Sin datos en FSM para esta cuenta.' },
+    '50000002': { fullName: 'MARIA FERNANDA ZAMBRANO LOOR', nameSource: 'WHITELIST',
+      message: 'Sin datos en FSM para esta cuenta; nombre tomado de la base de clientes Xtrim.' },
+  };
+  function mockClientProfileNoFsm(accountNumber, hit) {
+    return {
+      accountNumber: accountNumber,
+      fullName: hit.fullName,
+      address: null,
+      phones: null,
+      email: null,
+      planName: 'Wifix Hogar 200',
+      contractedDownloadMbps: 200,
+      contractedUploadMbps: 100,
+      latitude: null,
+      longitude: null,
+      sources: {
+        fullName: hit.nameSource, address: 'NONE', phones: 'NONE', email: 'NONE',
+        latitude: 'NONE', longitude: 'NONE',
+        planName: 'MOCK', contractedDownloadMbps: 'MOCK', contractedUploadMbps: 'MOCK',
+      },
+      degraded: { reason: 'FSM_NO_DATA', message: hit.message },
+    };
+  }
   function mockClientProfile(accountNumber) {
+    const sinFsm = MOCK_FSM_NO_DATA[String(accountNumber || '').trim()];
+    if (sinFsm) return mockClientProfileNoFsm(String(accountNumber).trim(), sinFsm);
     return {
       accountNumber: accountNumber,
       fullName: 'Cliente Mock Apellido Apellido',
@@ -356,6 +387,11 @@
       businessType: 'RESIDENCIAL', accountType: 'POSTPAGO', accessType: 'Normal' },
     '35070288': { source: 'IMPORT', status: 'SUSPENDIDO', city: 'GUAYAQUIL', node: 'GYE-SUR-11',
       businessType: 'RESIDENCIAL', accountType: 'POSTPAGO', accessType: 'Mora Dia 31' },
+    // Sin identidad en FSM (ver MOCK_FSM_NO_DATA): sí están en la base de Xtrim.
+    '50000001': { source: 'IMPORT', status: 'ACTIVO', city: 'MANTA', node: 'MTA-01',
+      businessType: 'RESIDENCIAL', accountType: 'POSTPAGO', accessType: 'Normal' },
+    '50000002': { source: 'IMPORT', status: 'ACTIVO', city: 'PORTOVIEJO', node: 'PTV-03',
+      businessType: 'RESIDENCIAL', accountType: 'POSTPAGO', accessType: 'Normal' },
   };
   const MOCK_WHITELIST_IMPORTED_AT = '2026-09-24T14:30:00.000Z';
   function mockWhitelist(accountNumber) {
@@ -490,10 +526,16 @@
   function mockCurrentNap(accountNumber, coords) {
     const cuenta = String(accountNumber);
     const home = mockClientProfile(cuenta);
-    const center = coords && isFinite(coords.latitude) && isFinite(coords.longitude)
-      ? coords
-      : { latitude: home.latitude, longitude: home.longitude };
+    const conCoords = !!(coords && isFinite(coords.latitude) && isFinite(coords.longitude));
     const base = { accountNumber: cuenta, brand: mockBrand() };
+    // Sin coordenada del domicilio ni del técnico, como el backend: NO_COORDS.
+    if (!conCoords && (typeof home.latitude !== 'number' || typeof home.longitude !== 'number')) {
+      return Object.assign(base, {
+        found: false, nap: null, portNumber: null, equipmentId: null,
+        clientStatus: null, searchedNaps: 0, reason: 'NO_COORDS',
+      });
+    }
+    const center = conCoords ? coords : { latitude: home.latitude, longitude: home.longitude };
     const hit = MOCK_CURRENT_NAPS[cuenta];
     if (!hit) {
       return Object.assign(base, {

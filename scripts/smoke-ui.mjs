@@ -1273,6 +1273,97 @@ console.log('\n== Whitelist de clientes Xtrim en Confirmar cuenta ==');
   ctx.selectModule('instalaciones');
 }
 
+console.log('\n== Identidad del cliente con FSM sin datos (client-profile) ==');
+{
+  const api = ctx.WifixAPI;
+  const detail = vm.runInContext('detailList', ctx);
+  const sinFsm = await api.getClientProfile('50000001');
+  const conWl = await api.getClientProfile('50000002');
+  const normal = await api.getClientProfile('35070291');
+
+  check('mock 50000001: identidad null + degraded FSM_NO_DATA',
+    ['fullName', 'address', 'phones', 'email', 'latitude', 'longitude'].every((k) => sinFsm[k] === null)
+    && sinFsm.degraded && sinFsm.degraded.reason === 'FSM_NO_DATA' && sinFsm.sources.fullName === 'NONE');
+  check('mock 50000002: nombre de la whitelist',
+    conWl.fullName && conWl.sources.fullName === 'WHITELIST' && conWl.address === null
+    && /base de clientes Xtrim/.test(conWl.degraded.message));
+
+  ctx.renderClientProfile(sinFsm, '50000001');
+  const hSin = detail.innerHTML;
+  check('Datos Personales sin FSM: HTML balanceado', balanced(hSin) === null, balanced(hSin));
+  check('Datos Personales sin FSM: "Sin datos en FSM" en nombre, dirección, teléfonos y correo',
+    (hSin.match(/class="no-fsm-data">Sin datos en FSM</g) || []).length === 4);
+  check('Datos Personales sin FSM: sin "undefined", "null" ni guion vacío en identidad',
+    !/undefined|>null</.test(hSin) && !/detail-value">—</.test(hSin));
+  check('Datos Personales sin FSM: aviso informativo con el message del backend',
+    hSin.includes('class="profile-degraded-note" role="status">Sin datos en FSM para esta cuenta.<'));
+  check('Datos Personales sin FSM: plan simulado conserva su aviso', hSin.includes('>simulado<'));
+
+  ctx.renderClientProfile(conWl, '50000002');
+  const hWl = detail.innerHTML;
+  check('nombre WHITELIST: se muestra con la etiqueta "Base Xtrim"',
+    hWl.includes('source-badge whitelist') && hWl.includes('>Base Xtrim<')
+    && hWl.includes(conWl.fullName));
+  check('nombre WHITELIST: el resto de la identidad dice "Sin datos en FSM"',
+    (hWl.match(/Sin datos en FSM</g) || []).length === 3);
+  check('nombre WHITELIST: aviso con "nombre tomado de la base de clientes Xtrim"',
+    hWl.includes('nombre tomado de la base de clientes Xtrim'));
+
+  ctx.renderClientProfile(normal, '35070291');
+  const hOk = detail.innerHTML;
+  check('perfil completo: sin "Sin datos en FSM", sin aviso ni etiqueta Base Xtrim',
+    !hOk.includes('Sin datos en FSM') && !hOk.includes('profile-degraded-note') && !hOk.includes('Base Xtrim'));
+  check('sources MOCK en identidad conserva el aviso "simulado"', (() => {
+    ctx.renderClientProfile(Object.assign({}, normal, { sources: Object.assign({}, normal.sources, { fullName: 'MOCK' }) }), '35070291');
+    return /Nombres y Apellidos <span class="source-badge"[^>]*>simulado</.test(detail.innerHTML);
+  })());
+  check('perfil con campos ausentes (undefined) no rompe', (() => {
+    ctx.renderClientProfile({ accountNumber: '1' }, '1');
+    return (detail.innerHTML.match(/Sin datos en FSM</g) || []).length === 4 && !detail.innerHTML.includes('undefined');
+  })());
+
+  check('profileDisplayName: null → "Sin datos en FSM"',
+    ctx.profileDisplayName(sinFsm) === 'Sin datos en FSM' && ctx.profileDisplayName(conWl) === conWl.fullName
+    && ctx.profileDisplayName(null) === 'Sin datos en FSM');
+  check('profileHomeCoords: null/undefined/texto → null (nunca 0,0)',
+    ctx.profileHomeCoords(sinFsm) === null && ctx.profileHomeCoords({}) === null
+    && ctx.profileHomeCoords({ latitude: '1', longitude: '2' }) === null
+    && ctx.profileHomeCoords({ latitude: null, longitude: -79.9 }) === null
+    && JSON.stringify(ctx.profileHomeCoords(normal)) === JSON.stringify({ latitude: normal.latitude, longitude: normal.longitude }));
+
+  // Confirmar cuenta con identidad null: confirma y el feedback no dice "null".
+  const input = vm.runInContext('accountInput', ctx);
+  const feedback = vm.runInContext('confirmAccountFeedback', ctx);
+  ctx.selectModule('instalaciones');
+  input.value = '50000001';
+  ctx.invalidateAccountCache();
+  await ctx.confirmAccountFlow();
+  check('Confirmar cuenta sin FSM: confirma con "Sin datos en FSM"',
+    vm.runInContext('validatedAccount', ctx) === '50000001'
+    && feedback.textContent.startsWith('Cuenta confirmada — Sin datos en FSM'), feedback.textContent);
+
+  // Panel NAP en Visitas: sin coords del domicilio no hay casa ni coords falsas.
+  ctx.selectModule('visitas');
+  input.value = '50000001';
+  vm.runInContext("validatedAccount = '50000001'", ctx);
+  ctx.validatedProfileForSmoke = sinFsm;
+  vm.runInContext('validatedProfile = validatedProfileForSmoke', ctx);
+  const prevCoords = vm.runInContext('_napPanelState.coords', ctx);
+  vm.runInContext('_napPanelState.coords = null', ctx);
+  const napHtml = await ctx.loadNapPanel('50000001');
+  const st = vm.runInContext('_napPanelState', ctx);
+  check('NAP sin coords del domicilio: homeCoords null', st.homeCoords === null);
+  check('NAP sin coords: current-nap responde NO_COORDS y se muestra el aviso',
+    st.currentNap && st.currentNap.reason === 'NO_COORDS'
+    && String(napHtml).includes('no tiene coordenadas registradas'), st.currentNap && st.currentNap.reason);
+  check('NAP sin coords: el formulario no precarga lat/lng inventadas',
+    !/value="0"/.test(String(napHtml)) && !String(napHtml).includes('undefined'));
+  vm.runInContext('_napPanelState.coords = ' + JSON.stringify(prevCoords), ctx);
+  ctx.invalidateAccountCache();
+  input.value = '';
+  ctx.selectModule('instalaciones');
+}
+
 console.log('\n== Prohibiciones del contrato ==');
 const fuentes = ['api.js', 'app.js'].map((f) => readFileSync(new URL('../' + f, import.meta.url), 'utf8'));
 check('la webapp nunca envía withStatus',

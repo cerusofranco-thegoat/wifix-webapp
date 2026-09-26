@@ -3908,6 +3908,30 @@ body.console-fullscreen-open { overflow: hidden; }
   border: 1px solid var(--warn-border);
   vertical-align: middle;
 }
+/* Nombre tomado de la whitelist (FSM sin datos): lavanda, no amarillo —
+   es un dato real, no simulado. */
+.source-badge.whitelist {
+  color: var(--brand-deep);
+  background: var(--surface-tint);
+  border-color: var(--border-lavender);
+}
+/* Campo de identidad null con FSM en vivo. */
+.no-fsm-data {
+  color: var(--gray-600);
+  font-weight: 400;
+  font-style: italic;
+}
+/* Aviso FSM_NO_DATA del perfil: informativo, no error. */
+.profile-degraded-note {
+  margin: 0 0 10px;
+  padding: 8px 12px;
+  border-radius: var(--radius-btn);
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--brand-deep);
+  background: var(--surface-tint);
+  border: 1px solid var(--border-lavender);
+}
 
 /* ---- Aviso por pantalla/panel con datos simulados ----------------------
    Chip discreto (no banner) para pantallas completas cuyos datos todavía no

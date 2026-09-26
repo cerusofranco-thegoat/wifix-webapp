@@ -421,7 +421,7 @@ async function confirmAccountFlow() {
       if (subGrid) subGrid.classList.add('account-confirmed');
       enableSubCards();
 
-      confirmAccountFeedback.textContent = `Cuenta confirmada — ${profile.fullName || '—'}`;
+      confirmAccountFeedback.textContent = `Cuenta confirmada — ${profileDisplayName(profile)}`;
       confirmAccountFeedback.className = 'confirm-account-feedback success';
       renderWhitelistLine(wl, cuenta);
 
@@ -433,11 +433,11 @@ async function confirmAccountFlow() {
         const own = accounts.find(a => a.accountNumber === cuenta) || accounts[0] || null;
         const estado = own && own.status ? own.status : '—';
         confirmAccountFeedback.textContent =
-          `Cuenta confirmada — ${profile.fullName || '—'} · ${estado}`;
+          `Cuenta confirmada — ${profileDisplayName(profile)} · ${estado}`;
       } catch (statusErr) {
         console.warn('[Wifix] contract-status en confirmación:', statusErr);
         confirmAccountFeedback.textContent =
-          `Cuenta confirmada — ${profile.fullName || '—'} · —`;
+          `Cuenta confirmada — ${profileDisplayName(profile)} · —`;
       }
     } catch (err) {
       console.error('[Wifix] confirm-account:', err);
@@ -825,11 +825,59 @@ async function openDatosPersonales() {
 }
 
 // Marca discreta para los campos que todavía NO vienen de la operadora.
-// `sources[campo]` puede ser 'FSM' | 'MOCK' | 'COMARCH' (contrato §3).
+// `sources[campo]` puede ser 'FSM' | 'MOCK' | 'COMARCH' | 'WHITELIST' | 'NONE'
+// (contrato §3). WHITELIST = FSM no trajo el dato y se tomó de la base Xtrim.
 function sourceBadge(profile, field) {
   const src = profile && profile.sources ? profile.sources[field] : null;
+  if (src === 'WHITELIST') {
+    return ' <span class="source-badge whitelist" title="Tomado de la base de clientes Xtrim: FSM no lo tiene">Base Xtrim</span>';
+  }
   if (src !== 'MOCK') return '';
   return ' <span class="source-badge" title="Dato simulado: la operadora todavía no lo expone">simulado</span>';
+}
+
+// Identidad del cliente con FSM en vivo: fullName/address/phones/email/lat/lng
+// pueden llegar null. Un null se muestra como "Sin datos en FSM" (gris), nunca
+// como guion vacío ni 'undefined'.
+const NO_FSM_DATA_TEXT = 'Sin datos en FSM';
+
+function profileFieldText(value) {
+  const s = value === null || value === undefined ? '' : String(value).trim();
+  return s || null;
+}
+
+function profileFieldHtml(value) {
+  const s = profileFieldText(value);
+  return s ? escapeHtml(s) : `<span class="no-fsm-data">${NO_FSM_DATA_TEXT}</span>`;
+}
+
+function profilePhonesHtml(phones) {
+  const list = Array.isArray(phones) ? phones.map(profileFieldText).filter(Boolean) : [];
+  return list.length ? list.map(escapeHtml).join('<br/>') : profileFieldHtml(null);
+}
+
+// Nombre para textos planos (feedback de Confirmar cuenta).
+function profileDisplayName(profile) {
+  return profileFieldText(profile && profile.fullName) || NO_FSM_DATA_TEXT;
+}
+
+// Coordenada del domicilio, solo si ambas son números reales. null/undefined
+// NO se convierten en 0,0 (isFinite(null) === true: no alcanza con isFinite).
+function profileHomeCoords(profile) {
+  if (!profile) return null;
+  const lat = profile.latitude;
+  const lng = profile.longitude;
+  if (typeof lat !== 'number' || typeof lng !== 'number') return null;
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  return { latitude: lat, longitude: lng };
+}
+
+// Aviso de degradación del perfil (p. ej. reason FSM_NO_DATA): informativo,
+// no error — el técnico puede seguir con la cuenta.
+function profileDegradedNote(profile) {
+  const d = profile && profile.degraded;
+  if (!d || !d.message) return '';
+  return `<div class="profile-degraded-note" role="status">${escapeHtml(d.message)}</div>`;
 }
 
 // Mismo criterio que sourceBadge(), pero a nivel de pantalla o panel completo:
@@ -844,9 +892,7 @@ function mockNotice(extraClass = '') {
 }
 
 function renderClientProfile(profile, cuenta) {
-  const phonesHtml = (profile.phones && profile.phones.length)
-    ? profile.phones.map(escapeHtml).join('<br/>')
-    : '—';
+  const phonesHtml = profilePhonesHtml(profile.phones);
   const down = profile.contractedDownloadMbps ?? '—';
   const up = profile.contractedUploadMbps ?? '—';
   const speedTxt = `${escapeHtml(down)} ↓ / ${escapeHtml(up)} ↑ Mbps`;
@@ -856,10 +902,11 @@ function renderClientProfile(profile, cuenta) {
   const badgeVel = sourceBadge(profile, 'contractedDownloadMbps') || sourceBadge(profile, 'contractedUploadMbps');
 
   detailList.innerHTML = [
-    renderDetailRow(ICONS.user,  'Nombres y Apellidos' + sourceBadge(profile, 'fullName'), escapeHtml(profile.fullName || '—')),
-    renderDetailRow(ICONS.pin,   'Dirección' + sourceBadge(profile, 'address'), escapeHtml(profile.address || '—')),
+    profileDegradedNote(profile),
+    renderDetailRow(ICONS.user,  'Nombres y Apellidos' + sourceBadge(profile, 'fullName'), profileFieldHtml(profile.fullName)),
+    renderDetailRow(ICONS.pin,   'Dirección' + sourceBadge(profile, 'address'), profileFieldHtml(profile.address)),
     renderDetailRow(ICONS.phone, 'Teléfonos' + sourceBadge(profile, 'phones'), phonesHtml),
-    renderDetailRow(ICONS.mail,  'Correo' + sourceBadge(profile, 'email'), escapeHtml(profile.email || '—')),
+    renderDetailRow(ICONS.mail,  'Correo' + sourceBadge(profile, 'email'), profileFieldHtml(profile.email)),
     renderDetailRow(ICONS.plan,  'Plan Contratado' + badgePlan, escapeHtml(profile.planName || '—'), { highlight: true }),
     renderDetailRow(ICONS.speed, 'Velocidad Contratada' + badgeVel, speedTxt, { highlight: true }),
     `<button class="save-btn outline" id="editProfileBtn">${ICONS.edit}<span style="margin-left:6px">Actualizar datos</span></button>`,
@@ -2224,14 +2271,12 @@ async function loadNapPanel(cuenta) {
   // Coordenada del domicilio: sale del perfil que ya se cargó al confirmar la
   // cuenta. NO se pide de nuevo: cero llamadas extra a la operadora.
   _napPanelState.homeCoords = null;
-  if (validatedProfile && validatedAccount === cuenta &&
-      isFinite(validatedProfile.latitude) && isFinite(validatedProfile.longitude) &&
-      validatedProfile.latitude !== null && validatedProfile.longitude !== null) {
-    _napPanelState.homeCoords = {
-      latitude: validatedProfile.latitude,
-      longitude: validatedProfile.longitude,
-      accuracy: null,
-    };
+  // Sin lat/lng (null con FSM sin datos) no hay casa en el mapa ni coords
+  // inventadas: current-nap responde NO_COORDS y se muestra su aviso.
+  const home = validatedProfile && validatedAccount === cuenta
+    ? profileHomeCoords(validatedProfile) : null;
+  if (home) {
+    _napPanelState.homeCoords = { latitude: home.latitude, longitude: home.longitude, accuracy: null };
   }
   // Visitas técnicas: primero la NAP a la que YA está conectado el cliente.
   // Una sola llamada por apertura del panel: los re-render leen el estado.
