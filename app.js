@@ -1392,23 +1392,41 @@ let _napPanelState = {
   maxRows: 5,        // cuántas NAPs mostrar (5 / 10 / 20)
   degraded: null,    // aviso de degradación de la última consulta
   homeCoords: null,  // coordenada del domicilio que trae la orden (si existe)
-  // --- Visita técnica: NAP actual del cliente (GET /accounts/:n/current-nap)
-  // Se consulta UNA vez por apertura del panel (loadNapPanel); los re-render
-  // leen de aquí y nunca vuelven a llamar al backend.
+  // --- Visita técnica / Migración: NAP contratada del cliente
+  // (GET /accounts/:n/current-nap). Se consulta UNA vez por apertura del panel
+  // (loadNapPanel); los re-render leen de aquí y nunca vuelven a llamar.
+  account: null,         // cuenta del panel abierto (para "Reintentar")
   currentNap: null,      // respuesta de current-nap (found true/false) o null
   currentNapError: null, // Error si la consulta falló (red, 502, 503)
-  showNearby: true,      // lista de NAPs cercanas visible ("Cambiar NAP")
+  // Ubicación "Casa cliente" (GET/POST /accounts/:n/client-location).
+  clientLoc: _clientLocEmptyState(),
 };
 
-// ¿El panel está en modo "visita con NAP del cliente encontrada"?
-function _napIsVisitFound() {
+// Visita técnica y Migraciones: el cliente YA tiene una NAP contratada
+// asignada. El panel muestra solo esa NAP (sin buscador por radio ni
+// "Cambiar NAP"). Instalaciones sigue con la búsqueda de NAPs cercanas.
+const NAP_CONTRACTED_MODULES = Object.freeze(['visitas', 'migraciones']);
+function _napUsesContractedNap(category = currentCategory) {
+  return NAP_CONTRACTED_MODULES.includes(category);
+}
+
+// ¿Hay NAP del cliente para pintar (current-nap con found y nap)?
+function _napHasClientNap() {
   const cur = _napPanelState.currentNap;
   return !!(cur && cur.found && cur.nap);
 }
 
+// La NAP viene simulada (conector de demo): el backend marca simulated:true /
+// source:'SIMULATED' en la respuesta (se acepta también dentro de `nap`).
+function _napIsSimulated(cur) {
+  if (!cur) return false;
+  const n = cur.nap || {};
+  return cur.simulated === true || cur.source === 'SIMULATED' || n.simulated === true || n.source === 'SIMULATED';
+}
+
 // napRef de la NAP del cliente (o '' si no hay).
 function _napCurrentRef() {
-  return _napIsVisitFound() ? _napRef(_napPanelState.currentNap.nap) : '';
+  return _napHasClientNap() ? _napRef(_napPanelState.currentNap.nap) : '';
 }
 
 // Referencia de la NAP para el backend: napId numérico de FSM cuando existe,
@@ -1434,7 +1452,7 @@ async function _napPortsCached(scope, napRef) {
 // (p.isClientPort). Va en el objeto y no en el DOM para que sobreviva a los
 // repintados de celda de _applyPortStatuses.
 function _napMarkClientPort(napRef, data) {
-  if (!data || !Array.isArray(data.ports) || !_napIsVisitFound()) return;
+  if (!data || !Array.isArray(data.ports) || !_napHasClientNap()) return;
   if (String(napRef) !== _napCurrentRef()) return;
   const puerto = _napPanelState.currentNap.portNumber;
   data.ports.forEach((p) => {
@@ -1835,8 +1853,6 @@ async function _napFetchAndRender(scope) {
   const coords = _napPanelState.coords;
 
   _napRenderDegradedNote(scope, null);
-  // La distancia de la NAP del cliente depende de la coordenada del técnico.
-  _napRenderCurrent(scope);
 
   if (!coords) {
     slot.innerHTML = `<div class="detail-empty">Captura tu ubicación (GPS o lat/lng manual) para buscar las NAPs del sector.</div>`;
@@ -1929,19 +1945,7 @@ function _wireNapPanel(scope) {
     lngInput.value = lng;
     gpsStatus.textContent = `Ubicación capturada (precisión ±${acc != null ? acc.toFixed(0) : '?'}m)`;
     gpsStatus.className = 'nap-gps-status ok';
-    _napAfterCoordsChange(scope);
-  }
-
-  // Visita con la NAP del cliente y la lista cercana oculta: la coordenada
-  // solo mueve al técnico en el mapa y recalcula la distancia (no se consulta
-  // la operadora). En los demás casos se buscan las NAPs cercanas como antes.
-  function _napAfterCoordsChange(sc) {
-    if (_napIsVisitFound() && !_napPanelState.showNearby) {
-      _napRenderCurrent(sc);
-      _napRenderMap(sc);
-      return;
-    }
-    _napFetchAndRender(sc);
+    _napFetchAndRender(scope);
   }
 
   gpsBtn.addEventListener('click', async () => {
@@ -1980,7 +1984,7 @@ function _wireNapPanel(scope) {
     if (!adoptInputCoords()) return;
     gpsStatus.textContent = 'Coordenadas ingresadas manualmente.';
     gpsStatus.className = 'nap-gps-status ok';
-    _napAfterCoordsChange(scope);
+    _napFetchAndRender(scope);
   }
   latInput.addEventListener('change', onManualCoords);
   lngInput.addEventListener('change', onManualCoords);
@@ -2028,31 +2032,6 @@ function _wireNapPanel(scope) {
         return;
       }
       _napFetchAndRender(scope);
-    });
-  }
-
-  // --- "Cambiar NAP" (visita): despliega la búsqueda de NAPs cercanas ------
-  const toggleBtn = scope.querySelector('[data-action="nap-toggle-nearby"]');
-  const nearbyWrap = scope.querySelector('[data-slot="nap-nearby"]');
-  if (toggleBtn && nearbyWrap) {
-    toggleBtn.addEventListener('click', () => {
-      const abrir = !_napPanelState.showNearby;
-      _napPanelState.showNearby = abrir;
-      nearbyWrap.hidden = !abrir;
-      toggleBtn.setAttribute('aria-expanded', abrir ? 'true' : 'false');
-      toggleBtn.textContent = abrir ? 'Ocultar NAPs cercanas' : 'Cambiar NAP';
-      if (!abrir) {
-        _napRenderMap(scope);
-        return;
-      }
-      // Abrir es un gesto explícito: se busca con la coordenada que haya
-      // (GPS, manual o la del domicilio precargada). Solo la primera vez.
-      if (!nearbyWrap.dataset.searched && adoptInputCoords()) {
-        nearbyWrap.dataset.searched = '1';
-        _napFetchAndRender(scope);
-      } else {
-        _napRenderMap(scope);
-      }
     });
   }
 
@@ -2106,7 +2085,7 @@ function _wireNapCardButtons(scope, naps) {
 // ---------------------------------------------------------------------------
 
 // Texto del aviso cuando no se encontró la NAP del cliente o la consulta falló.
-// Devuelve '' si no corresponde aviso (no es visita o se encontró).
+// Devuelve '' si no corresponde aviso (no hubo consulta o se encontró).
 function _napCurrentNoticeText() {
   const err = _napPanelState.currentNapError;
   if (err) {
@@ -2119,31 +2098,33 @@ function _napCurrentNoticeText() {
   if (!cur || cur.found) return '';
   if (cur.reason === 'NO_COORDS') return 'El cliente no tiene coordenadas registradas: no se pudo ubicar su NAP.';
   if (cur.reason === 'NOT_SUPPORTED') return 'La fuente de NAPs de esta operadora no soporta esta consulta.';
-  return 'No se encontró la NAP del cliente en las NAPs cercanas.';
+  return 'No se encontró la NAP contratada del cliente.';
 }
 
+// En Visita técnica / Migración no hay búsqueda de NAPs de respaldo: el aviso
+// va solo y, si fue un error de consulta, con "Reintentar".
 function _napCurrentNoticeHtml() {
   const txt = _napCurrentNoticeText();
   if (!txt) return '';
-  return `<div class="nap-current-note" role="status">${escapeHtml(txt)} Se muestran las NAPs cercanas.</div>`;
+  const retry = _napPanelState.currentNapError
+    ? '<button type="button" class="add-row-btn nap-retry-btn" data-action="nap-current-retry">Reintentar</button>'
+    : '';
+  return `<div class="nap-current-note" role="status">${escapeHtml(txt)}</div>${retry}`;
 }
 
-// Distancia del técnico (GPS/manual) a la NAP del cliente. La que trae
-// current-nap es desde el centro de búsqueda (el domicilio), no desde el técnico.
-function _napDistanceFromTech(nap) {
-  const c = _napPanelState.coords;
-  if (!c || !_napHasCoords(nap)) return null;
-  return _napHaversineMeters(c.latitude, c.longitude, Number(nap.latitude), Number(nap.longitude));
+// Badges de la NAP del cliente: "Contratada" (assignment) y "Simulado".
+function _napClientBadgesHtml(cur) {
+  const asignada = cur && (cur.assignment || (cur.nap && cur.nap.assignment));
+  const contratada = asignada === 'CONTRACTED'
+    ? '<span class="nap-client-badge">Contratada</span>' : '';
+  const simulada = _napIsSimulated(cur)
+    ? '<span class="sim-badge" title="Dato simulado: la operadora aún no expone la NAP de esta cuenta">Simulado</span>' : '';
+  return contratada + simulada;
 }
 
-function _napDistanceFromTechText(nap) {
-  const d = _napDistanceFromTech(nap);
-  return d !== null ? `${d.toFixed(1)} m desde tu ubicación` : 'Captura tu ubicación para ver la distancia';
-}
-
-// Tarjeta única "NAP del cliente" (visita técnica con la NAP encontrada).
+// Tarjeta única "NAP del cliente" (Visita técnica / Migración).
 function _renderCurrentNapCard() {
-  if (!_napIsVisitFound()) return _napCurrentNoticeHtml();
+  if (!_napHasClientNap()) return _napCurrentNoticeHtml();
   const cur = _napPanelState.currentNap;
   const n = cur.nap;
   const ref = _napRef(n);
@@ -2172,10 +2153,10 @@ function _renderCurrentNapCard() {
       <div class="nap-head">
         ${_napNameHtml(n, ref)}
         <span class="nap-badges">
+          ${_napClientBadgesHtml(cur)}
           <span class="nap-state-badge ${color}">${escapeHtml(_napColorLabel(n))}</span>
         </span>
       </div>
-      <span class="nap-distance" data-slot="nap-current-distance">${escapeHtml(_napDistanceFromTechText(n))}</span>
       ${red}
       ${_napOccupancyBar(n)}
       ${puerto}
@@ -2190,21 +2171,426 @@ function _renderCurrentNapCard() {
         ${_napDirectionsBtnHtml(n)}
       </div>
       <div class="nap-ports-slot" data-ports-for="${escapeHtml(ref)}" data-slot="ports-${escapeHtml(ref)}"></div>
+      ${_renderClientLocSection()}
     </div>`;
-}
-
-// Actualiza la distancia de la tarjeta del cliente sin regenerarla: así no se
-// pierde la grilla de puertos si ya estaba abierta.
-function _napRenderCurrent(scope) {
-  if (!_napIsVisitFound() || !scope || !scope.querySelector) return;
-  const dist = scope.querySelector('[data-slot="nap-current-distance"]');
-  if (dist) dist.textContent = _napDistanceFromTechText(_napPanelState.currentNap.nap);
 }
 
 // "Ver puertos" de la tarjeta del cliente (misma grilla que la lista).
 function _wireNapCurrentCard(scope) {
-  if (!_napIsVisitFound()) return;
+  if (!_napHasClientNap()) return;
   wireNapPortsButtons(scope);
+}
+
+// ---------------------------------------------------------------------------
+// Ubicación "Casa cliente" (Visita técnica / Migración)
+// GET/POST /accounts/:accountNumber/client-location. Append-only: cada captura
+// es un registro nuevo; nunca se edita la anterior.
+// ---------------------------------------------------------------------------
+const CLIENT_LOC_LABEL = 'CASA_CLIENTE';
+// Por encima de esta precisión (m) el GPS se marca "baja" (texto, no solo color).
+const CLIENT_LOC_LOW_ACCURACY_M = 30;
+const CLIENT_LOC_NOTES_MAX = 500;
+
+function _clientLocEmptyState() {
+  return {
+    account: null,
+    loading: false,
+    error: null,              // Error del GET (la captura sigue disponible)
+    latest: null,             // última captura guardada (forma de la respuesta 201)
+    items: [],                // historial de capturas (más reciente primero)
+    registeredLocation: null, // ubicación registrada de la operadora o null
+    draft: null,              // { latitude, longitude, accuracyMeters, source, capturedAt }
+    saving: false,
+  };
+}
+
+// Normaliza GET .../client-location → { latest, items, registeredLocation }.
+function _clientLocApplyList(st, r) {
+  const body = r || {};
+  st.items = Array.isArray(body.items) ? body.items : [];
+  st.latest = body.latest || st.items[0] || null;
+  st.registeredLocation = body.registeredLocation
+    || (st.latest && st.latest.registeredLocation) || null;
+}
+
+function _clientLocValidCoords(lat, lng) {
+  return Number.isFinite(lat) && Number.isFinite(lng)
+    && lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180 && !(lat === 0 && lng === 0);
+}
+
+function _isNum(v) {
+  return v !== null && v !== undefined && v !== '' && Number.isFinite(Number(v));
+}
+
+function _fmtCoord(v) {
+  return _isNum(v) ? Number(v).toFixed(6) : '—';
+}
+
+function _fmtMeters(m) {
+  if (!_isNum(m)) return null;
+  const v = Number(m);
+  return v >= 1000 ? `${(v / 1000).toFixed(2)} km` : `${v.toFixed(v < 10 ? 1 : 0)} m`;
+}
+
+// Texto de precisión: GPS con ±m (y aviso si es baja) o "ingresada a mano".
+function _clientLocAccuracyHtml(source, acc) {
+  if (source === 'MANUAL') return 'Ingresada manualmente (sin precisión GPS)';
+  if (!_isNum(acc)) return 'GPS · precisión no informada';
+  const v = Math.round(Number(acc));
+  if (v > CLIENT_LOC_LOW_ACCURACY_M) {
+    return `GPS · ±${v} m <span class="client-loc-warn">(precisión baja: acércate a la casa o espera mejor señal)</span>`;
+  }
+  return `GPS · ±${v} m`;
+}
+
+// Distancia de un punto a la NAP del cliente (Haversine local).
+function _clientLocDistToNap(pt) {
+  const n = _napHasClientNap() ? _napPanelState.currentNap.nap : null;
+  if (!pt || !n || !_napHasCoords(n)) return null;
+  return _napHaversineMeters(Number(pt.latitude), Number(pt.longitude), Number(n.latitude), Number(n.longitude));
+}
+
+function _clientLocDistToRegistered(pt, reg) {
+  if (!pt || !reg || !_isNum(reg.latitude) || !_isNum(reg.longitude)) return null;
+  return _napHaversineMeters(Number(pt.latitude), Number(pt.longitude), Number(reg.latitude), Number(reg.longitude));
+}
+
+// Filas "Distancia a la NAP" y "Ubicación registrada". Usa las distancias del
+// backend si vienen (captura guardada); si no (sin guardar), las calcula aquí.
+function _clientLocComparisonHtml(pt, fromBackend) {
+  const st = _napPanelState.clientLoc;
+  const reg = (fromBackend && fromBackend.registeredLocation) || st.registeredLocation || null;
+  const napCode = _napHasClientNap() ? (_napPanelState.currentNap.nap.napCode || 'NAP') : null;
+  const dNap = fromBackend && _isNum(fromBackend.distanceToNapMeters)
+    ? Number(fromBackend.distanceToNapMeters) : _clientLocDistToNap(pt);
+  const dReg = fromBackend && _isNum(fromBackend.distanceToRegisteredMeters)
+    ? Number(fromBackend.distanceToRegisteredMeters) : _clientLocDistToRegistered(pt, reg);
+  const napTxt = dNap !== null
+    ? `${escapeHtml(_fmtMeters(dNap))}${napCode ? ` de la NAP ${escapeHtml(napCode)}` : ''}`
+    : 'Sin coordenada de la NAP para calcular';
+  let regTxt;
+  if (!reg) regTxt = 'Sin ubicación registrada de la operadora para comparar';
+  else if (dReg !== null) regTxt = `A ${escapeHtml(_fmtMeters(dReg))} de la ubicación registrada del cliente`;
+  else regTxt = 'La ubicación registrada no trae una coordenada válida';
+  return `
+          <div><dt>Distancia a la NAP</dt><dd data-field="client-loc-dist-nap">${napTxt}</dd></div>
+          <div><dt>Ubicación registrada</dt><dd data-field="client-loc-dist-reg">${regTxt}</dd></div>`;
+}
+
+// Última captura guardada (o vacío / cargando / error del GET).
+function _clientLocSavedHtml() {
+  const st = _napPanelState.clientLoc;
+  if (st.loading) return '<div class="detail-loading">Cargando ubicación guardada…</div>';
+  const errHtml = st.error
+    ? `<div class="client-loc-error" role="alert">No se pudo cargar la ubicación guardada: ${escapeHtml(st.error.message || 'error del servidor')}.
+          <button type="button" class="link-btn" data-action="client-loc-reload">Reintentar</button></div>`
+    : '';
+  const l = st.latest;
+  if (!l) {
+    return errHtml || '<p class="client-loc-empty">Aún no hay ubicación de la casa del cliente guardada.</p>';
+  }
+  const quien = l.capturedBy && l.capturedBy.email ? escapeHtml(l.capturedBy.email) : 'técnico no informado';
+  const total = st.items.length > 1
+    ? `<p class="client-loc-count">${escapeHtml(String(st.items.length))} capturas guardadas; se muestra la más reciente.</p>` : '';
+  return `
+      ${errHtml}
+      <div class="client-loc-saved">
+        <p class="client-loc-saved-head">Casa cliente guardada el ${dateTimeHtml(l.capturedAt || l.createdAt, { seconds: false, relative: false })} por ${quien}</p>
+        <dl class="client-loc-facts">
+          <div><dt>Coordenadas</dt><dd class="mono">${escapeHtml(_fmtCoord(l.latitude))}, ${escapeHtml(_fmtCoord(l.longitude))}</dd></div>
+          <div><dt>Precisión</dt><dd>${_clientLocAccuracyHtml(l.source, l.accuracyMeters)}</dd></div>
+          ${_clientLocComparisonHtml(l, l)}
+        </dl>
+        ${total}
+      </div>`;
+}
+
+// Captura nueva aún sin guardar.
+function _clientLocDraftHtml() {
+  const d = _napPanelState.clientLoc.draft;
+  if (!d) return '';
+  return `
+      <div class="client-loc-draft">
+        <p class="client-loc-draft-head">Nueva captura (sin guardar)</p>
+        <dl class="client-loc-facts">
+          <div><dt>Coordenadas</dt><dd class="mono">${escapeHtml(_fmtCoord(d.latitude))}, ${escapeHtml(_fmtCoord(d.longitude))}</dd></div>
+          <div><dt>Precisión</dt><dd>${_clientLocAccuracyHtml(d.source, d.accuracyMeters)}</dd></div>
+          ${_clientLocComparisonHtml(d, null)}
+        </dl>
+      </div>`;
+}
+
+function _clientLocGpsLabel() {
+  return _napPanelState.clientLoc.latest ? 'Recapturar ubicación · Casa cliente' : 'Capturar ubicación · Casa cliente';
+}
+
+// Sección completa dentro de la tarjeta de la NAP del cliente.
+function _renderClientLocSection() {
+  const st = _napPanelState.clientLoc;
+  return `
+      <section class="client-loc" data-slot="client-loc" aria-labelledby="clientLocTitle">
+        <h4 class="client-loc-title" id="clientLocTitle">Ubicación · Casa cliente</h4>
+        <div data-slot="client-loc-saved" aria-live="polite">${_clientLocSavedHtml()}</div>
+        <div class="client-loc-controls">
+          <button type="button" class="add-row-btn client-loc-gps-btn" data-action="client-loc-gps">${_clientLocGpsLabel()}</button>
+          <button type="button" class="link-btn client-loc-manual-toggle" data-action="client-loc-manual"
+            aria-expanded="false" aria-controls="clientLocManual">Ingresar coordenadas manualmente</button>
+        </div>
+        <div class="client-loc-manual" id="clientLocManual" data-slot="client-loc-manual" hidden>
+          <div class="nap-coords-row">
+            <label class="nap-coord-label" for="clientLocLat">
+              <span>Latitud</span>
+              <input type="number" step="any" inputmode="decimal" id="clientLocLat" data-field="client-loc-lat"
+                class="nap-coord-input" placeholder="-2.170000" aria-describedby="clientLocManualError">
+            </label>
+            <label class="nap-coord-label" for="clientLocLng">
+              <span>Longitud</span>
+              <input type="number" step="any" inputmode="decimal" id="clientLocLng" data-field="client-loc-lng"
+                class="nap-coord-input" placeholder="-79.900000" aria-describedby="clientLocManualError">
+            </label>
+          </div>
+          <p class="client-loc-field-error" id="clientLocManualError" data-slot="client-loc-manual-error" role="alert"></p>
+          <button type="button" class="add-row-btn" data-action="client-loc-manual-use">Usar estas coordenadas</button>
+        </div>
+        <div data-slot="client-loc-draft">${_clientLocDraftHtml()}</div>
+        <label class="client-loc-notes-label" for="clientLocNotes">Notas (opcional)</label>
+        <textarea class="client-loc-notes" id="clientLocNotes" data-field="client-loc-notes" rows="2"
+          maxlength="${CLIENT_LOC_NOTES_MAX}" placeholder="Ej.: casa esquinera, portón verde"></textarea>
+        <button type="button" class="save-btn client-loc-save-btn" data-action="client-loc-save"
+          ${st.draft ? '' : 'disabled'} aria-describedby="clientLocStatus">Guardar ubicación</button>
+        <p class="client-loc-status" id="clientLocStatus" data-slot="client-loc-status" role="status">${
+          st.draft ? '' : 'Captura la ubicación para poder guardarla.'}</p>
+      </section>`;
+}
+
+/**
+ * Cuerpo del POST .../client-location a partir de la captura.
+ * ctx = { napCode, napPort, taskId, notes }. taskId (y napCode/napPort) se
+ * omiten si no hay; accuracyMeters va null si la coordenada es manual.
+ */
+function buildClientLocationPayload(draft, ctx = {}) {
+  const body = {
+    latitude: Number(draft.latitude),
+    longitude: Number(draft.longitude),
+    accuracyMeters: draft.source !== 'MANUAL' && _isNum(draft.accuracyMeters)
+      ? Math.round(Number(draft.accuracyMeters) * 10) / 10 : null,
+    label: CLIENT_LOC_LABEL,
+    source: draft.source === 'MANUAL' ? 'MANUAL' : 'GPS',
+    capturedAt: draft.capturedAt || new Date().toISOString(),
+  };
+  if (ctx.napCode) body.napCode = String(ctx.napCode);
+  if (_isNum(ctx.napPort)) body.napPort = Number(ctx.napPort);
+  if (ctx.taskId && String(ctx.taskId).trim()) body.taskId = String(ctx.taskId).trim();
+  const notes = ctx.notes ? String(ctx.notes).trim().slice(0, CLIENT_LOC_NOTES_MAX) : '';
+  if (notes) body.notes = notes;
+  return body;
+}
+
+// Repinta las partes que dependen del estado (sin tocar inputs ni notas).
+function _clientLocRefresh(scope) {
+  if (!scope || !scope.querySelector) return;
+  const st = _napPanelState.clientLoc;
+  const saved = scope.querySelector('[data-slot="client-loc-saved"]');
+  if (saved) saved.innerHTML = _clientLocSavedHtml();
+  const draft = scope.querySelector('[data-slot="client-loc-draft"]');
+  if (draft) draft.innerHTML = _clientLocDraftHtml();
+  const save = scope.querySelector('[data-action="client-loc-save"]');
+  if (save) save.disabled = !st.draft || st.saving;
+  const gps = scope.querySelector('[data-action="client-loc-gps"]');
+  if (gps && !gps.disabled) gps.textContent = _clientLocGpsLabel();
+}
+
+function _clientLocStatus(scope, msg, kind) {
+  const el = scope && scope.querySelector ? scope.querySelector('[data-slot="client-loc-status"]') : null;
+  if (!el) return;
+  // Errores: se anuncian de inmediato (alert); el resto, cortés (status).
+  el.setAttribute('role', kind === 'error' ? 'alert' : 'status');
+  el.className = 'client-loc-status' + (kind ? ' ' + kind : '');
+  el.textContent = msg || '';
+}
+
+function _clientLocSetDraft(scope, draft) {
+  _napPanelState.clientLoc.draft = draft;
+  _clientLocRefresh(scope);
+  _napRenderMap(scope);
+}
+
+async function _clientLocCaptureGps(scope, btn) {
+  const st = _napPanelState.clientLoc;
+  btn.disabled = true;
+  btn.setAttribute('aria-busy', 'true');
+  btn.textContent = 'Obteniendo GPS…';
+  _clientLocStatus(scope, 'Solicitando ubicación GPS…', '');
+  try {
+    if (typeof WifixNative === 'undefined' || !WifixNative || !WifixNative.getCurrentPosition) {
+      throw new Error('GPS no disponible en este dispositivo');
+    }
+    const pos = await WifixNative.getCurrentPosition({ timeoutMs: 15000 });
+    if (_napPanelState.clientLoc !== st) return; // el panel cambió de cuenta
+    const lat = Number(pos && pos.latitude);
+    const lng = Number(pos && pos.longitude);
+    if (!_clientLocValidCoords(lat, lng)) throw new Error('el GPS devolvió una coordenada inválida');
+    const acc = _isNum(pos.accuracy) ? Number(pos.accuracy) : null;
+    _clientLocSetDraft(scope, { latitude: lat, longitude: lng, accuracyMeters: acc, source: 'GPS', capturedAt: new Date().toISOString() });
+    _clientLocStatus(scope,
+      `Ubicación capturada${acc !== null ? ` (precisión ±${Math.round(acc)} m)` : ''}. Revisa y toca «Guardar ubicación».`, 'ok');
+  } catch (err) {
+    if (_napPanelState.clientLoc !== st) return;
+    console.error('[Wifix] GPS casa cliente', err);
+    _clientLocStatus(scope,
+      `No se pudo obtener el GPS: ${err && err.message ? err.message : 'error desconocido'}. Puedes ingresar las coordenadas manualmente.`,
+      'error');
+    _clientLocToggleManual(scope, true);
+  } finally {
+    btn.disabled = false;
+    btn.removeAttribute('aria-busy');
+    btn.textContent = _clientLocGpsLabel();
+  }
+}
+
+function _clientLocToggleManual(scope, forceOpen) {
+  const wrap = scope.querySelector('[data-slot="client-loc-manual"]');
+  const toggle = scope.querySelector('[data-action="client-loc-manual"]');
+  if (!wrap || !toggle) return;
+  const abrir = forceOpen === true ? true : !!wrap.hidden;
+  wrap.hidden = !abrir;
+  toggle.setAttribute('aria-expanded', abrir ? 'true' : 'false');
+  toggle.textContent = abrir ? 'Ocultar ingreso manual' : 'Ingresar coordenadas manualmente';
+}
+
+// Valida lat/lng manuales. Devuelve el draft o null (y marca el error).
+function _clientLocUseManual(scope) {
+  const latIn = scope.querySelector('[data-field="client-loc-lat"]');
+  const lngIn = scope.querySelector('[data-field="client-loc-lng"]');
+  const errEl = scope.querySelector('[data-slot="client-loc-manual-error"]');
+  if (!latIn || !lngIn) return null;
+  const lat = parseFloat(String(latIn.value).replace(',', '.'));
+  const lng = parseFloat(String(lngIn.value).replace(',', '.'));
+  const latOk = Number.isFinite(lat) && lat >= -90 && lat <= 90;
+  const lngOk = Number.isFinite(lng) && lng >= -180 && lng <= 180;
+  if (!latOk || !lngOk || !_clientLocValidCoords(lat, lng)) {
+    if (!latOk) latIn.setAttribute('aria-invalid', 'true'); else latIn.removeAttribute('aria-invalid');
+    if (!lngOk) lngIn.setAttribute('aria-invalid', 'true'); else lngIn.removeAttribute('aria-invalid');
+    if (errEl) errEl.textContent = 'Ingresa una latitud (-90 a 90) y una longitud (-180 a 180) válidas.';
+    (latOk ? lngIn : latIn).focus();
+    return null;
+  }
+  latIn.removeAttribute('aria-invalid');
+  lngIn.removeAttribute('aria-invalid');
+  if (errEl) errEl.textContent = '';
+  const draft = { latitude: lat, longitude: lng, accuracyMeters: null, source: 'MANUAL', capturedAt: new Date().toISOString() };
+  _clientLocSetDraft(scope, draft);
+  _clientLocStatus(scope, 'Coordenadas ingresadas manualmente. Revisa y toca «Guardar ubicación».', 'ok');
+  return draft;
+}
+
+async function _clientLocSave(scope, btn) {
+  const st = _napPanelState.clientLoc;
+  if (!st.draft || st.saving || !st.account) return null;
+  st.saving = true;
+  btn.disabled = true;
+  btn.setAttribute('aria-busy', 'true');
+  btn.textContent = 'Guardando…';
+  _clientLocStatus(scope, 'Guardando ubicación de la casa del cliente…', '');
+  const notesEl = scope.querySelector('[data-field="client-loc-notes"]');
+  let saved = null;
+  try {
+    // Mismo taskId que el resto de registros: workOrder/fsmTaskId de la
+    // visita PENDIENTE de la cuenta (null → no se envía).
+    const taskId = await resolveCurrentVisitTaskId(st.account);
+    const cur = _napPanelState.currentNap;
+    const payload = buildClientLocationPayload(st.draft, {
+      napCode: cur && cur.nap ? cur.nap.napCode : null,
+      napPort: cur ? cur.portNumber : null,
+      taskId,
+      notes: notesEl ? notesEl.value : '',
+    });
+    saved = await WifixAPI.createClientLocation(st.account, payload);
+    if (_napPanelState.clientLoc !== st) return null;
+    st.latest = saved;
+    st.items = [saved].concat(st.items.filter((x) => x && x.id !== saved.id));
+    if (saved && saved.registeredLocation !== undefined) st.registeredLocation = saved.registeredLocation;
+    st.draft = null;
+    st.error = null;
+    if (notesEl) notesEl.value = '';
+    _clientLocStatus(scope, 'Ubicación de la casa del cliente guardada.', 'ok');
+  } catch (err) {
+    console.error('[Wifix] guardar casa cliente', err);
+    if (_napPanelState.clientLoc === st) {
+      _clientLocStatus(scope,
+        `No se pudo guardar la ubicación: ${err && err.message ? err.message : 'error desconocido'}. La captura sigue aquí; vuelve a intentarlo.`,
+        'error');
+    }
+  } finally {
+    st.saving = false;
+    btn.removeAttribute('aria-busy');
+    btn.textContent = 'Guardar ubicación';
+    if (_napPanelState.clientLoc === st) {
+      _clientLocRefresh(scope);
+      _napRenderMap(scope);
+    }
+  }
+  return saved;
+}
+
+async function _clientLocReload(scope) {
+  const st = _napPanelState.clientLoc;
+  if (!st.account) return;
+  st.loading = true;
+  st.error = null;
+  _clientLocRefresh(scope);
+  try {
+    const r = await WifixAPI.getClientLocation(st.account);
+    if (_napPanelState.clientLoc !== st) return;
+    _clientLocApplyList(st, r);
+  } catch (err) {
+    if (_napPanelState.clientLoc !== st) return;
+    st.error = err;
+  }
+  st.loading = false;
+  _clientLocRefresh(scope);
+  _napRenderMap(scope);
+}
+
+// Conecta la sección Casa cliente (delegación: su contenido se repinta).
+function _wireClientLoc(scope) {
+  const sec = scope && scope.querySelector ? scope.querySelector('[data-slot="client-loc"]') : null;
+  if (!sec || !sec.addEventListener) return;
+  sec.addEventListener('click', (ev) => {
+    const t = ev.target;
+    const btn = t && t.closest ? t.closest('[data-action]') : null;
+    if (!btn || !/^client-loc-/.test(btn.dataset.action || '')) return;
+    ev.stopPropagation();
+    const action = btn.dataset.action;
+    if (action === 'client-loc-gps') _clientLocCaptureGps(scope, btn);
+    else if (action === 'client-loc-manual') _clientLocToggleManual(scope);
+    else if (action === 'client-loc-manual-use') _clientLocUseManual(scope);
+    else if (action === 'client-loc-save') _clientLocSave(scope, btn);
+    else if (action === 'client-loc-reload') _clientLocReload(scope);
+  });
+}
+
+// Registro "Ubicación casa cliente" en las tarjetas de visitas anteriores.
+function _recClientLocationHtml(c) {
+  const dNap = _fmtMeters(c.distanceToNapMeters);
+  const dReg = _fmtMeters(c.distanceToRegisteredMeters);
+  let acc;
+  if (c.source === 'MANUAL') acc = 'ingresada manualmente';
+  else acc = _isNum(c.accuracyMeters) ? `GPS ±${Math.round(Number(c.accuracyMeters))} m` : 'GPS, precisión no informada';
+  let reg = '';
+  if (dReg) reg = `a <strong>${escapeHtml(dReg)}</strong> de la ubicación registrada`;
+  else if (c.registeredLocation === null) reg = 'sin ubicación registrada de la operadora para comparar';
+  const distancias = [
+    dNap ? `a <strong>${escapeHtml(dNap)}</strong> de la NAP${c.napCode ? ' ' + escapeHtml(c.napCode) : ''}` : '',
+    reg,
+  ].filter(Boolean).join(' · ');
+  return `
+    <li class="rec-item">
+      <div class="rec-head"><span class="rec-title">Ubicación casa cliente</span></div>
+      <div class="rec-values"><span class="mono">${escapeHtml(_fmtCoord(c.latitude))}, ${escapeHtml(_fmtCoord(c.longitude))}</span> · ${escapeHtml(acc)}</div>
+      ${distancias ? `<div class="rec-values">${distancias}</div>` : ''}
+      <div class="rec-meta">${_recordWhen(c, 'capturedAt')}${_recordLinkHint(c)}</div>
+    </li>`;
 }
 
 // "Cómo llegar": abre Google Maps fuera de la app (ver WifixNative.openDirections).
@@ -2268,8 +2654,8 @@ function _napMapShowUnavailable(slot, failedScope) {
   if (slot) slot.innerHTML = `<div class="nap-map-unavailable" role="status">${NAP_MAP_UNAVAILABLE}</div>`;
 }
 
-// NAPs a pintar: en visita, la del cliente (+ las cercanas si se desplegó
-// "Cambiar NAP"); en instalación/migración, las cercanas. Sin coordenada se omiten.
+// NAPs a pintar: en Visita técnica / Migración, solo la NAP contratada del
+// cliente; en Instalaciones, las cercanas. Sin coordenada se omiten.
 function _napMapNaps() {
   const out = [];
   const vistos = {};
@@ -2280,10 +2666,29 @@ function _napMapNaps() {
     vistos[ref] = true;
     out.push(n);
   };
-  const visita = _napIsVisitFound();
-  if (visita) add(_napPanelState.currentNap.nap);
-  if (!visita || _napPanelState.showNearby) (_napPanelState.naps || []).forEach(add);
+  if (_napUsesContractedNap()) {
+    if (_napHasClientNap()) add(_napPanelState.currentNap.nap);
+    return out;
+  }
+  (_napPanelState.naps || []).forEach(add);
   return out;
+}
+
+// Puntos extra del mapa en Visita técnica / Migración:
+//   casa: captura "Casa cliente" (la nueva sin guardar manda sobre la guardada)
+//   registered: ubicación registrada de la operadora (del GET client-location;
+//   mientras no llega, la coordenada del domicilio del perfil).
+function _napMapClientPoints() {
+  if (!_napUsesContractedNap()) return { casa: null, registered: null };
+  const st = _napPanelState.clientLoc;
+  const valid = (p) => !!p && _isNum(p.latitude) && _isNum(p.longitude);
+  let casa = null;
+  if (valid(st.draft)) casa = { latitude: Number(st.draft.latitude), longitude: Number(st.draft.longitude), unsaved: true };
+  else if (valid(st.latest)) casa = { latitude: Number(st.latest.latitude), longitude: Number(st.latest.longitude), unsaved: false };
+  let reg = st.registeredLocation;
+  if (!reg && (st.loading || st.error)) reg = _napPanelState.homeCoords;
+  const registered = valid(reg) ? { latitude: Number(reg.latitude), longitude: Number(reg.longitude) } : null;
+  return { casa, registered };
 }
 
 const _NAP_MAP_HOME_SVG = '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false">' +
@@ -2316,12 +2721,19 @@ function _napRenderMap(scope) {
     return;
   }
 
-  const tech = _napPanelState.coords;
-  const home = _napPanelState.homeCoords;
+  // Visita técnica / Migración: sin el punto del técnico; el domicilio es la
+  // ubicación registrada y se suma la captura "Casa cliente".
+  const contratada = _napUsesContractedNap();
+  const tech = contratada ? null : _napPanelState.coords;
+  const extra = _napMapClientPoints();
+  const home = contratada ? extra.registered : _napPanelState.homeCoords;
+  const casa = extra.casa;
   const naps = _napMapNaps();
-  if (!tech && !home && naps.length === 0) {
+  if (!tech && !home && !casa && naps.length === 0) {
     _napMapDestroy();
-    slot.innerHTML = '<div class="nap-map-empty">El mapa aparece al capturar tu ubicación o al buscar NAPs.</div>';
+    slot.innerHTML = contratada
+      ? '<div class="nap-map-empty">Sin coordenadas para el mapa: captura la ubicación de la casa del cliente.</div>'
+      : '<div class="nap-map-empty">El mapa aparece al capturar tu ubicación o al buscar NAPs.</div>';
     return;
   }
 
@@ -2333,10 +2745,18 @@ function _napRenderMap(scope) {
   _napMap.layer.clearLayers();
   _napMap.markers = {};
   if (home) {
+    const homeTxt = contratada ? 'Ubicación registrada del cliente' : 'Domicilio del cliente';
     L.marker([home.latitude, home.longitude], {
       icon: L.divIcon({ className: 'nap-map-home', html: _NAP_MAP_HOME_SVG, iconSize: [28, 28], iconAnchor: [14, 14] }),
-      title: 'Domicilio del cliente', alt: 'Domicilio del cliente', keyboard: false,
-    }).bindTooltip('Domicilio del cliente').addTo(_napMap.layer);
+      title: homeTxt, alt: homeTxt, keyboard: false,
+    }).bindTooltip(homeTxt).addTo(_napMap.layer);
+  }
+  if (casa) {
+    const casaTxt = casa.unsaved ? 'Casa cliente (captura sin guardar)' : 'Casa cliente (capturada)';
+    L.marker([casa.latitude, casa.longitude], {
+      icon: L.divIcon({ className: `nap-map-casa${casa.unsaved ? ' is-unsaved' : ''}`, html: _NAP_MAP_HOME_SVG, iconSize: [30, 30], iconAnchor: [15, 15] }),
+      title: casaTxt, alt: casaTxt, keyboard: false, zIndexOffset: 600,
+    }).bindTooltip(casaTxt).addTo(_napMap.layer);
   }
   const clienteRef = _napCurrentRef();
   naps.forEach((n) => {
@@ -2377,7 +2797,13 @@ function _napRenderMap(scope) {
 // Crea la instancia L.map dentro del slot. false si no se pudo.
 function _napMapCreate(scope, slot) {
   _napMapDestroy();
-  slot.innerHTML = `
+  slot.innerHTML = _napUsesContractedNap() ? `
+    <div class="nap-map" role="region" aria-label="Mapa: casa del cliente, NAP del cliente y ubicación registrada"></div>
+    <ul class="nap-map-legend" aria-label="Leyenda del mapa">
+      <li><span class="nap-map-dot casa" aria-hidden="true"></span>Casa cliente (capturada)</li>
+      <li><span class="nap-map-dot client" aria-hidden="true"></span>NAP del cliente</li>
+      <li><span class="nap-map-dot home" aria-hidden="true"></span>Ubicación registrada</li>
+    </ul>` : `
     <div class="nap-map" role="region" aria-label="Mapa de NAPs: tu ubicación, domicilio del cliente y NAPs"></div>
     <div class="nap-map-legend" aria-hidden="true">
       <span><span class="nap-map-dot tech"></span>Tú</span>
@@ -2519,6 +2945,25 @@ function renderNapPanel() {
 
   const taskId = _napPanelState.taskId;
   const fechaHora = formatDate(_napPanelState.openedAt);
+  const cabecera = `
+      <!-- 1) Cabecera de tarea -->
+      <div class="nap-task-header">
+        <span class="nap-task-badge">${escapeHtml(taskId)}</span>
+        <span class="nap-task-date">${escapeHtml(fechaHora)}</span>
+      </div>`;
+
+  // Visita técnica / Migración: el cliente ya tiene su NAP contratada. Solo
+  // esa NAP (con la ubicación "Casa cliente"), sin buscador por radio.
+  if (_napUsesContractedNap()) {
+    return `
+    <div class="nap-panel" data-panel="nap-gpon">
+      ${cabecera}
+      <div class="nap-section-title">NAP del cliente</div>
+      <p class="nap-contracted-hint">NAP contratada asignada al cliente: no hace falta buscar NAPs cercanas.</p>
+      <div data-slot="nap-map" class="nap-map-slot"></div>
+      <div data-slot="nap-current">${_renderCurrentNapCard()}</div>
+    </div>`;
+  }
 
   // Precarga: si la orden trae la coordenada del domicilio, se ofrece como
   // valor inicial. NO dispara la consulta sola: sigue haciendo falta un gesto
@@ -2542,19 +2987,9 @@ function renderNapPanel() {
     gpsStatusCls = '';
   }
 
-  // Visita técnica con la NAP del cliente encontrada: una sola tarjeta y la
-  // búsqueda por radio queda detrás de "Cambiar NAP". Sin NAP (o con error)
-  // el panel es el mismo de instalaciones, con un aviso arriba.
-  const visita = _napIsVisitFound();
-
   return `
-    <div class="nap-panel${visita ? ' nap-panel-visit' : ''}" data-panel="nap-gpon">
-
-      <!-- 1) Cabecera de tarea -->
-      <div class="nap-task-header">
-        <span class="nap-task-badge">${escapeHtml(taskId)}</span>
-        <span class="nap-task-date">${escapeHtml(fechaHora)}</span>
-      </div>
+    <div class="nap-panel" data-panel="nap-gpon">
+      ${cabecera}
 
       <!-- 2) Coordenada de la tarea -->
       <div class="nap-gps-section">
@@ -2581,18 +3016,7 @@ function renderNapPanel() {
         </div>
       </div>
 
-      ${visita ? `
-      <!-- 3) NAP del cliente (visita técnica) -->
-      <div class="nap-section-title">NAP del cliente</div>
-      <div data-slot="nap-map" class="nap-map-slot"></div>
-      <div data-slot="nap-current">${_renderCurrentNapCard()}</div>
-      <button type="button" class="add-row-btn nap-toggle-nearby-btn" data-action="nap-toggle-nearby"
-        aria-expanded="${_napPanelState.showNearby ? 'true' : 'false'}" aria-controls="napNearbySection">
-        ${_napPanelState.showNearby ? 'Ocultar NAPs cercanas' : 'Cambiar NAP'}
-      </button>` : `
-      <div data-slot="nap-current">${_napCurrentNoticeHtml()}</div>`}
-
-      <div class="nap-nearby" id="napNearbySection" data-slot="nap-nearby"${visita && !_napPanelState.showNearby ? ' hidden' : ''}>
+      <div class="nap-nearby" data-slot="nap-nearby">
       <!-- 4) Radio de búsqueda y cantidad de resultados -->
       <div class="nap-radius-control">
         <div class="nap-radius-group" role="group" aria-label="Radio de búsqueda" aria-describedby="napRadiusHelp">
@@ -2623,7 +3047,7 @@ function renderNapPanel() {
       </div>
 
       <!-- 5) Mapa + tarjetas de NAPs -->
-      ${visita ? '' : '<div data-slot="nap-map" class="nap-map-slot"></div>'}
+      <div data-slot="nap-map" class="nap-map-slot"></div>
       <div class="nap-section-title">NAPs disponibles en el sector</div>
       <div data-slot="nap-degraded" hidden></div>
       <div data-slot="nap-cards">
@@ -2654,9 +3078,10 @@ async function loadNapPanel(cuenta) {
   _napPanelState.selectedPort = null;
   _napPanelState.naps = [];
   _napPanelState.degraded = null;
+  _napPanelState.account = cuenta || null;
   _napPanelState.currentNap = null;
   _napPanelState.currentNapError = null;
-  _napPanelState.showNearby = true;
+  _napPanelState.clientLoc = _clientLocEmptyState();
   // Coordenada del domicilio: sale del perfil que ya se cargó al confirmar la
   // cuenta. NO se pide de nuevo: cero llamadas extra a la operadora.
   _napPanelState.homeCoords = null;
@@ -2667,9 +3092,20 @@ async function loadNapPanel(cuenta) {
   if (home) {
     _napPanelState.homeCoords = { latitude: home.latitude, longitude: home.longitude, accuracy: null };
   }
-  // Visitas técnicas: primero la NAP a la que YA está conectado el cliente.
-  // Una sola llamada por apertura del panel: los re-render leen el estado.
-  if (currentCategory === 'visitas' && cuenta) {
+  // Visita técnica / Migración: la NAP contratada del cliente y, en paralelo,
+  // su ubicación "Casa cliente" guardada. Una sola llamada de cada una por
+  // apertura del panel: los re-render leen el estado.
+  if (_napUsesContractedNap() && cuenta) {
+    const cl = _napPanelState.clientLoc;
+    cl.account = cuenta;
+    cl.loading = true;
+    const locP = WifixAPI.getClientLocation(cuenta).then(
+      (r) => { if (_napPanelState.clientLoc === cl) _clientLocApplyList(cl, r); },
+      (err) => {
+        console.error('[Wifix] casa cliente (GET)', err);
+        if (_napPanelState.clientLoc === cl) cl.error = err;
+      },
+    ).then(() => { cl.loading = false; });
     try {
       // Sin coordenada del domicilio, el backend no puede ubicar la NAP: si el
       // técnico ya tiene GPS de una apertura anterior, se usa como centro.
@@ -2679,10 +3115,11 @@ async function loadNapPanel(cuenta) {
       _napPanelState.currentNap = res;
     } catch (err) {
       if (seq !== _napLoadSeq) return null;
-      console.error('[Wifix] NAP actual del cliente', err);
+      console.error('[Wifix] NAP del cliente', err);
       _napPanelState.currentNapError = err;
     }
-    _napPanelState.showNearby = !_napIsVisitFound();
+    await locP;
+    if (seq !== _napLoadSeq) return null;
   }
   return renderNapPanel();
 }
@@ -2692,17 +3129,62 @@ async function loadNapPanel(cuenta) {
 function _bootNapPanel(body) {
   const panel = body.querySelector('[data-panel="nap-gpon"]');
   if (!panel) return;
+  if (_napUsesContractedNap()) {
+    _wireNapContractedPanel(panel, body);
+    _napRenderMap(panel);
+    return;
+  }
   _wireNapPanel(panel);
-  _wireNapCurrentCard(panel);
-  // Si ya había una coordenada de una apertura anterior, se reconsulta sola
-  // (salvo en visita con la lista cercana oculta: ahí no hace falta).
-  if (_napPanelState.coords && _napPanelState.showNearby) {
-    const wrap = panel.querySelector('[data-slot="nap-nearby"]');
-    if (wrap && wrap.dataset) wrap.dataset.searched = '1';
+  // Si ya había una coordenada de una apertura anterior, se reconsulta sola.
+  if (_napPanelState.coords) {
     _napFetchAndRender(panel);
   } else {
     _napRenderMap(panel);
   }
+}
+
+// Visita técnica / Migración: "Ver puertos", "Cómo llegar", centrar el mapa,
+// "Reintentar" la NAP del cliente y la sección Casa cliente.
+function _wireNapContractedPanel(panel, body) {
+  _wireNapCurrentCard(panel);
+  _wireClientLoc(panel);
+  if (!panel.addEventListener) return;
+  panel.addEventListener('click', (ev) => {
+    const t = ev.target;
+    if (!t || !t.closest) return;
+    const dir = t.closest('[data-action="nap-directions"]');
+    if (dir) {
+      ev.stopPropagation();
+      _napOpenDirections(dir.dataset.lat, dir.dataset.lng, dir);
+      return;
+    }
+    const retry = t.closest('[data-action="nap-current-retry"]');
+    if (retry) {
+      _napRetryCurrent(body, retry);
+      return;
+    }
+    const foco = t.closest('[data-action="nap-focus"]');
+    if (foco) {
+      _napMapFocus(foco.dataset.nap, true);
+      return;
+    }
+    const card = t.closest('.nap-card');
+    if (card && !t.closest('button, a, input, select, textarea, label, .nap-ports-slot, .client-loc')) {
+      _napMapFocus(card.dataset.nap, true);
+    }
+  });
+}
+
+// "Reintentar" tras un error de current-nap: vuelve a cargar el panel entero.
+async function _napRetryCurrent(body, btn) {
+  const cuenta = _napPanelState.account;
+  if (!cuenta || !body) return;
+  btn.disabled = true;
+  btn.textContent = 'Consultando…';
+  const html = await loadNapPanel(cuenta);
+  if (html === null || body.isConnected === false) return;
+  body.innerHTML = html;
+  _bootNapPanel(body);
 }
 
 // Celda de puerto. Cuatro estados visuales (ver _portState):
@@ -4662,7 +5144,7 @@ function _recRetiredHtml(e) {
     </li>`;
 }
 
-/** Checklist (7 tipos, ✓/✗ con texto) + los datos de cada prueba. */
+/** Checklist (✓/✗ con texto, incluye 'clientLocation') + los datos de cada prueba. */
 function renderVisitRecords(records) {
   if (!records) return '';
   const checklist = _visitChecklist(records);
@@ -4679,6 +5161,7 @@ function renderVisitRecords(records) {
     ...arr('tracerouteTests').map(_recTracerouteHtml),
     ...arr('wifiHeatmaps').map(_recWifiHtml),
     ...arr('distanceMeasurements').map(_recDistanceHtml),
+    ...arr('clientLocations').map(_recClientLocationHtml),
     ...arr('retiredEquipment').map(_recRetiredHtml),
   ].join('');
   const vinculo = VISIT_LINKED_BY_TEXT[records.linkedBy] || '';
@@ -4873,6 +5356,8 @@ function renderWorkOrderNotes(data) {
 
 const SERVICIO_ITEMS = [
   { id: 'naps',    icon: SERVICIO_ICONS.nap,     title: 'NAPs cercanas y seleccion GPON Xtreme',
+    // Visita técnica / Migración: solo la NAP contratada (sin búsqueda).
+    titleContracted: 'NAP del cliente (contratada)',
     load: (cuenta) => loadNapPanel(cuenta) },
   { id: 'status',  icon: SERVICIO_ICONS.user,    title: 'Status del cliente por contrato/cuenta',
     load: (cuenta) => WifixAPI.getContractStatus(cuenta).then(c => renderStatusFromContract(c, cuenta)) },
@@ -4895,6 +5380,11 @@ const SERVICIO_ITEMS = [
     }) },
 ];
 
+// Título del panel según el módulo (la NAP cambia en Visita técnica / Migración).
+function servicioItemTitle(item) {
+  return item.titleContracted && _napUsesContractedNap() ? item.titleContracted : item.title;
+}
+
 // Paneles de Datos del Servicio que corresponden al módulo actual.
 function servicioItemsForModule() {
   const allowed = currentModule().servicio;
@@ -4915,7 +5405,7 @@ function openDatosServicio() {
     <div class="servicio-item" data-id="${item.id}">
       <button class="servicio-head" type="button">
         <div class="servicio-icon">${item.icon}</div>
-        <div class="servicio-title">${escapeHtml(item.title)}</div>
+        <div class="servicio-title">${escapeHtml(servicioItemTitle(item))}</div>
         <div class="servicio-chev">${SERVICIO_ICONS.chev}</div>
       </button>
       <div class="servicio-body">

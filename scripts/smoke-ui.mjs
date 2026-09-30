@@ -637,10 +637,12 @@ console.log('\n== NAP del cliente (visita técnica) y mapa ==');
   check('getCurrentNap mock: 40123456 encontrada en la NAP llena (roja), Suspendido',
     found2.found === true && ctx._napColorClass(found2.nap) === 'full'
     && ctx.clientStatusGroup(found2.clientStatus.code).key === 'suspendido');
-  const notFound = await WifixAPI.getCurrentNap('99999999');
-  check('getCurrentNap mock: cuenta desconocida → NOT_FOUND con nap null',
-    notFound.found === false && notFound.nap === null && notFound.portNumber === null
-    && notFound.reason === 'NOT_FOUND' && typeof notFound.searchedNaps === 'number');
+  const simulada = await WifixAPI.getCurrentNap('99999999');
+  check('getCurrentNap mock: cuenta sin dato → NAP simulada (simulated, SIMULATED, CONTRACTED)',
+    simulada.found === true && !!simulada.nap && simulada.simulated === true && simulada.source === 'SIMULATED'
+    && simulada.assignment === 'CONTRACTED' && Number.isInteger(simulada.portNumber));
+  check('getCurrentNap mock: NAP real con assignment CONTRACTED y sin marca de simulada',
+    found.assignment === 'CONTRACTED' && found.simulated !== true && !ctx._napIsSimulated(found));
   const portsCliente = await WifixAPI.getNapPorts(String(found.nap.napId));
   check('mock: la grilla de la NAP del cliente trae su cuenta en el puerto 7',
     portsCliente.ports.some((p) => p.portNumber === 7 && p.occupied && p.clientAccountNumber === '35070291'));
@@ -659,9 +661,12 @@ console.log('\n== NAP del cliente (visita técnica) y mapa ==');
     visitaHtml.includes('Puerto 07') && visitaHtml.includes('Activo') && visitaHtml.includes('ZTEGD434832'));
   check('visita: "Cómo llegar" y "Ver puertos" en la tarjeta del cliente',
     visitaHtml.includes('data-action="nap-directions"') && visitaHtml.includes('data-action="view-ports"'));
-  check('visita: la búsqueda por radio queda oculta tras "Cambiar NAP"',
-    visitaHtml.includes('data-action="nap-toggle-nearby"') && /data-slot="nap-nearby" hidden/.test(visitaHtml)
-    && visitaHtml.includes('aria-expanded="false"'));
+  check('visita: sin buscador por radio ni "Cambiar NAP"',
+    !visitaHtml.includes('nap-toggle-nearby') && !visitaHtml.includes('Cambiar NAP')
+    && !visitaHtml.includes('data-action="nap-search"') && !visitaHtml.includes('data-action="nap-meters"')
+    && !visitaHtml.includes('data-slot="nap-nearby"') && !visitaHtml.includes('data-slot="nap-cards"'));
+  check('visita: badge "Contratada" y sin badge "Simulado" en la NAP real',
+    visitaHtml.includes('>Contratada<') && !visitaHtml.includes('sim-badge'));
   check('visita: hay contenedor de mapa', visitaHtml.includes('data-slot="nap-map"'));
   check('visita: loadNapPanel hace exactamente una llamada a current-nap', llamadas === 1, `llamadas=${llamadas}`);
 
@@ -756,10 +761,20 @@ console.log('\n== NAP del cliente (visita técnica) y mapa ==');
         && data.ports.filter((p) => p.isClientPort).length === 1;
     })());
 
-  const noHtml = await ctx.loadNapPanel('99999999');
-  check('visita sin NAP: aviso breve y cae al flujo de NAPs cercanas',
-    noHtml.includes('No se encontró la NAP del cliente') && !noHtml.includes('nap-toggle-nearby')
-    && !/data-slot="nap-nearby" hidden/.test(noHtml) && noHtml.includes('data-action="nap-search"'));
+  const simHtml = await ctx.loadNapPanel('99999999');
+  check('visita con NAP simulada: tarjeta con badge "Simulado" y sin búsqueda',
+    simHtml.includes('nap-card nap-current') && simHtml.includes('class="sim-badge"') && simHtml.includes('>Simulado<')
+    && !simHtml.includes('data-action="nap-search"'));
+  {
+    const nfOrig = WifixAPI.getCurrentNap;
+    WifixAPI.getCurrentNap = async () => ({ accountNumber: '1', found: false, nap: null, portNumber: null,
+      equipmentId: null, clientStatus: null, searchedNaps: 3, reason: 'NOT_FOUND', brand: 'telenews' });
+    const noHtml = await ctx.loadNapPanel('1');
+    check('visita sin NAP (defensivo): aviso sin caer a la búsqueda de NAPs',
+      noHtml.includes('No se encontró la NAP contratada del cliente') && !noHtml.includes('data-action="nap-search"')
+      && !noHtml.includes('nap-current-retry'));
+    WifixAPI.getCurrentNap = nfOrig;
+  }
 
   const razones = { NO_COORDS: 'no tiene coordenadas', NOT_SUPPORTED: 'no soporta esta consulta' };
   for (const [reason, txt] of Object.entries(razones)) {
@@ -770,8 +785,9 @@ console.log('\n== NAP del cliente (visita técnica) y mapa ==');
   }
   WifixAPI.getCurrentNap = async () => { const e = new Error('No se pudo conectar'); e.code = 'NETWORK_ERROR'; throw e; };
   const errHtml = await ctx.loadNapPanel('35070291');
-  check('visita con error de red: aviso y flujo normal',
-    errHtml.includes('Sin conexión con el servidor') && errHtml.includes('data-action="nap-search"'));
+  check('visita con error de red: aviso + "Reintentar", sin búsqueda de NAPs',
+    errHtml.includes('Sin conexión con el servidor') && errHtml.includes('data-action="nap-current-retry"')
+    && !errHtml.includes('data-action="nap-search"'));
   WifixAPI.getCurrentNap = async function (...args) { llamadas++; return getCurrentNapReal.apply(this, args); };
 
   // --- Misma NAP en la tarjeta del cliente y en la lista: ambas grillas ------
@@ -834,8 +850,248 @@ console.log('\n== NAP del cliente (visita técnica) y mapa ==');
   check('popup del mapa: código, "x/y ocupados · n libres" y Cómo llegar',
     popup.includes('NAP-1') && popup.includes('7/8 ocupados · 1 libre') && popup.includes('nap-directions'));
   check('constante de tiles OSM', vm.runInContext('NAP_MAP_TILE_URL', ctx) === 'https://tile.openstreetmap.org/{z}/{x}/{y}.png');
-  vm.runInContext('_napPanelState.coords = null; _napPanelState.currentNap = null; _napPanelState.currentNapError = null; _napPanelState.naps = []; _napPanelState.showNearby = true;', ctx);
+  vm.runInContext('_napPanelState.coords = null; _napPanelState.currentNap = null; _napPanelState.currentNapError = null; _napPanelState.naps = [];', ctx);
   ctx.selectModule(catPrevia);
+}
+
+console.log('\n== NAP contratada en Migraciones e Instalaciones intacta ==');
+{
+  const prev = vm.runInContext('currentCategory', ctx);
+  let llamadasCN = 0;
+  const cnOrig = WifixAPI.getCurrentNap;
+  WifixAPI.getCurrentNap = async function (...args) { llamadasCN++; return cnOrig.apply(this, args); };
+  ctx.selectModule('migraciones');
+  const migHtml = await ctx.loadNapPanel('35070291');
+  check('migración: consulta la NAP contratada (current-nap) una vez', llamadasCN === 1, `llamadas=${llamadasCN}`);
+  check('migración: HTML balanceado', balanced(migHtml) === null, balanced(migHtml));
+  check('migración: solo la NAP del cliente (código, puerto, ocupación, status, mapa, Cómo llegar)',
+    (migHtml.match(/class="nap-card /g) || []).length === 1 && migHtml.includes('nap-card nap-current')
+    && migHtml.includes('Puerto 07') && migHtml.includes('ocupados') && migHtml.includes('Activo')
+    && migHtml.includes('data-slot="nap-map"') && migHtml.includes('data-action="nap-directions"'));
+  check('migración: sin buscador de radios, sin GPS del técnico ni "Cambiar NAP"',
+    !migHtml.includes('data-action="nap-search"') && !migHtml.includes('data-action="nap-meters"')
+    && !migHtml.includes('data-action="nap-gps"') && !migHtml.includes('Cambiar NAP'));
+  check('migración: título del panel = "NAP del cliente (contratada)"',
+    ctx.servicioItemTitle(vm.runInContext('SERVICIO_ITEMS', ctx)[0]) === 'NAP del cliente (contratada)');
+  check('_napUsesContractedNap: visitas y migraciones sí; instalaciones y cancelaciones no',
+    ctx._napUsesContractedNap('visitas') && ctx._napUsesContractedNap('migraciones')
+    && !ctx._napUsesContractedNap('instalaciones') && !ctx._napUsesContractedNap('cancelaciones'));
+  llamadasCN = 0;
+  ctx.selectModule('instalaciones');
+  const instH = await ctx.loadNapPanel('35070291');
+  check('instalación: sigue la lista 280/500 m sin current-nap ni Casa cliente',
+    llamadasCN === 0 && instH.includes('data-meters="280"') && instH.includes('data-meters="500"')
+    && instH.includes('data-action="nap-search"') && !instH.includes('client-loc'));
+  check('instalación: título del panel sin cambios',
+    ctx.servicioItemTitle(vm.runInContext('SERVICIO_ITEMS', ctx)[0]) === 'NAPs cercanas y seleccion GPON Xtreme');
+  check('styles.css sin la regla muerta de "Cambiar NAP"',
+    !readFileSync(base + 'styles.css', 'utf8').includes('nap-toggle-nearby'));
+  check('app.js sin referencias muertas de "Cambiar NAP"',
+    !/nap-toggle-nearby|showNearby|_napDistanceFromTech|_napRenderCurrent\b/.test(readFileSync(base + 'app.js', 'utf8')));
+  WifixAPI.getCurrentNap = cnOrig;
+  ctx.selectModule(prev);
+}
+
+console.log('\n== Ubicación "Casa cliente" (Visita técnica / Migración) ==');
+{
+  const prev = vm.runInContext('currentCategory', ctx);
+  const cache = vm.runInContext('_pendingVisitCache', ctx);
+  cache.clear();
+
+  // --- Contrato del cuerpo del POST --------------------------------------
+  const gpsDraft = { latitude: -2.2478, longitude: -79.9043, accuracyMeters: 7.84, source: 'GPS', capturedAt: '2026-09-30T15:00:00.000Z' };
+  const p1 = ctx.buildClientLocationPayload(gpsDraft, { napCode: 'NAP-1', napPort: 7, taskId: 'ORDER/1/2026', notes: '  portón verde ' });
+  check('payload GPS: campos del contrato',
+    p1.latitude === -2.2478 && p1.longitude === -79.9043 && p1.accuracyMeters === 7.8 && p1.label === 'CASA_CLIENTE'
+    && p1.source === 'GPS' && p1.napCode === 'NAP-1' && p1.napPort === 7 && p1.taskId === 'ORDER/1/2026'
+    && p1.capturedAt === '2026-09-30T15:00:00.000Z' && p1.notes === 'portón verde', JSON.stringify(p1));
+  check('payload: sin clientId/contractId ni accountNumber en el cuerpo',
+    !('clientId' in p1) && !('contractId' in p1) && !('accountNumber' in p1));
+  const p2 = ctx.buildClientLocationPayload({ latitude: -2.1, longitude: -79.8, accuracyMeters: 12, source: 'MANUAL' }, { napCode: null, napPort: null, taskId: null, notes: '' });
+  check('payload manual: accuracy null, sin taskId/napCode/napPort/notes, capturedAt presente',
+    p2.source === 'MANUAL' && p2.accuracyMeters === null && !('taskId' in p2) && !('napCode' in p2)
+    && !('napPort' in p2) && !('notes' in p2) && typeof p2.capturedAt === 'string');
+
+  // --- Mock GET/POST ------------------------------------------------------
+  const vacio = await WifixAPI.getClientLocation('35070291');
+  check('mock GET client-location: { latest: null, items: [], registeredLocation }',
+    vacio.latest === null && Array.isArray(vacio.items) && vacio.items.length === 0
+    && vacio.registeredLocation && vacio.registeredLocation.latitude === -2.247946);
+
+  // --- Render de la sección dentro de la tarjeta ---------------------------
+  ctx.selectModule('visitas');
+  const html0 = await ctx.loadNapPanel('35070291');
+  check('tarjeta NAP del cliente: sección Casa cliente con título, botón GPS, manual, notas y Guardar deshabilitado',
+    html0.includes('Ubicación · Casa cliente') && html0.includes('Capturar ubicación · Casa cliente')
+    && html0.includes('data-action="client-loc-manual"') && html0.includes('aria-controls="clientLocManual"')
+    && html0.includes('for="clientLocNotes"') && /data-action="client-loc-save"\s+disabled/.test(html0));
+  check('sin captura guardada: estado vacío claro',
+    html0.includes('Aún no hay ubicación de la casa del cliente guardada.'));
+  check('la sección va DENTRO de la tarjeta de la NAP del cliente',
+    html0.indexOf('data-slot="client-loc"') > html0.indexOf('nap-card nap-current'));
+  check('sección HTML balanceada', balanced(html0) === null, balanced(html0));
+
+  // Scope falso con los slots de la sección (los que el código consulta).
+  function clientLocScope() {
+    const slots = {};
+    const attrsOf = (el) => {
+      const a = {};
+      el.setAttribute = (k, v) => { a[k] = String(v); };
+      el.removeAttribute = (k) => { delete a[k]; };
+      el.getAttribute = (k) => (k in a ? a[k] : null);
+      return el;
+    };
+    ['[data-slot="client-loc-saved"]', '[data-slot="client-loc-draft"]', '[data-action="client-loc-save"]',
+      '[data-action="client-loc-gps"]', '[data-slot="client-loc-status"]', '[data-field="client-loc-notes"]',
+      '[data-slot="client-loc-manual"]', '[data-action="client-loc-manual"]', '[data-field="client-loc-lat"]',
+      '[data-field="client-loc-lng"]', '[data-slot="client-loc-manual-error"]'].forEach((k) => { slots[k] = attrsOf(fakeEl()); });
+    slots['[data-slot="client-loc-manual"]'].hidden = true;
+    return { slots, querySelector: (sel) => slots[sel] || null, querySelectorAll: () => [] };
+  }
+
+  // GPS falla → error accesible y se abre el ingreso manual.
+  ctx.WifixNative = { getCurrentPosition: async () => { throw new Error('Permiso de ubicación denegado'); } };
+  const origErr = console.error;
+  console.error = () => {};
+  let sc = clientLocScope();
+  await ctx._clientLocCaptureGps(sc, sc.slots['[data-action="client-loc-gps"]']);
+  const stErr = sc.slots['[data-slot="client-loc-status"]'];
+  check('GPS con error: mensaje con role="alert" y se ofrece el ingreso manual',
+    stErr.textContent.includes('Permiso de ubicación denegado') && stErr.getAttribute('role') === 'alert'
+    && sc.slots['[data-slot="client-loc-manual"]'].hidden === false
+    && sc.slots['[data-action="client-loc-manual"]'].getAttribute('aria-expanded') === 'true');
+  check('GPS con error: el botón vuelve a estar disponible',
+    sc.slots['[data-action="client-loc-gps"]'].disabled === false
+    && sc.slots['[data-action="client-loc-gps"]'].getAttribute('aria-busy') === null);
+
+  // Manual inválido → aria-invalid + mensaje; válido → draft MANUAL.
+  sc.slots['[data-field="client-loc-lat"]'].value = '123';
+  sc.slots['[data-field="client-loc-lng"]'].value = '-79.9';
+  check('manual inválido: no crea captura y marca aria-invalid',
+    ctx._clientLocUseManual(sc) === null && sc.slots['[data-field="client-loc-lat"]'].getAttribute('aria-invalid') === 'true'
+    && sc.slots['[data-slot="client-loc-manual-error"]'].textContent.includes('válidas'));
+  sc.slots['[data-field="client-loc-lat"]'].value = '-2,2479';
+  sc.slots['[data-field="client-loc-lng"]'].value = '-79.9042';
+  const dm = ctx._clientLocUseManual(sc);
+  check('manual válido (acepta coma decimal): captura MANUAL sin precisión',
+    dm && dm.source === 'MANUAL' && dm.latitude === -2.2479 && dm.accuracyMeters === null
+    && sc.slots['[data-slot="client-loc-draft"]'].innerHTML.includes('Ingresada manualmente'));
+
+  // GPS ok → draft con precisión, distancia a la NAP y a la registrada.
+  ctx.WifixNative = { getCurrentPosition: async () => ({ latitude: -2.247811, longitude: -79.904402, accuracy: 42.4 }) };
+  sc = clientLocScope();
+  await ctx._clientLocCaptureGps(sc, sc.slots['[data-action="client-loc-gps"]']);
+  const draftHtml = sc.slots['[data-slot="client-loc-draft"]'].innerHTML;
+  check('GPS ok: captura sin guardar con coords, precisión y aviso de precisión baja (texto)',
+    draftHtml.includes('Nueva captura (sin guardar)') && draftHtml.includes('-2.247811, -79.904402')
+    && draftHtml.includes('±42 m') && draftHtml.includes('precisión baja'));
+  check('GPS ok: distancia a la NAP y a la ubicación registrada (calculadas en la app)',
+    /data-field="client-loc-dist-nap">\d+(\.\d)? m de la NAP /.test(draftHtml)
+    && /A \d+(\.\d)? m de la ubicación registrada del cliente/.test(draftHtml), draftHtml);
+  check('GPS ok: Guardar se habilita', sc.slots['[data-action="client-loc-save"]'].disabled === false);
+  const pts = ctx._napMapClientPoints();
+  check('mapa: marcador Casa cliente (sin guardar) + ubicación registrada',
+    pts.casa && pts.casa.unsaved === true && pts.registered && pts.registered.latitude === -2.247946);
+
+  // Guardar → POST con el taskId de la visita pendiente y respuesta 201.
+  let enviado = null;
+  const createOrig = WifixAPI.createClientLocation;
+  WifixAPI.createClientLocation = async function (cuenta, body) { enviado = { cuenta, body }; return createOrig.call(this, cuenta, body); };
+  sc.slots['[data-field="client-loc-notes"]'].value = 'Casa esquinera';
+  const saved = await ctx._clientLocSave(sc, sc.slots['[data-action="client-loc-save"]']);
+  check('guardar: POST con cuenta, taskId de la visita pendiente, NAP y puerto del cliente',
+    enviado && enviado.cuenta === '35070291' && enviado.body.taskId === 'ORDER/424900/2026'
+    && enviado.body.napPort === 7 && typeof enviado.body.napCode === 'string' && enviado.body.source === 'GPS'
+    && enviado.body.accuracyMeters === 42.4 && enviado.body.notes === 'Casa esquinera', JSON.stringify(enviado && enviado.body));
+  const savedHtml = sc.slots['[data-slot="client-loc-saved"]'].innerHTML;
+  check('guardar: muestra "Casa cliente guardada el <fecha> por <email>" con el formateador común',
+    saved && savedHtml.includes('Casa cliente guardada el <time class="dt-abs"') && savedHtml.includes('franco@tulpasolutions.com')
+    && savedHtml.includes('-2.247811, -79.904402'), savedHtml.slice(0, 300));
+  check('guardar: distancias del backend a la NAP y a la registrada',
+    savedHtml.includes(`${Math.round(saved.distanceToNapMeters)} m de la NAP`) && savedHtml.includes('de la ubicación registrada del cliente'));
+  check('guardar: limpia la captura, deshabilita Guardar y avisa (status)',
+    sc.slots['[data-slot="client-loc-draft"]'].innerHTML === '' && sc.slots['[data-action="client-loc-save"]'].disabled === true
+    && sc.slots['[data-slot="client-loc-status"]'].textContent.includes('guardada')
+    && sc.slots['[data-slot="client-loc-status"]'].getAttribute('role') === 'status'
+    && sc.slots['[data-field="client-loc-notes"]'].value === '');
+  check('guardar: el botón GPS pasa a "Recapturar"',
+    sc.slots['[data-action="client-loc-gps"]'].textContent === 'Recapturar ubicación · Casa cliente');
+  check('mapa: tras guardar, marcador Casa cliente (capturada)',
+    ctx._napMapClientPoints().casa && ctx._napMapClientPoints().casa.unsaved === false);
+
+  // Recaptura append-only: segunda captura = segundo registro.
+  ctx.WifixNative = { getCurrentPosition: async () => ({ latitude: -2.24779, longitude: -79.90441, accuracy: 5 }) };
+  await ctx._clientLocCaptureGps(sc, sc.slots['[data-action="client-loc-gps"]']);
+  await ctx._clientLocSave(sc, sc.slots['[data-action="client-loc-save"]']);
+  const lista = await WifixAPI.getClientLocation('35070291');
+  check('recapturar es append-only: 2 registros, el último primero y el anterior intacto',
+    lista.items.length === 2 && lista.latest.id === lista.items[0].id && lista.items[1].id === saved.id
+    && lista.items[1].latitude === -2.247811);
+  WifixAPI.createClientLocation = createOrig;
+
+  // Reabrir el panel: carga la última captura guardada (GET).
+  const html2 = await ctx.loadNapPanel('35070291');
+  check('reabrir: muestra la última guardada, cuenta de capturas y "Recapturar"',
+    html2.includes('Casa cliente guardada el') && html2.includes('2 capturas guardadas')
+    && html2.includes('Recapturar ubicación · Casa cliente'));
+  check('reabrir: HTML balanceado', balanced(html2) === null, balanced(html2));
+
+  // Error al guardar: la captura se conserva y el error es accesible.
+  const createOrig2 = WifixAPI.createClientLocation;
+  WifixAPI.createClientLocation = async () => { const e = new Error('No se pudo conectar con el servidor'); e.code = 'NETWORK_ERROR'; throw e; };
+  sc = clientLocScope();
+  await ctx._clientLocCaptureGps(sc, sc.slots['[data-action="client-loc-gps"]']);
+  await ctx._clientLocSave(sc, sc.slots['[data-action="client-loc-save"]']);
+  check('error al guardar: role="alert", mensaje y la captura sigue lista para reintentar',
+    sc.slots['[data-slot="client-loc-status"]'].getAttribute('role') === 'alert'
+    && sc.slots['[data-slot="client-loc-status"]'].textContent.includes('No se pudo guardar')
+    && vm.runInContext('_napPanelState.clientLoc.draft !== null', ctx)
+    && sc.slots['[data-action="client-loc-save"]'].disabled === false);
+  WifixAPI.createClientLocation = createOrig2;
+
+  // Sin ubicación registrada de la operadora.
+  const getOrig = WifixAPI.getClientLocation;
+  WifixAPI.getClientLocation = async () => ({ latest: null, items: [], registeredLocation: null });
+  await ctx.loadNapPanel('35070291');
+  vm.runInContext("_napPanelState.clientLoc.draft = { latitude: -2.2478, longitude: -79.9044, accuracyMeters: 4, source: 'GPS', capturedAt: new Date().toISOString() }", ctx);
+  check('registeredLocation null: "Sin ubicación registrada de la operadora para comparar"',
+    ctx._clientLocDraftHtml().includes('Sin ubicación registrada de la operadora para comparar'));
+  // GET con error: aviso con Reintentar, la captura sigue disponible.
+  WifixAPI.getClientLocation = async () => { throw new Error('Error interno del servidor'); };
+  const html3 = await ctx.loadNapPanel('35070291');
+  check('GET con error: aviso role="alert" con "Reintentar" y el botón de captura sigue',
+    html3.includes('client-loc-error" role="alert"') && html3.includes('data-action="client-loc-reload"')
+    && html3.includes('data-action="client-loc-gps"'));
+  WifixAPI.getClientLocation = getOrig;
+  console.error = origErr;
+
+  // Migraciones también tiene la sección.
+  ctx.selectModule('migraciones');
+  const htmlMig = await ctx.loadNapPanel('35070291');
+  check('migración: también tiene la sección Casa cliente', htmlMig.includes('data-slot="client-loc"'));
+
+  // Backend real: rutas y método.
+  const llamadas = [];
+  WifixAPI.useRealApi = true;
+  const origFetch = ctx.fetch;
+  ctx.fetch = async (u, init) => {
+    llamadas.push({ url: String(u), method: init && init.method, body: init && init.body });
+    const body = init && init.method === 'POST' ? { id: 'x' } : { latest: null, items: [], registeredLocation: null };
+    return { ok: true, status: init && init.method === 'POST' ? 201 : 200, headers: { get: () => null }, json: async () => body, text: async () => JSON.stringify(body) };
+  };
+  await WifixAPI.getClientLocation('35070291');
+  await WifixAPI.createClientLocation('35070291', p1);
+  ctx.fetch = origFetch;
+  WifixAPI.useRealApi = false;
+  check('real: GET y POST /herramientas/v1/accounts/{n}/client-location con el cuerpo tal cual',
+    /\/herramientas\/v1\/accounts\/35070291\/client-location$/.test(llamadas[0].url) && llamadas[0].method === 'GET'
+    && /\/herramientas\/v1\/accounts\/35070291\/client-location$/.test(llamadas[1].url) && llamadas[1].method === 'POST'
+    && JSON.stringify(JSON.parse(llamadas[1].body)) === JSON.stringify(p1), JSON.stringify(llamadas.map((l) => l.url)));
+
+  delete ctx.WifixNative;
+  cache.clear();
+  vm.runInContext('_napPanelState.currentNap = null; _napPanelState.currentNapError = null; _napPanelState.clientLoc = _clientLocEmptyState();', ctx);
+  ctx.selectModule(prev);
 }
 
 console.log('\n== Cómo llegar (native.js) ==');
@@ -976,8 +1232,10 @@ check('notas HTML balanceado', balanced(notes) === null, balanced(notes));
 console.log('\n== Visitas con registros de la app (include=records) ==');
 {
   const conReg = await WifixAPI.getVisits('35070291', { includeRecords: true });
-  check('mock include=records: cada visita trae checklist de 7 tipos',
-    conReg.items.every((t) => t.records && t.records.checklist.length === 7) && conReg.recordsSummary);
+  check('mock include=records: cada visita trae checklist de 8 tipos (con clientLocation)',
+    conReg.items.every((t) => t.records && t.records.checklist.length === 8
+      && t.records.checklist.some((c) => c.type === 'clientLocation' && c.label === 'Ubicación casa cliente'))
+    && conReg.recordsSummary);
   const html = ctx.renderVisitsList(conReg);
   check('visitas con registros: HTML balanceado', balanced(html) === null, balanced(html));
   check('anteriores como tarjetas expandibles (<details>)',
@@ -991,6 +1249,9 @@ console.log('\n== Visitas con registros de la app (include=records) ==');
     html.includes('promedio <strong>12.3 ms</strong>') && html.includes('pérdida <strong>0 %</strong>')
     && html.includes('4 saltos') && html.includes('sin respuesta') && html.includes('-41 dBm')
     && html.includes('142.7 m') && html.includes('ZTEGD0BB8294'));
+  check('visita anterior: registro "Ubicación casa cliente" con coords, precisión y distancias',
+    html.includes('>Ubicación casa cliente<') && html.includes('-2.247811, -79.904402') && html.includes('GPS ±7 m')
+    && html.includes('<strong>41 m</strong> de la NAP NAP-GYE-0412') && html.includes('<strong>31 m</strong> de la ubicación registrada'));
   check('fechas creada/finalizada con el formateador común',
     html.includes('>Creada<') && html.includes('>Finalizada<') && /<time class="dt-abs"/.test(html));
   check('vínculo por tarea / por horario indicado sutilmente',

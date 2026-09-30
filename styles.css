@@ -3932,6 +3932,11 @@ body.console-fullscreen-open { overflow: hidden; }
 .nap-map-dot.free    { background: #2E9E3A; }
 .nap-map-dot.full    { background: #D92D35; }
 .nap-map-dot.unknown { background: var(--gray-500); }
+.nap-map-dot.casa    { background: var(--brand-accent); box-shadow: inset 0 0 0 2px var(--brand-ink); }
+.nap-map-dot.client  { background: var(--surface-card); box-shadow: inset 0 0 0 3px var(--brand-primary); }
+/* Leyenda como lista (Visita técnica / Migración): texto legible, sin viñetas. */
+ul.nap-map-legend { list-style: none; padding: 0; }
+ul.nap-map-legend li { display: inline-flex; align-items: center; }
 .nap-map-unavailable,
 .nap-map-empty {
   display: flex;
@@ -3974,6 +3979,20 @@ body.console-fullscreen-open { overflow: hidden; }
   border: 2px solid #FFFFFF;
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
 }
+/* Casa cliente capturada: amarillo de marca con la casa en morado profundo.
+   Sin guardar: borde punteado (además del texto en tooltip/leyenda). */
+.nap-map-casa {
+  display: flex !important;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  border-radius: 50%;
+  background: var(--brand-accent);
+  color: var(--brand-ink);
+  border: 2px solid var(--brand-ink);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+}
+.nap-map-casa.is-unsaved { border-style: dashed; }
 .nap-map-popup {
   display: flex;
   flex-direction: column;
@@ -4074,8 +4093,13 @@ body.console-fullscreen-open { overflow: hidden; }
   background: var(--warn-bg);
   border: 1px solid var(--warn-border);
 }
-.nap-toggle-nearby-btn { display: block; width: 100%; min-height: 40px; margin-top: 10px; }
-.nap-nearby[hidden] { display: none; }
+.nap-retry-btn { display: block; min-height: 44px; margin-top: 8px; }
+.nap-contracted-hint {
+  margin: 0 0 8px;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
 
 /* Puerto del cliente en la grilla: marco morado, conserva su color de estado. */
 .port-cell.client-port { outline: 3px solid var(--brand-primary); outline-offset: 1px; }
@@ -4539,3 +4563,103 @@ body.console-fullscreen-open { overflow: hidden; }
 .isp-tech-chooser-btns .add-row-btn { min-height: 44px; }
 .isp-uptime { margin: 0 0 10px; font-size: 12px; color: var(--text-primary); }
 .isp-uptime.is-down { color: var(--error-text); font-weight: 600; }
+
+/* ---- Ubicación "Casa cliente" (tarjeta de la NAP del cliente) ------------*/
+.client-loc {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-lavender);
+}
+.client-loc-title {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: var(--brand-primary);
+}
+.client-loc-empty,
+.client-loc-count,
+.client-loc-status {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
+.client-loc-status:empty { display: none; }
+.client-loc-status.ok { color: var(--success-text); }
+.client-loc-status.error { color: var(--error-text); font-weight: 600; }
+.client-loc-saved,
+.client-loc-draft {
+  padding: 8px 10px;
+  border-radius: var(--radius-btn);
+  background: var(--surface-app);
+  border: 1px solid var(--border-lavender);
+}
+.client-loc-draft { border-style: dashed; border-color: var(--brand-primary); }
+.client-loc-saved-head,
+.client-loc-draft-head {
+  margin: 0 0 6px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+.client-loc-facts { margin: 0; display: grid; gap: 4px; }
+.client-loc-facts > div { display: grid; grid-template-columns: minmax(96px, 36%) 1fr; gap: 8px; }
+.client-loc-facts dt { font-size: 11px; color: var(--text-secondary); }
+.client-loc-facts dd { margin: 0; font-size: 12px; color: var(--text-primary); overflow-wrap: anywhere; }
+.client-loc-facts .mono { font-family: ui-monospace, 'Roboto Mono', monospace; }
+.client-loc-warn { color: var(--warn-text); font-weight: 600; }
+.client-loc-error {
+  padding: 8px 10px;
+  border-radius: var(--radius-btn);
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--error-text);
+  background: var(--error-bg);
+  border: 1px solid var(--error-border);
+}
+.client-loc-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.client-loc-gps-btn { min-height: 44px; }
+.client-loc-manual[hidden] { display: none; }
+.client-loc-manual { display: flex; flex-direction: column; gap: 6px; }
+.client-loc-manual .add-row-btn { min-height: 44px; }
+.client-loc-field-error { margin: 0; font-size: 11.5px; color: var(--error-text); }
+.client-loc-field-error:empty { display: none; }
+.client-loc .nap-coord-input[aria-invalid="true"] { border-color: var(--error-border); box-shadow: 0 0 0 1px var(--error-border); }
+.client-loc-notes-label { font-size: 11px; color: var(--text-secondary); }
+.client-loc-notes {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 44px;
+  padding: 8px 10px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--text-primary);
+  background: var(--surface-card);
+  border: 1px solid var(--border-lavender);
+  border-radius: var(--radius-btn);
+  resize: vertical;
+}
+.client-loc-notes:focus-visible { outline: 2px solid var(--brand-primary); outline-offset: 1px; }
+.client-loc-save-btn { width: 100%; }
+/* Botón con aspecto de enlace (acciones secundarias dentro de un bloque). */
+.link-btn {
+  min-height: 44px;
+  padding: 0 4px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--brand-primary);
+  background: none;
+  border: none;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+.link-btn:focus-visible { outline: 2px solid var(--brand-primary); outline-offset: 2px; border-radius: 4px; }

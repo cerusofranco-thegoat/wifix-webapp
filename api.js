@@ -603,9 +603,20 @@
     const center = conCoords ? coords : { latitude: home.latitude, longitude: home.longitude };
     const hit = MOCK_CURRENT_NAPS[cuenta];
     if (!hit) {
+      // El backend ahora SIEMPRE devuelve una NAP: si la operadora no la
+      // informa, una simulada marcada simulated:true / source:'SIMULATED'.
+      const sim = Object.assign({}, mockNearbyNaps(center, { meters: 1000 })[1], { source: 'SIMULATED', simulated: true });
+      const digits = cuenta.replace(/[^0-9]/g, '');
       return Object.assign(base, {
-        found: false, nap: null, portNumber: null, equipmentId: null,
-        clientStatus: null, searchedNaps: 3, reason: 'NOT_FOUND',
+        found: true,
+        nap: sim,
+        portNumber: (Number(digits.slice(-2) || 0) % sim.totalPorts) + 1,
+        equipmentId: null,
+        clientStatus: null,
+        searchedNaps: 0,
+        assignment: 'CONTRACTED',
+        simulated: true,
+        source: 'SIMULATED',
       });
     }
     const nap = mockNearbyNaps(center, { meters: 1000 })[hit.idx];
@@ -616,7 +627,73 @@
       equipmentId: hit.equipmentId,
       clientStatus: Object.assign({}, hit.status),
       searchedNaps: hit.idx + 1,
+      assignment: 'CONTRACTED',
+      simulated: false,
+      source: 'FSM',
     });
+  }
+
+  // --- Ubicación "Casa cliente" (GET/POST /accounts/:n/client-location) ----
+  // Append-only en memoria (se pierde al recargar, igual que el resto del mock).
+  const MOCK_CLIENT_LOCATIONS = {};
+  function mockHaversine(a, b) {
+    const R = 6371000;
+    const toRad = function (d) { return d * Math.PI / 180; };
+    const dLat = toRad(b.latitude - a.latitude);
+    const dLon = toRad(b.longitude - a.longitude);
+    const h = Math.pow(Math.sin(dLat / 2), 2)
+      + Math.cos(toRad(a.latitude)) * Math.cos(toRad(b.latitude)) * Math.pow(Math.sin(dLon / 2), 2);
+    return Math.round(2 * R * Math.asin(Math.sqrt(h)) * 10) / 10;
+  }
+  function mockRegisteredLocation(cuenta) {
+    const p = mockClientProfile(cuenta);
+    return typeof p.latitude === 'number' && typeof p.longitude === 'number'
+      ? { latitude: p.latitude, longitude: p.longitude, source: 'FSM' } : null;
+  }
+  function mockClientLocationList(accountNumber) {
+    const cuenta = String(accountNumber);
+    const items = (MOCK_CLIENT_LOCATIONS[cuenta] || []).slice();
+    return { latest: items[0] || null, items: items, registeredLocation: mockRegisteredLocation(cuenta) };
+  }
+  function mockCreateClientLocation(accountNumber, body) {
+    const cuenta = String(accountNumber);
+    const b = body || {};
+    const lat = Number(b.latitude);
+    const lng = Number(b.longitude);
+    if (!isFinite(lat) || !isFinite(lng) || lat < -90 || lat > 90 || lng < -180 || lng > 180 ||
+        b.label !== 'CASA_CLIENTE' || (b.source !== 'GPS' && b.source !== 'MANUAL')) {
+      const err = new Error('Datos de ubicación inválidos.');
+      err.code = 'VALIDATION_ERROR';
+      err.status = 400;
+      throw err;
+    }
+    const reg = mockRegisteredLocation(cuenta);
+    const cur = mockCurrentNap(cuenta, null);
+    const nap = cur && cur.nap && (!b.napCode || cur.nap.napCode === b.napCode) ? cur.nap : null;
+    const pt = { latitude: lat, longitude: lng };
+    const user = getUser() || { id: 'mock-user-1', email: 'franco@tulpasolutions.com' };
+    const now = nowIso();
+    const rec = {
+      id: uuidMock(),
+      accountNumber: cuenta,
+      label: 'CASA_CLIENTE',
+      latitude: lat,
+      longitude: lng,
+      accuracyMeters: b.accuracyMeters === undefined ? null : b.accuracyMeters,
+      source: b.source,
+      napCode: b.napCode || null,
+      napPort: b.napPort === undefined ? null : b.napPort,
+      taskId: b.taskId || null,
+      capturedAt: b.capturedAt || now,
+      createdAt: now,
+      capturedBy: { id: user.id, email: user.email },
+      registeredLocation: reg,
+      distanceToRegisteredMeters: reg ? mockHaversine(pt, reg) : null,
+      distanceToNapMeters: nap && typeof nap.latitude === 'number' ? mockHaversine(pt, nap) : null,
+    };
+    if (b.notes) rec.notes = String(b.notes);
+    MOCK_CLIENT_LOCATIONS[cuenta] = [rec].concat(MOCK_CLIENT_LOCATIONS[cuenta] || []);
+    return rec;
   }
   // Puertos de una NAP. `napRef` numérico = napId de FSM (detalle real);
   // cualquier otro valor = código de NAP por el camino TEC, sin detalle.
@@ -1447,6 +1524,25 @@
       return Object.assign(mockCurrentNap(accountNumber, conCoords ? coords : null), { degraded: null });
     },
 
+    // Ubicación "Casa cliente" de la cuenta: { latest, items, registeredLocation }.
+    async getClientLocation(accountNumber) {
+      if (this.useRealApi) {
+        return fetchJson('GET', '/accounts/' + encodeURIComponent(accountNumber) + '/client-location');
+      }
+      await delay(60);
+      return mockClientLocationList(accountNumber);
+    },
+    // Nueva captura (append-only, 201). body = { latitude, longitude,
+    // accuracyMeters, label:'CASA_CLIENTE', source:'GPS'|'MANUAL', napCode,
+    // napPort, taskId?, capturedAt, notes? }. Va tal cual: sin clientId/contractId.
+    async createClientLocation(accountNumber, body) {
+      if (this.useRealApi) {
+        return fetchJson('POST', '/accounts/' + encodeURIComponent(accountNumber) + '/client-location', body);
+      }
+      await delay(100);
+      return mockCreateClientLocation(accountNumber, body);
+    },
+
     // ---- ISP Monitor por serial GPON / MAC HFC (campos 9-13) --------------
     // Ficha del equipo: estado del terminal, de la red y evento asociado.
     // opts.technology ('GPON' | 'HFC'): pista cuando la app ya sabe qué equipo
@@ -1542,7 +1638,7 @@
     // pendiente primero (a lo sumo una: la próxima visita) y luego el resto
     // por fecha descendente. Se tolera el array desnudo por robustez.
     // opts.includeRecords → `?include=records`: cada visita trae `records`
-    // (checklist de 7 tipos + los registros de la app asociados por taskId o
+    // (checklist por tipo + los registros de la app asociados por taskId o
     // por horario). Reemplaza al "historial de la app".
     async getVisits(accountNumber, opts) {
       const withRecords = !!(opts && opts.includeRecords);
@@ -1564,7 +1660,7 @@
   // Mock de visitas: una pendiente (la más reciente, sin notas de cierre) y el
   // historial con la mezcla de resultados que devuelve la operadora. Nunca más
   // de una PENDIENTE. Con `withRecords`, cada visita trae `records` con la
-  // forma de VisitRecords (checklist de 7 tipos + registros por tipo).
+  // forma de VisitRecords (checklist de 8 tipos + registros por tipo).
   const VISIT_CHECKLIST = [
     ['speedtest', 'Speedtest (app)'],
     ['externalSpeedtest', 'Speedtest (dispositivo externo)'],
@@ -1572,6 +1668,7 @@
     ['traceroute', 'Traceroute'],
     ['wifiSignal', 'Medición de señal WiFi'],
     ['distance', 'Medición de distancia'],
+    ['clientLocation', 'Ubicación casa cliente'],
     ['retiredEquipment', 'Equipos retirados'],
   ];
   function mockVisitRecords(visit, accountNumber, spec) {
@@ -1583,7 +1680,7 @@
     const base = function (min, by) {
       return Object.assign({ id: uuidMock(), accountNumber: acct, createdAt: at(min - 1), measuredAt: at(min) }, link(by));
     };
-    const r = { speedtests: [], pingTests: [], tracerouteTests: [], wifiHeatmaps: [], distanceMeasurements: [], retiredEquipment: [] };
+    const r = { speedtests: [], pingTests: [], tracerouteTests: [], wifiHeatmaps: [], distanceMeasurements: [], clientLocations: [], retiredEquipment: [] };
     (spec || []).forEach(function (k) {
       if (k === 'ext') {
         r.speedtests.push(Object.assign(base(40, 'TASK_ID'), {
@@ -1626,6 +1723,15 @@
         }));
       }
       if (k === 'dist') r.distanceMeasurements.push(Object.assign(base(20, 'TIME_WINDOW'), { distanceMeters: 142.7 }));
+      if (k === 'loc') {
+        r.clientLocations.push(Object.assign(base(18, 'TASK_ID'), {
+          label: 'CASA_CLIENTE', latitude: -2.247811, longitude: -79.904402, accuracyMeters: 6.5, source: 'GPS',
+          napCode: 'NAP-GYE-0412', napPort: 7, capturedAt: at(18),
+          capturedBy: { id: 'mock-user-1', email: 'franco@tulpasolutions.com' },
+          registeredLocation: { latitude: -2.247946, longitude: -79.904161, source: 'FSM' },
+          distanceToRegisteredMeters: 30.6, distanceToNapMeters: 41.2,
+        }));
+      }
       if (k === 'retired') {
         r.retiredEquipment.push(Object.assign(base(15, 'TASK_ID'), {
           equipmentModelId: 'ONT ZTE (todas)', serialValue: 'ZTEGD0BB8294', removalReasonCode: 'DANADO', retiredAt: at(15),
@@ -1639,9 +1745,10 @@
       traceroute: r.tracerouteTests.length,
       wifiSignal: r.wifiHeatmaps.length,
       distance: r.distanceMeasurements.length,
+      clientLocation: r.clientLocations.length,
       retiredEquipment: r.retiredEquipment.length,
     };
-    const all = [].concat(r.speedtests, r.pingTests, r.tracerouteTests, r.wifiHeatmaps, r.distanceMeasurements, r.retiredEquipment);
+    const all = [].concat(r.speedtests, r.pingTests, r.tracerouteTests, r.wifiHeatmaps, r.distanceMeasurements, r.clientLocations, r.retiredEquipment);
     const kinds = all.map(function (x) { return x.linkedBy; })
       .filter(function (v, i, arr) { return arr.indexOf(v) === i; });
     const until = visit.endedAt
@@ -1669,7 +1776,7 @@
 
     const historial = [
       { seed: 6,  result: 'INSATISFACTORIA', reason: 'Intermitencia en la conexión', notesLoaded: true, recs: ['ext', 'ping', 'trace'] },
-      { seed: 14, result: 'SATISFACTORIA',   reason: 'WiFi débil en habitaciones',    notesLoaded: false, recs: ['wifi', 'dist', 'retired'] },
+      { seed: 14, result: 'SATISFACTORIA',   reason: 'WiFi débil en habitaciones',    notesLoaded: false, recs: ['wifi', 'dist', 'loc', 'retired'] },
       { seed: 27, result: 'CANCELADA',       reason: 'Cliente ausente',               notesLoaded: true, closingNotes: 'Cliente no se encontraba en el domicilio.', recs: [] },
       { seed: 41, result: 'REALIZADA',       reason: 'Cambio de equipo',              notesLoaded: false, recs: ['app'] },
       { seed: 63, result: 'SATISFACTORIA',   reason: 'Instalación',                   notesLoaded: false, recs: [] },
