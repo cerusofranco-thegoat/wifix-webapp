@@ -23,7 +23,6 @@ const backBtn = document.getElementById('backBtn');
 const subCards = subscreen.querySelectorAll('.sub-card');
 
 const detailPersonales = document.getElementById('detailPersonales');
-const detailEyebrow = document.getElementById('detailEyebrow');
 const accountChip = document.getElementById('accountChip');
 const detailList = document.getElementById('detailList');
 const backFromPersonales = document.getElementById('backFromPersonales');
@@ -51,20 +50,20 @@ const INSTALL_SECTIONS = Object.freeze({
 
 const MODULES = {
   instalaciones: {
-    eyebrow: 'Categoría', title: 'Instalaciones',
+    eyebrow: 'Categoría', title: 'Instalaciones', label: 'Instalaciones',
     ...INSTALL_SECTIONS,
   },
   migraciones: {
-    eyebrow: 'Categoría', title: 'Migraciones',
+    eyebrow: 'Categoría', title: 'Migraciones', label: 'Migraciones',
     ...INSTALL_SECTIONS,
   },
   visitas: {
-    eyebrow: 'Categoría', title: 'Visitas técnicas',
+    eyebrow: 'Categoría', title: 'Visitas técnicas', label: 'Visita técnica',
     cards: ['personales', 'servicio', 'red', 'herramientas', 'retirados'],
     servicio: null,
   },
   cancelaciones: {
-    eyebrow: 'Categoría', title: 'Cancelación de servicio',
+    eyebrow: 'Categoría', title: 'Cancelación de servicio', label: 'Cancelación',
     cards: ['personales', 'retirados'],
     servicio: [],
   },
@@ -74,6 +73,23 @@ let currentCategory = 'instalaciones';
 
 function currentModule() {
   return MODULES[currentCategory] || MODULES.instalaciones;
+}
+
+// Nombre corto del módulo principal escogido. Es el eyebrow de TODAS las
+// pantallas internas (Datos personales, Datos del servicio, Red interna,
+// Herramientas, Equipos retirados): un solo punto de verdad, nada hardcodeado.
+function moduleLabel(category = currentCategory) {
+  const meta = MODULES[category] || MODULES.instalaciones;
+  return meta.label || meta.title;
+}
+
+// Pinta el nombre del módulo en todos los [data-module-eyebrow] del DOM.
+function applyModuleLabels() {
+  const label = moduleLabel();
+  document.querySelectorAll('[data-module-eyebrow]').forEach((el) => {
+    el.textContent = label;
+  });
+  return label;
 }
 
 function moduleHasCard(sub) {
@@ -275,6 +291,7 @@ function selectModule(type) {
   const meta = currentModule();
   subEyebrow.textContent = meta.eyebrow;
   subHeading.textContent = meta.title;
+  applyModuleLabels();
   applyModuleVisibility();
   return true;
 }
@@ -1096,7 +1113,7 @@ async function openDatosPersonales() {
     return;
   }
   accountChip.textContent = cuenta;
-  detailEyebrow.textContent = currentModule().title;
+  applyModuleLabels();
 
   detailPersonales.classList.add('open');
   detailPersonales.setAttribute('aria-hidden', 'false');

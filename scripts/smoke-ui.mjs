@@ -1262,6 +1262,39 @@ check('ningún módulo referencia el panel eliminado "unsat"',
 check('un módulo desconocido se ignora',
   ctx.selectModule('asistencia') === false && vm.runInContext('currentCategory', ctx) === 'cancelaciones');
 
+console.log('\n== Nombre del módulo en las pantallas internas ==');
+{
+  const LABELS = { instalaciones: 'Instalaciones', migraciones: 'Migraciones', visitas: 'Visita técnica', cancelaciones: 'Cancelación' };
+  const html = readFileSync(base + 'index.html', 'utf8');
+  const detalles = [...html.matchAll(/<section class="detailscreen" id="([^"]+)"[\s\S]*?<\/section>/g)];
+  check('cada pantalla interna tiene su eyebrow marcado con data-module-eyebrow',
+    detalles.length === 5 && detalles.every((m) => m[0].includes('class="sub-eyebrow" data-module-eyebrow')),
+    detalles.map((m) => m[1]).join(','));
+  check('index.html ya no tiene eyebrows fijos (Diagnóstico/Registro/id viejo)',
+    !/sub-eyebrow">(Instalaciones|Diagnóstico|Registro)</.test(html) && !html.includes('detailEyebrow'));
+  check('app.js sin referencias muertas a detailEyebrow', !readFileSync(base + 'app.js', 'utf8').includes('detailEyebrow'));
+  // Eyebrows falsos: selectModule tiene que pintarlos todos.
+  const eyebrows = [fakeEl(), fakeEl(), fakeEl(), fakeEl(), fakeEl()];
+  const qsaDoc = documentStub.querySelectorAll;
+  documentStub.querySelectorAll = (sel) => (sel === '[data-module-eyebrow]' ? eyebrows : qsaDoc(sel));
+  const prev = vm.runInContext('currentCategory', ctx);
+  for (const [mod, label] of Object.entries(LABELS)) {
+    check(`moduleLabel(${mod}) = "${label}"`, ctx.moduleLabel(mod) === label, ctx.moduleLabel(mod));
+    ctx.selectModule(mod);
+    check(`${mod}: todos los eyebrows internos muestran "${label}"`,
+      eyebrows.every((e) => e.textContent === label), eyebrows.map((e) => e.textContent).join('|'));
+  }
+  check('visita técnica y migraciones ya no dicen "Instalaciones"', (() => {
+    ctx.selectModule('visitas');
+    const v = eyebrows.every((e) => e.textContent !== 'Instalaciones');
+    ctx.selectModule('migraciones');
+    return v && eyebrows.every((e) => e.textContent === 'Migraciones');
+  })());
+  check('moduleLabel sin argumento usa el módulo vigente', ctx.moduleLabel() === 'Migraciones');
+  documentStub.querySelectorAll = qsaDoc;
+  ctx.selectModule(prev);
+}
+
 console.log('\n== Sin chip de marca ==');
 {
   const html = readFileSync(base + 'index.html', 'utf8');
