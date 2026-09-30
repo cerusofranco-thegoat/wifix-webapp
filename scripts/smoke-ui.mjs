@@ -1435,6 +1435,69 @@ console.log('\n== Identidad del cliente con FSM sin datos (client-profile) ==');
   ctx.selectModule('instalaciones');
 }
 
+console.log('\n== Ingreso por cédula/RUC (POST /accounts/lookup) ==');
+{
+  const api = ctx.WifixAPI;
+  const html = readFileSync(base + 'index.html', 'utf8');
+  check('selector "Ingresar por": cuenta, cédula/RUC y orden FSM deshabilitada con "Próximamente"',
+    html.includes('role="radiogroup"') && html.includes('data-mode="account"') && html.includes('data-mode="document"')
+    && /data-mode="order"[^>]*aria-disabled="true"/.test(html) && html.includes('Próximamente'));
+  const dos = await api.lookupAccountsByDocument('912345678');   // 9 dígitos → se restituye el 0
+  check('mock lookup: cédula con 2 cuentas, sin devolver el documento',
+    dos.by === 'document' && dos.documentKind === 'CEDULA' && dos.count === 2
+    && !JSON.stringify(dos).includes('0912345678'));
+  check('mock lookup: RUC y sin coincidencias',
+    (await api.lookupAccountsByDocument('0990012345001')).documentKind === 'RUC'
+    && (await api.lookupAccountsByDocument('1799999999')).matches.length === 0);
+
+  let enviado = null;
+  const origFetch = ctx.fetch;
+  api.useRealApi = true;
+  ctx.fetch = async (url, init) => { enviado = { url: String(url), init }; return { ok: true, status: 200, headers: { get: () => null }, json: async () => dos, text: async () => JSON.stringify(dos) }; };
+  try { await api.lookupAccountsByDocument('0912345678'); } catch (_) { /* solo interesa la petición */ }
+  api.useRealApi = false;
+  ctx.fetch = origFetch;
+  check('lookup real: POST con el documento en el cuerpo, nunca en la URL',
+    enviado && enviado.init.method === 'POST' && /\/accounts\/lookup$/.test(enviado.url)
+    && !enviado.url.includes('0912345678') && JSON.parse(enviado.init.body).document === '0912345678',
+    enviado && enviado.url);
+
+  const multi = ctx.lookupOutcome(dos, 'instalaciones');
+  const lista = ctx.lookupResultsHtml(multi);
+  check('varias cuentas: lista para elegir con cuenta, estado, ciudad y tipo',
+    multi.kind === 'multiple' && balanced(lista) === null
+    && lista.includes('data-account="35070291"') && lista.includes('Suspendido') && lista.includes('GUAYAQUIL')
+    && lista.includes('RESIDENCIAL'));
+  check('una cuenta: sigue el flujo normal', ctx.lookupOutcome({ matches: [dos.matches[0]] }).kind === 'single');
+  check('cero cuentas: mensaje claro (y distinto en Cancelaciones)',
+    ctx.lookupOutcome({ matches: [] }, 'instalaciones').message.includes('No hay cuentas')
+    && ctx.lookupOutcome({ matches: [] }, 'cancelaciones').message.includes('cancelados'));
+  check('base vacía: WHITELIST_EMPTY se explica',
+    ctx.lookupOutcome({ matches: [], reason: 'WHITELIST_EMPTY' }).kind === 'empty-db');
+
+  // Flujo completo: 1 match → confirma esa cuenta con la whitelist de siempre.
+  const origWarn = console.warn;
+  console.warn = () => {};
+  ctx.selectModule('instalaciones');
+  ctx.setEntryMode('document');
+  const input = vm.runInContext('accountInput', ctx);
+  input.value = '0923456789';
+  await ctx.lookupByDocumentFlow();
+  check('1 match: pasa a modo cuenta, deja el nº de cuenta (no la cédula) y confirma',
+    vm.runInContext('accountEntryMode', ctx) === 'account' && input.value === '40123456'
+    && vm.runInContext('validatedAccount', ctx) === '40123456');
+  ctx.setEntryMode('document');
+  input.value = '1799999999';
+  await ctx.lookupByDocumentFlow();
+  const fb = vm.runInContext('confirmAccountFeedback', ctx);
+  check('0 matches: no confirma nada y avisa', fb.textContent.includes('No hay cuentas')
+    && vm.runInContext('validatedAccount', ctx) === null);
+  ctx.setEntryMode('account');
+  input.value = '';
+  ctx.invalidateAccountCache();
+  console.warn = origWarn;
+}
+
 console.log('\n== Speedtest con dispositivo externo (simulado) ==');
 {
   const html = ctx.externalSpeedtestHtml();

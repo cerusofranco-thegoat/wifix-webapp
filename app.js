@@ -360,11 +360,13 @@ function applyModuleVisibility() {
 accountInput.addEventListener('input', () => {
   inputWrap.classList.toggle('has-value', accountInput.value.length > 0);
   invalidateAccountCache();
+  clearLookupResults();
 });
 clearAccount.addEventListener('click', () => {
   accountInput.value = '';
   inputWrap.classList.remove('has-value');
   invalidateAccountCache();
+  clearLookupResults();
   accountInput.focus();
 });
 
@@ -376,7 +378,197 @@ applyModuleVisibility();
 const confirmAccountBtn = document.getElementById('confirmAccount');
 const confirmAccountFeedback = document.getElementById('confirmAccountFeedback');
 
-confirmAccountBtn.addEventListener('click', () => { confirmAccountFlow(); });
+confirmAccountBtn.addEventListener('click', () => {
+  if (accountEntryMode === 'document') lookupByDocumentFlow();
+  else confirmAccountFlow();
+});
+
+// === Ingresar por: Nº de cuenta / Cédula-RUC / Nº de orden FSM ===============
+// Por cédula se buscan las cuentas del titular (POST /accounts/lookup) y la
+// elegida sigue EXACTAMENTE el flujo de Confirmar cuenta (whitelist, regla de
+// Cancelaciones, modo limitado ante 503). El documento nunca se guarda: al
+// elegir la cuenta el campo pasa a mostrar el nº de cuenta.
+// El ingreso por nº de orden FSM queda visible pero deshabilitado: el backend
+// responde 501 NOT_IMPLEMENTED (la operadora no expone orden → cuenta).
+const entryModeGroup = document.getElementById('entryMode');
+const accountFieldHint = document.getElementById('accountFieldHint');
+const accountLookupResults = document.getElementById('accountLookupResults');
+
+const ENTRY_MODES = Object.freeze({
+  account: Object.freeze({ hint: 'Nº de cuenta', placeholder: 'Ingresa el número de cuenta',
+    maxlength: 20, inputmode: 'numeric', button: 'Confirmar cuenta' }),
+  document: Object.freeze({ hint: 'Cédula o RUC del titular', placeholder: 'Cédula (10 dígitos) o RUC (13)',
+    maxlength: 32, inputmode: 'numeric', button: 'Buscar cuentas' }),
+});
+const ORDER_ENTRY_UNAVAILABLE = 'El ingreso por nº de orden FSM todavía no está disponible: la operadora no expone la consulta de orden a cuenta. Ingresa con el nº de cuenta o la cédula.';
+
+let accountEntryMode = 'account';
+
+function entryModeButtons() {
+  return entryModeGroup ? Array.from(entryModeGroup.querySelectorAll('[data-mode]')) : [];
+}
+
+function clearLookupResults() {
+  if (!accountLookupResults) return;
+  accountLookupResults.innerHTML = '';
+  accountLookupResults.hidden = true;
+}
+
+// Cambia el modo de ingreso. Siempre limpia el campo y la cuenta confirmada:
+// una cédula nunca debe quedar interpretada como nº de cuenta (ni al revés).
+function setEntryMode(mode) {
+  if (!ENTRY_MODES[mode]) return;
+  accountEntryMode = mode;
+  const cfg = ENTRY_MODES[mode];
+  entryModeButtons().forEach((b) => {
+    const on = b.dataset.mode === mode;
+    b.classList.toggle('is-active', on);
+    b.setAttribute('aria-checked', on ? 'true' : 'false');
+    b.setAttribute('tabindex', on ? '0' : '-1');
+  });
+  if (accountFieldHint) accountFieldHint.textContent = cfg.hint;
+  accountInput.setAttribute('placeholder', cfg.placeholder);
+  accountInput.setAttribute('maxlength', String(cfg.maxlength));
+  accountInput.setAttribute('inputmode', cfg.inputmode);
+  accountInput.value = '';
+  inputWrap.classList.remove('has-value');
+  confirmAccountBtn.textContent = cfg.button;
+  invalidateAccountCache();
+  clearLookupResults();
+}
+
+if (entryModeGroup) {
+  entryModeGroup.addEventListener('click', (ev) => {
+    const btn = ev.target && ev.target.closest ? ev.target.closest('[data-mode]') : null;
+    if (!btn) return;
+    if (btn.getAttribute('aria-disabled') === 'true') {
+      confirmAccountFeedback.textContent = ORDER_ENTRY_UNAVAILABLE;
+      confirmAccountFeedback.className = 'confirm-account-feedback warning';
+      return;
+    }
+    if (btn.dataset.mode !== accountEntryMode) setEntryMode(btn.dataset.mode);
+    accountInput.focus();
+  });
+  // Radiogroup: flechas entre las opciones habilitadas.
+  entryModeGroup.addEventListener('keydown', (ev) => {
+    if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(ev.key)) return;
+    const enabled = entryModeButtons().filter(b => b.getAttribute('aria-disabled') !== 'true');
+    const i = enabled.findIndex(b => b.dataset.mode === accountEntryMode);
+    if (i < 0 || enabled.length < 2) return;
+    ev.preventDefault();
+    const step = ev.key === 'ArrowLeft' || ev.key === 'ArrowUp' ? -1 : 1;
+    const next = enabled[(i + step + enabled.length) % enabled.length];
+    setEntryMode(next.dataset.mode);
+    next.focus();
+  });
+}
+
+/** Documento sin espacios, puntos ni guiones (el backend normaliza igual). */
+function normalizeDocumentInput(raw) {
+  return String(raw || '').replace(/[\s.\-]/g, '');
+}
+
+// Traduce la respuesta del lookup. Pura (sin DOM) para el smoke.
+//   single   → 1 cuenta: sigue el flujo normal de confirmar
+//   multiple → varias: el técnico elige
+//   none     → 0 cuentas (mensaje distinto en Cancelaciones)
+//   empty-db → la base de clientes nunca se importó
+function lookupOutcome(res, category) {
+  const matches = res && Array.isArray(res.matches) ? res.matches.filter(m => m && m.accountNumber) : [];
+  if (res && res.reason === 'WHITELIST_EMPTY') {
+    return { kind: 'empty-db', matches: [],
+      message: 'La base de clientes de Xtrim no está cargada: no se puede buscar por cédula. Ingresa con el número de cuenta.' };
+  }
+  if (matches.length === 1) return { kind: 'single', matches, match: matches[0] };
+  if (matches.length > 1) return { kind: 'multiple', matches, truncated: !!(res && res.truncated) };
+  const message = category === 'cancelaciones'
+    ? 'No hay cuentas activas con ese documento. Los clientes cancelados salen de la base de Xtrim: en una cancelación ingresa con el número de cuenta.'
+    : 'No hay cuentas con ese documento en la base de clientes de Xtrim. Verifica el número o ingresa con el número de cuenta.';
+  return { kind: 'none', matches: [], message };
+}
+
+// Lista para elegir la cuenta (sin DOM, para el smoke). El documento no se
+// muestra: solo lo que devuelve el backend.
+function lookupResultsHtml(outcome) {
+  const items = outcome.matches.map((m) => {
+    const grupo = clientStatusGroup(m.status);
+    const tipo = [m.businessType, m.accountType].filter(Boolean).join(' · ');
+    const mora = whitelistMora(m);
+    return `
+      <li>
+        <button type="button" class="lookup-item" data-account="${escapeHtml(m.accountNumber)}"
+          aria-label="Elegir cuenta ${escapeHtml(m.accountNumber)}, ${escapeHtml(grupo.label)}${m.city ? ', ' + escapeHtml(m.city) : ''}">
+          <span class="lookup-item-head">
+            <span class="lookup-item-account">${escapeHtml(m.accountNumber)}</span>
+            <span class="wl-chip ${grupo.tile}">${escapeHtml(grupo.label)}</span>
+          </span>
+          ${m.fullName ? `<span class="lookup-item-name">${escapeHtml(m.fullName)}</span>` : ''}
+          <span class="lookup-item-meta">${escapeHtml([m.city, tipo].filter(Boolean).join(' · ') || 'Sin ciudad ni tipo')}${mora ? ` · <span class="wl-mora">${escapeHtml(mora)}</span>` : ''}</span>
+        </button>
+      </li>`;
+  }).join('');
+  return `
+    <p class="lookup-title" id="lookupTitle">${outcome.matches.length} cuentas con ese documento. Elige la de esta visita:</p>
+    <ul class="lookup-list" aria-labelledby="lookupTitle">${items}</ul>
+    ${outcome.truncated ? '<p class="lookup-note">Hay más de 50 cuentas con ese documento: se muestran las primeras 50.</p>' : ''}`;
+}
+
+// El técnico eligió (o hubo una sola): pasa a modo nº de cuenta y confirma.
+function selectLookupAccount(accountNumber) {
+  setEntryMode('account');
+  accountInput.value = String(accountNumber);
+  inputWrap.classList.add('has-value');
+  return confirmAccountFlow();
+}
+
+async function lookupByDocumentFlow() {
+  const raw = (accountInput.value || '').trim();
+  const doc = normalizeDocumentInput(raw);
+  clearLookupResults();
+  if (doc.length < 6) {
+    confirmAccountFeedback.textContent = 'Ingresa la cédula (10 dígitos) o el RUC (13 dígitos) del titular.';
+    confirmAccountFeedback.className = 'confirm-account-feedback error';
+    return;
+  }
+  const category = currentCategory;
+  confirmAccountBtn.disabled = true;
+  confirmAccountBtn.textContent = 'Buscando…';
+  confirmAccountFeedback.textContent = '';
+  confirmAccountFeedback.className = 'confirm-account-feedback';
+  let outcome = null;
+  try {
+    const res = await WifixAPI.lookupAccountsByDocument(doc);
+    outcome = lookupOutcome(res, category);
+  } catch (err) {
+    console.error('[Wifix] lookup por documento:', err);
+    confirmAccountFeedback.textContent = isUpstreamOrNetworkFailure(err)
+      ? `No se pudo buscar por cédula en este momento (${err.message || 'sin conexión'}). Ingresa con el número de cuenta.`
+      : (err.message || 'No se pudo buscar por cédula.');
+    confirmAccountFeedback.className = `confirm-account-feedback ${isUpstreamOrNetworkFailure(err) ? 'warning' : 'error'}`;
+  } finally {
+    confirmAccountBtn.disabled = false;
+    confirmAccountBtn.textContent = ENTRY_MODES[accountEntryMode].button;
+  }
+  if (!outcome) return;
+
+  if (outcome.kind === 'single') {
+    await selectLookupAccount(outcome.match.accountNumber);
+    return;
+  }
+  if (outcome.kind === 'multiple') {
+    if (!accountLookupResults) return;
+    accountLookupResults.innerHTML = lookupResultsHtml(outcome);
+    accountLookupResults.hidden = false;
+    accountLookupResults.querySelectorAll('[data-account]').forEach((b) => {
+      b.addEventListener('click', () => { selectLookupAccount(b.dataset.account); });
+    });
+    const first = accountLookupResults.querySelector('[data-account]');
+    if (first && first.focus) first.focus();
+    return;
+  }
+  confirmAccountFeedback.textContent = outcome.message;
+  confirmAccountFeedback.className = 'confirm-account-feedback error';
+}
 
 // Confirma la cuenta: perfil de la operadora + whitelist de Xtrim EN PARALELO.
 // La whitelist se resuelve primero (es local del backend, rápida); si bloquea,
@@ -457,7 +649,7 @@ async function confirmAccountFlow() {
     }
   } finally {
     confirmAccountBtn.disabled = false;
-    confirmAccountBtn.textContent = 'Confirmar cuenta';
+    confirmAccountBtn.textContent = ENTRY_MODES[accountEntryMode].button;
   }
 }
 

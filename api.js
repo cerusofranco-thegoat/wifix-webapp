@@ -403,6 +403,44 @@
     return Object.assign({ accountNumber: cuenta, listed: true }, hit,
       { importedAt: MOCK_WHITELIST_IMPORTED_AT, enforce: true });
   }
+  // Ingreso por cédula/RUC (POST /accounts/lookup), modo demo. Misma
+  // normalización que el backend (sin espacios/puntos/guiones; 9 → 10 y
+  // 12 → 13 dígitos restituyendo el 0). Las cuentas salen de MOCK_WHITELIST
+  // para que "Confirmar" siga el mismo camino que por número de cuenta:
+  //   0912345678    → 2 cuentas (35070291 ACTIVO, 35070288 SUSPENDIDO)
+  //   0923456789    → 1 cuenta (40123456)
+  //   0990012345001 → RUC con 1 cuenta (50000001)
+  //   resto         → sin coincidencias
+  const MOCK_LOOKUP = {
+    '0912345678': [{ n: '35070291', fullName: 'PEREZ GOMEZ JUAN CARLOS' }, { n: '35070288', fullName: 'PEREZ GOMEZ JUAN CARLOS' }],
+    '0923456789': [{ n: '40123456', fullName: 'ZAMBRANO VERA MARIA JOSE' }],
+    '0990012345001': [{ n: '50000001', fullName: 'COMERCIAL MANTA S.A.' }],
+  };
+  function normalizeDocument(raw) {
+    let d = String(raw || '').replace(/[\s.\-]/g, '');
+    if (/^\d{9}$/.test(d) || /^\d{12}$/.test(d)) d = '0' + d;
+    return d;
+  }
+  function mockLookup(document) {
+    const doc = normalizeDocument(document);
+    if (doc.length < 6) {
+      const err = new Error('El documento debe tener al menos 6 caracteres.');
+      err.code = 'VALIDATION_ERROR';
+      err.status = 400;
+      throw err;
+    }
+    const kind = /^\d{10}$/.test(doc) ? 'CEDULA' : /^\d{13}$/.test(doc) ? 'RUC' : 'OTRO';
+    const matches = (MOCK_LOOKUP[doc] || []).map(function (m) {
+      const w = MOCK_WHITELIST[m.n] || {};
+      return {
+        accountNumber: m.n, status: w.status || 'ACTIVO', city: w.city || null, node: w.node || null,
+        businessType: w.businessType || null, accountType: w.accountType || null,
+        accessType: w.accessType || null, fullName: m.fullName,
+      };
+    });
+    return { by: 'document', documentKind: kind, matches: matches, count: matches.length,
+      truncated: false, importedAt: MOCK_WHITELIST_IMPORTED_AT };
+  }
   // Estado de la integración. No toca la operadora: es información local.
   function mockFsmHealth() {
     const in24h = new Date(Date.now() + 86400000).toISOString();
@@ -1095,6 +1133,19 @@
       }
       await delay(60);
       return mockWhitelist(accountNumber);
+    },
+
+    // Ingreso por cédula/RUC. POST (no GET): el documento viaja en el cuerpo,
+    // nunca en la URL. Respuesta: { by, documentKind, matches[], count,
+    // truncated, importedAt, reason? }; el documento nunca vuelve.
+    // (El ingreso por nº de orden FSM responde 501 NOT_IMPLEMENTED: la UI lo
+    // muestra deshabilitado y no lo llama.)
+    async lookupAccountsByDocument(document) {
+      if (this.useRealApi) {
+        return fetchJson('POST', '/accounts/lookup', { document: String(document || '').trim() });
+      }
+      await delay(70);
+      return mockLookup(document);
     },
 
     // ---- Integración FSM ---------------------------------------------------

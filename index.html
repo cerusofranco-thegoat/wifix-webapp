@@ -205,9 +205,18 @@
         </header>
 
         <div class="account-field">
+          <!-- Ingresar por: nº de cuenta (default), cédula/RUC, o nº de orden FSM
+               (deshabilitado: la operadora aún no expone orden→cuenta). -->
+          <div class="entry-mode" id="entryMode" role="radiogroup" aria-label="Ingresar por">
+            <button type="button" class="entry-mode-btn is-active" role="radio" aria-checked="true" data-mode="account">Nº de cuenta</button>
+            <button type="button" class="entry-mode-btn" role="radio" aria-checked="false" tabindex="-1" data-mode="document">Cédula / RUC</button>
+            <button type="button" class="entry-mode-btn" role="radio" aria-checked="false" tabindex="-1" data-mode="order"
+              aria-disabled="true" aria-describedby="entryModeOrderSoon">Nº de orden FSM
+              <span class="soon-badge" id="entryModeOrderSoon">Próximamente</span></button>
+          </div>
           <label for="accountInput">
             <span class="field-label">Cuenta del Cliente</span>
-            <span class="field-hint">Nº de cuenta</span>
+            <span class="field-hint" id="accountFieldHint">Nº de cuenta</span>
           </label>
           <div class="input-wrap">
             <span class="input-icon">
@@ -237,6 +246,7 @@
           </button>
           <div class="confirm-account-feedback" id="confirmAccountFeedback" role="alert" aria-live="polite"></div>
           <div class="confirm-account-whitelist" id="confirmAccountWhitelist" aria-live="polite" hidden></div>
+          <div class="account-lookup" id="accountLookupResults" hidden></div>
         </div>
 
         <div class="sub-intro">
