@@ -185,6 +185,12 @@
     return ctx;
   }
 
+  // ?technology=GPON|HFC (pista opcional de ISP Monitor).
+  function techQuery(opts) {
+    const t = normalizeTechHint(opts && opts.technology);
+    return t ? '?technology=' + t : '';
+  }
+
   function delay(ms) {
     return new Promise(function (resolve) { setTimeout(resolve, ms); });
   }
@@ -758,13 +764,13 @@
       fetchedAt: nowIso(),
     };
   }
-  function mockTerminalSnapshot(id) {
-    const isMac = /^[0-9A-F]{12}$/i.test(String(id).replace(/[:-]/g, ''));
+  function mockTerminalSnapshot(id, opts) {
+    const tech = mockTechnology(id, opts && opts.technology).technology;
     return {
       id: id,
       found: true,
       online: true,
-      technology: isMac ? 'HFC' : 'GPON',
+      technology: tech,
       city: 'Quito',
       networkIds: [9198],
       event: { active: false, description: null },
@@ -783,22 +789,187 @@
       fetchedAt: nowIso(),
     };
   }
-  function mockDiagnostics(id) {
-    const isMac = /^[0-9A-F]{12}$/i.test(String(id).replace(/[:-]/g, ''));
-    // SNR y codewords son métricas DOCSIS: en GPON la operadora responde 204.
-    const docsis = function (scope, metric) {
-      return isMac
+  // Pista de tecnología (?technology=): mismos sinónimos que el backend.
+  function normalizeTechHint(hint) {
+    const h = String(hint || '').trim().toUpperCase();
+    if (!h) return null;
+    if (['GPON', 'ONT', 'ONU', 'XPON', 'FIBRA', 'FTTH'].indexOf(h) >= 0) return 'GPON';
+    if (['HFC', 'CABLEMODEM', 'CM', 'DOCSIS'].indexOf(h) >= 0) return 'HFC';
+    return null;
+  }
+  // Tecnología en modo demo: pista → HINT; MAC 12-hex → HFC y serial de
+  // vendor (4 letras + 8 hex) → GPON por formato; el resto queda sin
+  // identificar (null / UNKNOWN), para probar el selector de la app.
+  function mockTechnology(id, hint) {
+    const h = normalizeTechHint(hint);
+    if (h) return { technology: h, technologySource: 'HINT' };
+    const clean = String(id).replace(/[:-]/g, '').toUpperCase();
+    if (/^[0-9A-F]{12}$/.test(clean)) return { technology: 'HFC', technologySource: 'ID_FORMAT' };
+    if (/^[A-Z]{4}[0-9A-F]{8}$/.test(clean)) return { technology: 'GPON', technologySource: 'ID_FORMAT' };
+    return { technology: null, technologySource: 'UNKNOWN' };
+  }
+  // Instante ISO con offset de Ecuador (…-05:00), como startedAtLocal.
+  function isoEcuador(iso) {
+    if (!iso) return null;
+    const d = new Date(new Date(iso).getTime() - 5 * 3600000);
+    return d.toISOString().replace('Z', '-05:00');
+  }
+  // Caídas (OutageSummary) a partir de la serie de estado del terminal: la
+  // más reciente primero. La causa solo la simula el mock.
+  function mockOutages(statusSeries, technology) {
+    const pts = (statusSeries && statusSeries.points) || [];
+    const items = [];
+    let cur = null;
+    pts.forEach(function (p) {
+      const v = p.values ? p.values.online : undefined;
+      if (v === undefined) return;
+      if (v <= 0 && !cur) cur = { startedAt: p.t, last: p.t };
+      else if (v <= 0) cur.last = p.t;
+      else if (cur) { cur.endedAt = p.t; items.push(cur); cur = null; }
+    });
+    if (cur) { cur.endedAt = null; items.push(cur); }
+    const until = pts.length ? pts[pts.length - 1].t : nowIso();
+    const cause = technology === 'GPON'
+      ? { cause: 'LOS', causeLabel: 'Pérdida de señal óptica (LOS)' }
+      : technology === 'HFC'
+        ? { cause: 'T3_TIMEOUT', causeLabel: 'Timeout T3 (sin respuesta del CMTS)' }
+        : { cause: 'UNKNOWN', causeLabel: 'Causa no informada por el monitoreo' };
+    const out = items.map(function (o) {
+      const end = o.endedAt ? new Date(o.endedAt).getTime() : Date.now();
+      return Object.assign({
+        startedAt: o.startedAt,
+        startedAtLocal: isoEcuador(o.startedAt),
+        endedAt: o.endedAt,
+        endedAtLocal: isoEcuador(o.endedAt),
+        durationSeconds: Math.round((end - new Date(o.startedAt).getTime()) / 1000),
+        ongoing: !o.endedAt,
+        precisionSeconds: 300,
+        simulated: true,
+      }, cause);
+    }).reverse();
+    return {
+      source: 'SIMULATED',
+      causeSource: 'SIMULATED',
+      simulated: true,
+      timezone: 'America/Guayaquil',
+      window: { from: pts.length ? pts[0].t : null, until: until, hours: 24 },
+      count: out.length,
+      totalDownSeconds: out.reduce(function (a, o) { return a + o.durationSeconds; }, 0),
+      items: out,
+    };
+  }
+  function mockUptime(outages) {
+    const last = outages.items[0];
+    if (!last) {
+      return { seconds: 24 * 3600, since: outages.window.from, sinceLocal: isoEcuador(outages.window.from), lowerBound: true, source: 'SIMULATED' };
+    }
+    if (last.ongoing) return { seconds: null, since: null, sinceLocal: null, lowerBound: false, source: 'SIMULATED' };
+    return {
+      seconds: Math.round((Date.now() - new Date(last.endedAt).getTime()) / 1000),
+      since: last.endedAt, sinceLocal: last.endedAtLocal, lowerBound: false, source: 'SIMULATED',
+    };
+  }
+  // Semilla determinista por id (los valores no "bailan" entre consultas).
+  function idSeed(id) {
+    let h = 0;
+    String(id).split('').forEach(function (c) { h = (h * 31 + c.charCodeAt(0)) % 1000; });
+    return h / 1000;
+  }
+  function mockGpon(id) {
+    const s = idSeed(id);
+    const r2 = function (x) { return Math.round(x * 100) / 100; };
+    return {
+      technology: 'GPON',
+      simulated: true,
+      sources: { optical: 'SIMULATED', onuState: 'SIMULATED', accessNetwork: 'SIMULATED', oltTopology: 'SIMULATED' },
+      onu: { serial: String(id).toUpperCase(), onuId: 1 + Math.round(s * 60), state: 'ONLINE', stateLabel: 'En línea' },
+      olt: { name: 'OLT-QUI-06', ponPort: '0/2/' + (1 + Math.round(s * 15)), accessNetworkIds: [9198] },
+      optical: { rxPowerDbm: r2(-19 - s * 7), txPowerDbm: r2(2.2 + s * 1.5), oltRxPowerDbm: r2(-22 - s * 5) },
+      distanceMeters: 2000 + Math.round(s * 12000),
+      temperatureC: r2(38 + s * 10),
+      voltageV: r2(3.25 + s * 0.1),
+      biasCurrentMa: r2(15 + s * 10),
+      thresholds: {
+        rxPowerDbm: { min: -27, max: -8, warnBelow: -25 },
+        txPowerDbm: { min: 0.5, max: 5 },
+        oltRxPowerDbm: { min: -28, max: -8 },
+        temperatureCMax: 70,
+        voltageV: { min: 3.1, max: 3.5 },
+      },
+      health: -19 - s * 7 < -25 ? 'WARNING' : 'OK',
+      measuredAt: nowIso(),
+    };
+  }
+  function mockDocsis(id) {
+    const s = idSeed(id);
+    const r1 = function (x) { return Math.round(x * 10) / 10; };
+    const sim = ['frequencyMHz', 'powerDbmv', 'snrDb', 'modulation'];
+    const ds = [1, 2, 3, 4].map(function (n) {
+      return { channelId: 'DS' + n, direction: 'downstream', label: 'Downstream ' + n, frequencyMHz: 555 + n * 8,
+        powerDbmv: r1(1.2 + s * 2 + n * 0.2), snrDb: r1(36.5 + s * 2 - n * 0.2), modulation: '256-QAM', simulatedFields: sim };
+    });
+    const us = [
+      { channelId: '5000016', direction: 'upstream', label: 'Logical Upstream Channel 0/1.0/0', frequencyMHz: 18.8,
+        powerDbmv: r1(43 + s * 2), snrDb: r1(35 + s), modulation: '64-QAM', simulatedFields: ['frequencyMHz', 'powerDbmv', 'modulation'] },
+      { channelId: '5000018', direction: 'upstream', label: 'Logical Upstream Channel 0/1.1/0', frequencyMHz: 25.2,
+        powerDbmv: r1(42.6 + s * 2), snrDb: r1(34 + s), modulation: '64-QAM', simulatedFields: ['frequencyMHz', 'powerDbmv', 'modulation'] },
+    ];
+    const avg = function (arr, k) { return r1(arr.reduce(function (a, c) { return a + c[k]; }, 0) / arr.length); };
+    return {
+      technology: 'HFC',
+      simulated: true,
+      sources: { snrUpstream: 'SIMULATED', snrDownstream: 'SIMULATED', power: 'SIMULATED', codewords: 'SIMULATED' },
+      downstream: { powerDbmv: avg(ds, 'powerDbmv'), snrDb: avg(ds, 'snrDb'), channels: ds },
+      upstream: { powerDbmv: avg(us, 'powerDbmv'), snrDb: avg(us, 'snrDb'), channels: us },
+      codewords: { correctedPercent: r1(1.5 + s), uncorrectedPercent: Math.round((0.02 + s * 0.05) * 1000) / 1000 },
+      thresholds: {
+        downstreamPowerDbmv: { min: -7, max: 7 },
+        downstreamSnrDbMin: 33,
+        upstreamPowerDbmv: { min: 35, max: 51 },
+        upstreamSnrDbMin: 27,
+        uncorrectedPercentMax: 0.1,
+      },
+      health: 'OK',
+      measuredAt: nowIso(),
+    };
+  }
+  // Panel completo en modo demo, con la forma de TerminalDiagnostics
+  // (2026-09-30): technology/technologySource, docsis|gpon, outages, uptime.
+  // Todo simulado (conector en mock) → simulated: true en la raíz.
+  function mockDiagnostics(id, opts) {
+    const tech = mockTechnology(id, opts && opts.technology);
+    const isHfc = tech.technology === 'HFC';
+    // SNR y codewords son métricas DOCSIS: solo se "consultan" en HFC.
+    const docsisSeries = function (scope, metric) {
+      return isHfc
         ? mockSeries(id, scope, metric)
         : { id: id, scope: scope, metric: metric, keys: [], points: [], channels: [], recognized: true, raw: null, fetchedAt: nowIso() };
     };
+    const skipped = isHfc ? [] : ['terminal/snr', 'network/snr', 'terminal/codewords', 'network/codewords'].map(function (e) {
+      return { endpoint: e, reason: tech.technology === 'GPON'
+        ? 'Métrica DOCSIS: la operadora solo la publica para HFC. Este equipo es GPON.'
+        : 'Tecnología no identificada: no se consultan métricas DOCSIS.' };
+    });
+    const terminal = mockTerminalSnapshot(id, opts);
+    const status = { terminal: mockSeries(id, 'terminal', 'status'), network: mockSeries(id, 'network', 'status') };
+    const outages = mockOutages(status.terminal, tech.technology);
     return {
       id: id,
-      terminal: mockTerminalSnapshot(id),
-      status: { terminal: mockSeries(id, 'terminal', 'status'), network: mockSeries(id, 'network', 'status') },
-      snr: { terminal: docsis('terminal', 'snr'), network: docsis('network', 'snr') },
-      codewords: { terminal: docsis('terminal', 'codewords'), network: docsis('network', 'codewords') },
+      terminal: terminal,
+      status: status,
+      snr: { terminal: docsisSeries('terminal', 'snr'), network: docsisSeries('network', 'snr') },
+      codewords: { terminal: docsisSeries('terminal', 'codewords'), network: docsisSeries('network', 'codewords') },
       errors: [],
+      skipped: skipped,
+      window: { hours: 24, until: nowIso() },
       fetchedAt: nowIso(),
+      technology: tech.technology,
+      technologySource: tech.technologySource,
+      simulated: true,
+      docsis: isHfc ? mockDocsis(id) : null,
+      gpon: tech.technology === 'GPON' ? mockGpon(id) : null,
+      outages: outages,
+      uptime: mockUptime(outages),
     };
   }
   function mockNetworkMetrics(accountNumber) {
@@ -1278,20 +1449,24 @@
 
     // ---- ISP Monitor por serial GPON / MAC HFC (campos 9-13) --------------
     // Ficha del equipo: estado del terminal, de la red y evento asociado.
-    async getTerminal(id) {
+    // opts.technology ('GPON' | 'HFC'): pista cuando la app ya sabe qué equipo
+    // es (serial de ONT, o lo que eligió el técnico). La ficha de ISP Monitor
+    // manda si trae el tipo; la pista solo desempata.
+    async getTerminal(id, opts) {
       if (this.useRealApi) {
-        return fetchJson('GET', '/terminals/' + encodeURIComponent(id));
+        return fetchJson('GET', '/terminals/' + encodeURIComponent(id) + techQuery(opts));
       }
       await delay(80);
-      return mockTerminalSnapshot(id);
+      return mockTerminalSnapshot(id, opts);
     },
-    // Panel completo: ficha + las 6 series de 24 h en una sola llamada.
-    async getTerminalDiagnostics(id) {
+    // Panel completo: ficha + series de 24 h + bloque por tecnología
+    // (docsis | gpon), caídas con hora exacta (outages) y uptime.
+    async getTerminalDiagnostics(id, opts) {
       if (this.useRealApi) {
-        return fetchJson('GET', '/terminals/' + encodeURIComponent(id) + '/diagnostics');
+        return fetchJson('GET', '/terminals/' + encodeURIComponent(id) + '/diagnostics' + techQuery(opts));
       }
       await delay(140);
-      return mockDiagnostics(id);
+      return mockDiagnostics(id, opts);
     },
     // Serie suelta: scope = 'terminal' | 'network', metric = 'status' | 'snr' | 'codewords'.
     async getTerminalSeries(id, scope, metric) {

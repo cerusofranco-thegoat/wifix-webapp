@@ -207,8 +207,8 @@ check('payload real: grafica los equipos en línea de la red de acceso',
   realHtml.includes('Equipos en línea · Puerto de OLT'));
 check('payload real: aclara que no es un porcentaje de la red',
   realHtml.includes('no un porcentaje'));
-check('payload real: explica que DOCSIS no se consultó en fibra',
-  realHtml.includes('solo la publica para HFC') && realHtml.includes('No se consultó'));
+check('payload real (fibra): no muestra NADA DOCSIS a un ONT',
+  !realHtml.includes('DOCSIS') && !realHtml.includes('Señal a ruido') && !realHtml.includes('FEC'));
 check('payload real: deja explícita la ventana de 24 h',
   realHtml.includes('últimas 24 h contadas desde ese instante'));
 check('payload real: lista el historial del puerto',
@@ -216,6 +216,58 @@ check('payload real: lista el historial del puerto',
 check('payload real: sin "undefined" ni "NaN"',
   !/>\s*(undefined|NaN)\s*</.test(realHtml) && !realHtml.includes('NaN,'),
   (realHtml.match(/NaN[^"]{0,20}/) || [])[0]);
+
+console.log('\n== ISP Monitor por tecnología (GPON / HFC / no identificada) ==');
+{
+  const gpon = await WifixAPI.getTerminalDiagnostics('ZTEGD3F9BBE5', { technology: 'GPON' });
+  check('mock GPON: technology/technologySource, gpon lleno y docsis null',
+    gpon.technology === 'GPON' && gpon.technologySource === 'HINT' && gpon.gpon && gpon.docsis === null
+    && gpon.outages && Array.isArray(gpon.outages.items) && gpon.uptime);
+  const gh = ctx.renderIspDiagnostics(gpon);
+  check('GPON: HTML balanceado', balanced(gh) === null, balanced(gh));
+  check('GPON: sección "Señal óptica (GPON)" con Rx/Tx en dBm, rango OK y estado con texto',
+    gh.includes('Señal óptica (GPON)') && gh.includes('Potencia recibida en el ONT (Rx)') && gh.includes('dBm')
+    && gh.includes('Rango OK: -27 a -8 dBm') && /isp-range (ok|warn|bad)">[\s\S]*?(En rango|Al límite|Fuera de rango)/.test(gh)
+    && gh.includes('Puerto PON') && gh.includes('ONU: En línea'));
+  check('GPON: sin nada DOCSIS', !gh.includes('DOCSIS') && !gh.includes('dBmV') && !gh.includes('Señal a ruido'));
+  check('GPON: badge Simulado (simulated / sources SIMULATED)', gh.includes('sim-badge') && gh.includes('Valor simulado'));
+  check('caídas del backend: hora de Ecuador, duración y causa',
+    gh.includes('Pérdida de señal óptica (LOS)') && gh.includes('>Causa<') && /Recuperado|Sigue sin conexión/.test(gh));
+
+  const hfc = await WifixAPI.getTerminalDiagnostics('384C90A2DB11');
+  const hh = ctx.renderIspDiagnostics(hfc);
+  check('HFC por formato de MAC: bloque DOCSIS con potencias, SNR, FEC y canales',
+    hfc.technology === 'HFC' && hfc.technologySource === 'ID_FORMAT' && hfc.gpon === null
+    && hh.includes('Señal del cablemódem (DOCSIS)') && hh.includes('Potencia downstream') && hh.includes('dBmV')
+    && hh.includes('SNR upstream') && hh.includes('FEC sin corregir') && hh.includes('Canales upstream')
+    && hh.includes('<table class="isp-table">') && !hh.includes('Señal óptica'));
+  check('HFC: sigue graficando las series SNR/FEC como antes', hh.includes('<svg class="chart-svg"') && hh.includes('Corregidos'));
+  check('HFC: HTML balanceado', balanced(hh) === null, balanced(hh));
+
+  const unk = await WifixAPI.getTerminalDiagnostics('EQUIPO-X-123');
+  const uh = ctx.renderIspDiagnostics(unk);
+  check('tecnología null: "No identificada" con selector HFC/GPON y sin métricas de ninguna',
+    unk.technology === null && uh.includes('Tecnología no identificada') && uh.includes('data-tech="GPON"')
+    && uh.includes('data-tech="HFC"') && !uh.includes('Señal óptica') && !uh.includes('Señal del cablemódem'));
+  check('tecnología null: HTML balanceado', balanced(uh) === null, balanced(uh));
+
+  check('pista de tecnología: serial de ONT → GPON; MAC → sin pista; elección manual manda',
+    ctx._ispTechHint('ZTEGD3F9BBE5', '') === 'GPON' && ctx._ispTechHint('384C90A2DB11', '') === null
+    && ctx._ispTechHint('384C90A2DB11', 'GPON') === 'GPON');
+  let url = null;
+  WifixAPI.useRealApi = true;
+  const origFetch = ctx.fetch;
+  ctx.fetch = async (u) => { url = String(u); return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({}), text: async () => '{}' }; };
+  await WifixAPI.getTerminalDiagnostics('ZTEGD3F9BBE5', { technology: 'ont' });
+  ctx.fetch = origFetch;
+  WifixAPI.useRealApi = false;
+  check('real: /terminals/{id}/diagnostics?technology=GPON', /\/terminals\/ZTEGD3F9BBE5\/diagnostics\?technology=GPON$/.test(url || ''), url);
+  check('rangos: valor bajo el mínimo es "Fuera de rango"; bajo warnBelow "Al límite"',
+    ctx._ispRangeState(-28, { min: -27, max: -8, warnBelow: -25 }) === 'bad'
+    && ctx._ispRangeState(-26, { min: -27, max: -8, warnBelow: -25 }) === 'warn'
+    && ctx._ispRangeState(-20, { min: -27, max: -8, warnBelow: -25 }) === 'ok'
+    && ctx._ispRangeState(null, { min: 0 }) === 'unknown');
+}
 
 console.log('\n== Fecha/hora común (America/Guayaquil) y caídas ==');
 check('fmtDateTimeEc: "mar 29 sep 2026, 14:32:05" (UTC-5, coincide con Intl)',

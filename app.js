@@ -2919,7 +2919,16 @@ function _wirePortStatusButton(slot, portsData) {
 // ============================================================================
 
 // Estado del panel por cuenta abierta.
-let _ispState = { id: null, data: null };
+let _ispState = { id: null, data: null, tech: '' };
+
+// Pista de tecnología para ISP Monitor (?technology=): la que eligió el
+// técnico; en automático, GPON si el identificador es un serial de ONT
+// (4 letras + 8 hex). Una MAC puede ser de cablemódem o de ONT: sin pista.
+function _ispTechHint(id, selected) {
+  if (selected === 'GPON' || selected === 'HFC') return selected;
+  const clean = _ispCleanCode(id);
+  return _ISP_GPON_SN_RE.test(clean) ? 'GPON' : null;
+}
 
 /** Clave de localStorage donde se recuerda el equipo consultado por cuenta. */
 function _ispStorageKey(cuenta) {
@@ -3500,14 +3509,19 @@ function _ispOutageItemHtml(e) {
   const estado = ongoing
     ? `<span class="isp-outage-state down">${_ISP_OUTAGE_ICONS.down}Sigue sin conexión</span>`
     : `<span class="isp-outage-state up">${_ISP_OUTAGE_ICONS.up}Recuperado</span>`;
-  const dur = e.durationMs === null ? '—'
+  const dur = e.durationMs === null || e.durationMs === undefined ? '—'
     : ongoing ? `al menos ${fmtDuration(e.durationMs)}` : `≈ ${fmtDuration(e.durationMs)}`;
   const inicioNota = e.startedBeforeWindow
     ? '<span class="isp-outage-note">Ya estaba caído al inicio de la ventana de 24 h.</span>'
     : '';
-  const fin = ongoing
-    ? `<span class="isp-outage-pending">Sin recuperar: la última muestra (${escapeHtml(fmtDateTimeEc(e.lastDown))}) sigue sin conexión.</span>`
-    : dateTimeHtml(e.end);
+  const fin = !ongoing
+    ? dateTimeHtml(e.end)
+    : e.lastDown
+      ? `<span class="isp-outage-pending">Sin recuperar: la última muestra (${escapeHtml(fmtDateTimeEc(e.lastDown))}) sigue sin conexión.</span>`
+      : '<span class="isp-outage-pending">Sin recuperar al momento de la consulta.</span>';
+  const causa = e.causeLabel
+    ? `<div class="isp-outage-row"><dt>Causa</dt><dd>${escapeHtml(e.causeLabel)}${e.causeSimulated ? ' <span class="sim-badge">Simulado</span>' : ''}</dd></div>`
+    : '';
   return `
     <li class="isp-outage ${ongoing ? 'is-ongoing' : 'is-recovered'}">
       <div class="isp-outage-head">
@@ -3519,28 +3533,56 @@ function _ispOutageItemHtml(e) {
         ${e.lastSeenOnline ? `<div class="isp-outage-row"><dt>Última vez en línea</dt><dd>${dateTimeHtml(e.lastSeenOnline, { relative: false })}</dd></div>` : ''}
         <div class="isp-outage-row"><dt>Volvió en línea</dt><dd>${fin}</dd></div>
         <div class="isp-outage-row"><dt>Duración</dt><dd><strong>${escapeHtml(dur)}</strong></dd></div>
+        ${causa}
       </dl>
     </li>`;
 }
 
 /**
- * Lista de caídas del equipo en las últimas 24 h, la más reciente primero,
- * con hora de caída, de recuperación y duración (ícono + texto, no solo color).
+ * Caídas que calcula el backend (OutageSummary, 2026-09-30) al formato de
+ * evento del panel, de la más antigua a la más reciente (el backend las manda
+ * al revés). Instantes en UTC (`startedAt`/`endedAt`): el formateador común
+ * los muestra en hora de Ecuador.
  */
-function renderIspOutageTimeline(series) {
-  const events = _ispOutageEvents(series);
-  if (!events.length) {
-    return `
-      <div class="isp-outage-none" role="status">
-        <span class="isp-outage-state up">${_ISP_OUTAGE_ICONS.up}Sin caídas</span>
-        <span>El equipo respondió en línea en todas las muestras de las últimas 24 h.</span>
-      </div>`;
-  }
+function _ispOutageEventsFromApi(outages) {
+  const items = outages && Array.isArray(outages.items) ? outages.items : [];
+  const causeSimulated = !!(outages && (outages.causeSource === 'SIMULATED'));
+  return items.map(o => ({
+    start: o.startedAt,
+    end: o.endedAt || null,
+    lastDown: null,
+    lastSeenOnline: null,
+    ongoing: !!o.ongoing,
+    startedBeforeWindow: false,
+    durationMs: Number.isFinite(Number(o.durationSeconds)) ? Number(o.durationSeconds) * 1000 : null,
+    cause: o.cause || null,
+    causeLabel: o.causeLabel || null,
+    causeSimulated: causeSimulated || o.simulated === true,
+  })).reverse();
+}
+
+function _ispNoOutagesHtml() {
+  return `
+    <div class="isp-outage-none" role="status">
+      <span class="isp-outage-state up">${_ISP_OUTAGE_ICONS.up}Sin caídas</span>
+      <span>El equipo respondió en línea en todas las muestras de las últimas 24 h.</span>
+    </div>`;
+}
+
+/**
+ * Lista de caídas (más reciente primero) con hora de caída, de recuperación,
+ * duración y causa si se conoce (ícono + texto, no solo color).
+ * `events` va de la más antigua a la más reciente.
+ */
+function _ispOutageTimelineHtml(events, stepMs, opts = {}) {
+  if (!events.length) return _ispNoOutagesHtml();
   const recientes = [...events].reverse();
   const visibles = recientes.slice(0, _ISP_OUTAGES_VISIBLE).map(_ispOutageItemHtml).join('');
   const resto = recientes.slice(_ISP_OUTAGES_VISIBLE);
-  const step = _ispSampleStepMs(series);
-  const stepTxt = step ? `cada ${fmtDuration(step)}` : 'a intervalos';
+  const stepTxt = stepMs ? `cada ${fmtDuration(stepMs)}` : 'a intervalos';
+  const inicio = opts.fromSeries
+    ? 'así que el corte real empezó entre «Última vez en línea» y esa hora'
+    : 'así que el corte real pudo empezar hasta un intervalo antes';
   return `
     <ol class="isp-outages" aria-label="Caídas del equipo, de la más reciente a la más antigua">${visibles}</ol>
     ${resto.length ? `
@@ -3550,9 +3592,14 @@ function renderIspOutageTimeline(series) {
     </details>` : ''}
     <p class="isp-hint">
       Horas de Ecuador (UTC-5). ISP Monitor toma una muestra ${escapeHtml(stepTxt)}: «Se cayó» es la
-      primera muestra sin conexión, así que el corte real empezó entre «Última vez en línea» y esa hora.
+      primera muestra sin conexión, ${inicio}.
       La duración es aproximada (± un intervalo de muestreo).
     </p>`;
+}
+
+/** Caídas calculadas en la app a partir de la serie de estado (payload sin `outages`). */
+function renderIspOutageTimeline(series) {
+  return _ispOutageTimelineHtml(_ispOutageEvents(series), _ispSampleStepMs(series), { fromSeries: true });
 }
 
 // --- Render del resultado --------------------------------------------------
@@ -3626,7 +3673,10 @@ function _ispMaybeDateText(value) {
     : s;
 }
 
-function renderIspTerminalCard(terminal) {
+// `tech`: tecnología resuelta (data.technology del backend, o la de la ficha
+// en payloads anteriores). null → "No identificada".
+function renderIspTerminalCard(terminal, tech) {
+  const technology = tech === undefined ? (terminal && terminal.technology) : tech;
   if (!terminal || !terminal.found) {
     return `
       <div class="detail-empty port-note">
@@ -3676,7 +3726,7 @@ function renderIspTerminalCard(terminal) {
       </div>
       <div class="isp-status-cell">
         <span class="isp-status-label">Tecnología</span>
-        <span class="isp-badge tech">${escapeHtml(terminal.technology || '—')}</span>
+        <span class="isp-badge ${technology ? 'tech' : 'unknown'}">${escapeHtml(technology || 'No identificada')}</span>
       </div>
       <div class="isp-status-cell">
         <span class="isp-status-label">Ciudad</span>
@@ -3685,7 +3735,7 @@ function renderIspTerminalCard(terminal) {
     </div>
     ${eventRow}
     ${dropRow}
-    ${red ? `<div class="mini-row"><span class="mr-label">${escapeHtml(_ispNetworkLabel(terminal.technology))}</span><span class="mr-value">${escapeHtml(red)}</span></div>` : ''}
+    ${red ? `<div class="mini-row"><span class="mr-label">${escapeHtml(_ispNetworkLabel(technology))}</span><span class="mr-value">${escapeHtml(red)}</span></div>` : ''}
     ${extra}`;
 }
 
@@ -3725,14 +3775,253 @@ function _ispMetricSection(title, metric, data, terminal, skipped, chartOpts, hi
     ${cards || _ispEmptyMetricNote(metric, terminal.technology, skipped)}`;
 }
 
+// --- Tecnología (HFC / GPON) -------------------------------------------------
+
+/** Tecnología resuelta: la del backend (2026-09-30) o, en payloads previos, la de la ficha. */
+function _ispTechnology(data) {
+  if (data && Object.prototype.hasOwnProperty.call(data, 'technology')) {
+    return data.technology === 'HFC' || data.technology === 'GPON' ? data.technology : null;
+  }
+  const t = data && data.terminal ? data.terminal.technology : null;
+  return t === 'HFC' || t === 'GPON' ? t : null;
+}
+
+const _ISP_TECH_SOURCE_TEXT = Object.freeze({
+  ISP_MONITOR: 'según ISP Monitor',
+  HINT: 'según el tipo de equipo indicado',
+  ID_FORMAT: 'por el formato del identificador',
+});
+
+/** ¿El bloque (o alguno de sus orígenes) es simulado? */
+function _ispBlockSimulated(block) {
+  if (!block) return false;
+  if (block.simulated === true) return true;
+  const src = block.sources || {};
+  return Object.keys(src).some(k => src[k] === 'SIMULATED');
+}
+
+function _ispSimBadge(on, title) {
+  return on
+    ? `<span class="sim-badge" title="${escapeHtml(title || 'Valores simulados: la operadora no los publica todavía')}">Simulado</span>`
+    : '';
+}
+
+const _ISP_RANGE_ICONS = {
+  ok: _ISP_OUTAGE_ICONS.up,
+  warn: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M10.3 3.7L2 18a2 2 0 0 0 1.7 3h16.6A2 2 0 0 0 22 18L13.7 3.7a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg>',
+  bad: _ISP_OUTAGE_ICONS.down,
+  unknown: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M8 12h8"/></svg>',
+};
+const _ISP_RANGE_TEXT = { ok: 'En rango', warn: 'Al límite', bad: 'Fuera de rango', unknown: 'Sin dato' };
+
+/**
+ * Evalúa un valor contra su rango: { min?, max?, warnBelow?, warnAbove? }.
+ * Devuelve 'ok' | 'warn' | 'bad' | 'unknown'.
+ */
+function _ispRangeState(value, range) {
+  if (value === null || value === undefined || !isFinite(value)) return 'unknown';
+  if (!range) return 'unknown';
+  const v = Number(value);
+  if ((range.min !== undefined && v < range.min) || (range.max !== undefined && v > range.max)) return 'bad';
+  if ((range.warnBelow !== undefined && v < range.warnBelow) || (range.warnAbove !== undefined && v > range.warnAbove)) return 'warn';
+  return 'ok';
+}
+
+/** Texto del rango OK: "−27 a −8 dBm", "≥ 27 dB", "≤ 0.1 %". */
+function _ispRangeText(range, unit) {
+  if (!range) return '';
+  const u = unit ? ` ${unit}` : '';
+  const f = (n) => _fmtNum(n, 2);
+  let base = '';
+  if (range.min !== undefined && range.max !== undefined) base = `${f(range.min)} a ${f(range.max)}${u}`;
+  else if (range.min !== undefined) base = `≥ ${f(range.min)}${u}`;
+  else if (range.max !== undefined) base = `≤ ${f(range.max)}${u}`;
+  if (range.warnBelow !== undefined) base += ` (alerta bajo ${f(range.warnBelow)}${u})`;
+  return base;
+}
+
+function _ispStatePill(state) {
+  return `<span class="isp-range ${state}">${_ISP_RANGE_ICONS[state]}${_ISP_RANGE_TEXT[state]}</span>`;
+}
+
+/** Fila de métrica: nombre + qué significa, valor con unidad, rango OK y estado. */
+function _ispMetricRow({ label, help, value, unit, dec = 2, range, simulated }) {
+  const has = value !== null && value !== undefined && isFinite(value);
+  const state = _ispRangeState(value, range);
+  const rango = _ispRangeText(range, unit);
+  return `
+    <div class="isp-metric">
+      <div class="isp-metric-head">
+        <span class="isp-metric-label">${escapeHtml(label)}${simulated ? ' <span class="isp-sim-mark" title="Valor simulado">*</span>' : ''}</span>
+        ${range ? _ispStatePill(state) : ''}
+      </div>
+      <div class="isp-metric-value">${has ? `<strong>${escapeHtml(_fmtNum(value, dec))}</strong> ${escapeHtml(unit || '')}` : '<span class="no-fsm-data">Sin dato</span>'}</div>
+      ${rango ? `<div class="isp-metric-range">Rango OK: ${escapeHtml(rango)}</div>` : ''}
+      ${help ? `<div class="isp-metric-help">${escapeHtml(help)}</div>` : ''}
+    </div>`;
+}
+
+const _ISP_HEALTH = Object.freeze({
+  OK: { cls: 'ok', text: 'Señal en rango' },
+  WARNING: { cls: 'warn', text: 'Señal al límite' },
+  CRITICAL: { cls: 'bad', text: 'Señal crítica' },
+  UNKNOWN: { cls: 'unknown', text: 'Sin evaluación' },
+});
+function _ispHealthPill(health) {
+  const h = _ISP_HEALTH[health] || _ISP_HEALTH.UNKNOWN;
+  return `<span class="isp-range ${h.cls}">${_ISP_RANGE_ICONS[h.cls]}${h.text}</span>`;
+}
+
+const _ISP_ONU_STATE = Object.freeze({
+  ONLINE: { cls: 'ok', text: 'En línea' },
+  OFFLINE: { cls: 'bad', text: 'Fuera de línea' },
+  LOS: { cls: 'bad', text: 'Pérdida de señal óptica (LOS)' },
+  DYING_GASP: { cls: 'bad', text: 'Corte de energía (dying gasp)' },
+  UNKNOWN: { cls: 'unknown', text: 'Desconocido' },
+});
+
+/** Sección "Señal óptica (GPON)": solo para ONT/ONU. Nada DOCSIS aquí. */
+function renderIspGponSection(gpon) {
+  if (!gpon) {
+    return `<div class="isp-section-title">Señal óptica (GPON)</div>
+      <div class="detail-empty port-note">La operadora no devolvió datos ópticos de este equipo.</div>`;
+  }
+  const src = gpon.sources || {};
+  const th = gpon.thresholds || {};
+  const opt = gpon.optical || {};
+  const onu = gpon.onu || {};
+  const olt = gpon.olt || {};
+  const opticalSim = src.optical === 'SIMULATED';
+  const st = _ISP_ONU_STATE[onu.state] || _ISP_ONU_STATE.UNKNOWN;
+  const onuText = onu.stateLabel || st.text;
+  const distKm = gpon.distanceMeters !== null && gpon.distanceMeters !== undefined && isFinite(gpon.distanceMeters)
+    ? gpon.distanceMeters / 1000 : null;
+  const topoSim = src.oltTopology === 'SIMULATED';
+  return `
+    <div class="isp-section-title isp-section-with-badge">Señal óptica (GPON) ${_ispSimBadge(_ispBlockSimulated(gpon))}</div>
+    <div class="isp-tech-summary">
+      <span class="isp-range ${st.cls}">${_ISP_RANGE_ICONS[st.cls]}ONU: ${escapeHtml(onuText)}</span>
+      ${_ispHealthPill(gpon.health)}
+      ${src.onuState === 'SIMULATED' ? '<span class="isp-sim-note">estado simulado</span>' : ''}
+    </div>
+    <p class="isp-hint">Potencias en <strong>dBm</strong> (clase B+, ITU-T G.984.2): cuanto más cerca de 0, más luz llega. Si la Rx del ONT cae bajo el rango, revisa conectores, empalmes y dobleces de la fibra.</p>
+    <div class="isp-metric-grid">
+      ${_ispMetricRow({ label: 'Potencia recibida en el ONT (Rx)', value: opt.rxPowerDbm, unit: 'dBm', range: th.rxPowerDbm, simulated: opticalSim,
+        help: 'Luz que llega de la OLT al equipo del cliente.' })}
+      ${_ispMetricRow({ label: 'Potencia transmitida por el ONT (Tx)', value: opt.txPowerDbm, unit: 'dBm', range: th.txPowerDbm, simulated: opticalSim,
+        help: 'Luz que emite el equipo hacia la OLT.' })}
+      ${_ispMetricRow({ label: 'Potencia del ONT recibida en la OLT', value: opt.oltRxPowerDbm, unit: 'dBm', range: th.oltRxPowerDbm, simulated: opticalSim,
+        help: 'Luz del cliente que llega a la central.' })}
+      ${_ispMetricRow({ label: 'Distancia OLT → ONT', value: distKm, unit: 'km', dec: 2, simulated: opticalSim,
+        help: 'Largo del tramo de fibra medido por la OLT (ranging).' })}
+      ${_ispMetricRow({ label: 'Temperatura del ONT', value: gpon.temperatureC, unit: '°C', dec: 1,
+        range: th.temperatureCMax !== undefined ? { max: th.temperatureCMax } : null, simulated: opticalSim })}
+      ${_ispMetricRow({ label: 'Voltaje del ONT', value: gpon.voltageV, unit: 'V', range: th.voltageV, simulated: opticalSim })}
+      ${_ispMetricRow({ label: 'Corriente de bias del láser', value: gpon.biasCurrentMa, unit: 'mA', dec: 1, simulated: opticalSim })}
+    </div>
+    <dl class="isp-topology">
+      <div><dt>OLT${topoSim ? ' <span class="isp-sim-mark" title="Valor simulado">*</span>' : ''}</dt><dd>${escapeHtml(olt.name || '—')}</dd></div>
+      <div><dt>Puerto PON</dt><dd>${escapeHtml(olt.ponPort || '—')}</dd></div>
+      <div><dt>ONU id</dt><dd>${onu.onuId !== undefined && onu.onuId !== null ? escapeHtml(String(onu.onuId)) : '—'}</dd></div>
+      <div><dt>Red de acceso</dt><dd>${escapeHtml((olt.accessNetworkIds || []).join(', ') || '—')}</dd></div>
+    </dl>
+    ${opticalSim || topoSim ? '<p class="isp-sim-legend"><span class="isp-sim-mark">*</span> Valor simulado: ISP Monitor no publica la capa óptica todavía.</p>' : ''}
+    ${gpon.measuredAt ? `<p class="isp-consulted">Medido: ${dateTimeHtml(gpon.measuredAt)}</p>` : ''}`;
+}
+
+/** Tabla de canales DOCSIS; los campos simulados de cada canal llevan *. */
+function _ispDocsisChannelsHtml(title, channels) {
+  if (!Array.isArray(channels) || channels.length === 0) return '';
+  const sim = (c, k) => (Array.isArray(c.simulatedFields) && c.simulatedFields.includes(k) ? '<span class="isp-sim-mark">*</span>' : '');
+  const num = (v, dec) => (v === null || v === undefined || !isFinite(v) ? '—' : escapeHtml(_fmtNum(v, dec)));
+  const filas = channels.map(c => `
+    <tr>
+      <th scope="row">${escapeHtml(_ispChannelLabel({ label: c.label, ifIndex: c.channelId, network: null }))}</th>
+      <td>${num(c.frequencyMHz, 1)}${sim(c, 'frequencyMHz')}</td>
+      <td>${num(c.powerDbmv, 1)}${sim(c, 'powerDbmv')}</td>
+      <td>${num(c.snrDb, 1)}${sim(c, 'snrDb')}</td>
+      <td>${escapeHtml(c.modulation || '—')}${sim(c, 'modulation')}</td>
+    </tr>`).join('');
+  return `
+    <details class="isp-channels">
+      <summary>${escapeHtml(title)} (${channels.length} canal${channels.length === 1 ? '' : 'es'})</summary>
+      <div class="isp-table-wrap">
+        <table class="isp-table">
+          <thead><tr><th scope="col">Canal</th><th scope="col">Frec. (MHz)</th><th scope="col">Potencia (dBmV)</th><th scope="col">SNR (dB)</th><th scope="col">Modulación</th></tr></thead>
+          <tbody>${filas}</tbody>
+        </table>
+      </div>
+    </details>`;
+}
+
+/** Sección DOCSIS (solo HFC): potencias, SNR, FEC y canales, contra umbrales. */
+function renderIspDocsisSection(docsis) {
+  if (!docsis) return '';
+  const src = docsis.sources || {};
+  const th = docsis.thresholds || {};
+  const ds = docsis.downstream || {};
+  const us = docsis.upstream || {};
+  const cw = docsis.codewords || {};
+  const powerSim = src.power === 'SIMULATED';
+  return `
+    <div class="isp-section-title isp-section-with-badge">Señal del cablemódem (DOCSIS) ${_ispSimBadge(_ispBlockSimulated(docsis))}</div>
+    <div class="isp-tech-summary">${_ispHealthPill(docsis.health)}</div>
+    <p class="isp-hint"><strong>Potencia</strong> en dBmV (nivel de la señal) y <strong>SNR</strong> en dB (señal sobre ruido: más alto es mejor). Downstream = de la red al módem; upstream = del módem a la red.</p>
+    <div class="isp-metric-grid">
+      ${_ispMetricRow({ label: 'Potencia downstream', value: ds.powerDbmv, unit: 'dBmV', dec: 1, range: th.downstreamPowerDbmv, simulated: powerSim })}
+      ${_ispMetricRow({ label: 'SNR downstream', value: ds.snrDb, unit: 'dB', dec: 1,
+        range: th.downstreamSnrDbMin !== undefined ? { min: th.downstreamSnrDbMin } : null, simulated: src.snrDownstream === 'SIMULATED' })}
+      ${_ispMetricRow({ label: 'Potencia upstream', value: us.powerDbmv, unit: 'dBmV', dec: 1, range: th.upstreamPowerDbmv, simulated: powerSim })}
+      ${_ispMetricRow({ label: 'SNR upstream', value: us.snrDb, unit: 'dB', dec: 1,
+        range: th.upstreamSnrDbMin !== undefined ? { min: th.upstreamSnrDbMin } : null, simulated: src.snrUpstream === 'SIMULATED' })}
+      ${_ispMetricRow({ label: 'FEC corregidos', value: cw.correctedPercent, unit: '%', dec: 2, simulated: src.codewords === 'SIMULATED',
+        help: 'Errores que el módem reparó: en poca cantidad es normal.' })}
+      ${_ispMetricRow({ label: 'FEC sin corregir', value: cw.uncorrectedPercent, unit: '%', dec: 3,
+        range: th.uncorrectedPercentMax !== undefined ? { max: th.uncorrectedPercentMax } : null, simulated: src.codewords === 'SIMULATED',
+        help: 'Datos perdidos (peor canal): si sube, hay un problema de señal.' })}
+    </div>
+    ${_ispDocsisChannelsHtml('Canales downstream', ds.channels)}
+    ${_ispDocsisChannelsHtml('Canales upstream', us.channels)}
+    ${_ispBlockSimulated(docsis) ? '<p class="isp-sim-legend"><span class="isp-sim-mark">*</span> Valor simulado: ISP Monitor no publica potencias ni el downstream todavía.</p>' : ''}
+    ${docsis.measuredAt ? `<p class="isp-consulted">Medido: ${dateTimeHtml(docsis.measuredAt)}</p>` : ''}`;
+}
+
+/** Tecnología no identificada: el técnico elige HFC o GPON y se reconsulta. */
+function renderIspTechChooser() {
+  return `
+    <div class="isp-section-title">Tecnología no identificada</div>
+    <div class="isp-tech-chooser" role="group" aria-labelledby="ispTechChooserText">
+      <p id="ispTechChooserText">ISP Monitor no informó si este equipo es de fibra o de cable. Elige el tipo de equipo para ver sus métricas:</p>
+      <div class="isp-tech-chooser-btns">
+        <button type="button" class="add-row-btn" data-action="isp-tech" data-tech="GPON">Fibra (GPON) — ONT / ONU</button>
+        <button type="button" class="add-row-btn" data-action="isp-tech" data-tech="HFC">Cable (HFC) — cablemódem</button>
+      </div>
+    </div>`;
+}
+
+/** "En línea desde…" a partir de `uptime` (backend). */
+function _ispUptimeHtml(uptime, lastOutage) {
+  if (!uptime) return '';
+  if (uptime.seconds === null || uptime.seconds === undefined) {
+    return lastOutage && lastOutage.ongoing
+      ? '<p class="isp-uptime is-down">Caído en este momento: sin tiempo en línea que mostrar.</p>'
+      : '';
+  }
+  if (uptime.lowerBound) {
+    return `<p class="isp-uptime">En línea al menos <strong>${escapeHtml(fmtDuration(uptime.seconds * 1000))}</strong> (sin caídas en la ventana de 24 h).</p>`;
+  }
+  return `<p class="isp-uptime">En línea desde ${uptime.since ? dateTimeHtml(uptime.since, { relative: false }) : '—'} · <strong>${escapeHtml(fmtDuration(uptime.seconds * 1000))}</strong> sin caídas.</p>`;
+}
+
 function renderIspDiagnostics(data) {
   const terminal = data.terminal || {};
+  const tech = _ispTechnology(data);
   const statusTerminal = data.status && data.status.terminal;
   const statusNetwork = data.status && data.status.network;
   const stats = _ispOutageStats(statusTerminal);
 
   const skipped = data.skipped || [];
-  const redLabel = _ispNetworkLabel(terminal.technology);
+  const redLabel = _ispNetworkLabel(tech);
 
   // El endpoint de red devuelve cuántos equipos de esa red están en línea: se
   // grafica como cantidad, no como porcentaje. La operadora no expone el total
@@ -3740,7 +4029,7 @@ function renderIspDiagnostics(data) {
   // sirve al técnico es el escalón (si cae de golpe, el problema no es del
   // domicilio).
   const networkChart = _ispSeriesToChart(statusNetwork);
-  const networkNow = statusNetwork && statusNetwork.points.length
+  const networkNow = statusNetwork && statusNetwork.points && statusNetwork.points.length
     ? statusNetwork.points[statusNetwork.points.length - 1].values[statusNetwork.keys[0]]
     : null;
 
@@ -3750,10 +4039,11 @@ function renderIspDiagnostics(data) {
       }. El resto de los datos sí se consultó.</div>`
     : '';
 
-  // El conteo sale de la misma lista que se muestra abajo: así "N caídas"
-  // coincide siempre con los ítems (incluye una caída que ya venía de antes
-  // del inicio de la ventana, que _ispOutageStats no cuenta como transición).
-  const outageEvents = _ispOutageEvents(statusTerminal);
+  // Caídas: si el backend manda `outages` (hora exacta y causa) se usan esas;
+  // si no (payload anterior), se calculan de la serie de estado. El conteo
+  // sale siempre de la misma lista que se muestra.
+  const apiOutages = data.outages && Array.isArray(data.outages.items) ? data.outages : null;
+  const outageEvents = apiOutages ? _ispOutageEventsFromApi(apiOutages) : _ispOutageEvents(statusTerminal);
   const lastOutage = outageEvents.length ? outageEvents[outageEvents.length - 1] : null;
   const lastOutageValue = lastOutage
     ? (lastOutage.ongoing ? 'Ahora' : escapeHtml(fmtRelative(lastOutage.start)))
@@ -3761,8 +4051,19 @@ function renderIspDiagnostics(data) {
   const lastOutageLabel = lastOutage
     ? (lastOutage.ongoing ? 'caído en este momento' : `última caída · ${escapeHtml(fmtDateTimeEc(lastOutage.start, { seconds: false, year: false }))}`)
     : 'sin caídas en 24 h';
+  const hasSeries = !!(statusTerminal && statusTerminal.points && statusTerminal.points.length);
+  // % en línea: de la serie si está; si no, del total caído que informa el backend.
+  const windowSec = apiOutages && apiOutages.window && apiOutages.window.hours ? apiOutages.window.hours * 3600 : 86400;
+  const uptimePercent = hasSeries
+    ? stats.uptimePercent
+    : apiOutages && isFinite(apiOutages.totalDownSeconds)
+      ? Math.max(0, (1 - apiOutages.totalDownSeconds / windowSec) * 100)
+      : null;
+  const timeline = apiOutages
+    ? _ispOutageTimelineHtml(outageEvents, (Number(outageEvents.length && apiOutages.items[0].precisionSeconds) || 0) * 1000)
+    : renderIspOutageTimeline(statusTerminal);
 
-  const availability = statusTerminal && statusTerminal.points.length
+  const availability = hasSeries || apiOutages
     ? `
       <div class="isp-stats">
         <div class="isp-stat">
@@ -3770,7 +4071,7 @@ function renderIspDiagnostics(data) {
           <span class="isp-stat-label">caídas del equipo (24 h)</span>
         </div>
         <div class="isp-stat">
-          <span class="isp-stat-value">${_fmtNum(stats.uptimePercent, 1)}%</span>
+          <span class="isp-stat-value">${uptimePercent === null ? '—' : _fmtNum(uptimePercent, 1) + '%'}</span>
           <span class="isp-stat-label">del tiempo en línea (24 h)</span>
         </div>
         <div class="isp-stat${lastOutage && lastOutage.ongoing ? ' is-alert' : ''}">
@@ -3782,9 +4083,11 @@ function renderIspDiagnostics(data) {
           <span class="isp-stat-label">equipos en línea en su red (última muestra)</span>
         </div>
       </div>
-      ${renderStatusBand(statusTerminal, 'Equipo del cliente')}
-      <div class="isp-subsection-title">Caídas del equipo</div>
-      ${renderIspOutageTimeline(statusTerminal)}
+      ${_ispUptimeHtml(data.uptime, lastOutage)}
+      ${hasSeries ? renderStatusBand(statusTerminal, 'Equipo del cliente') : ''}
+      <div class="isp-subsection-title isp-section-with-badge">Caídas del equipo ${_ispSimBadge(!!(apiOutages && apiOutages.simulated), 'Caídas simuladas: conector de ISP Monitor en modo demo')}</div>
+      ${timeline}
+      ${networkChart.length ? `
       <div class="isp-subsection-title">Equipos en línea en la misma red</div>
       ${_ispChartCard(`Equipos en línea · ${redLabel}`, networkChart,
         { minZero: true, unit: 'equipos', ariaLabel: 'Equipos en línea en la misma red de acceso, últimas 24 horas' })}
@@ -3792,29 +4095,45 @@ function renderIspDiagnostics(data) {
         Es la cantidad de equipos en línea en ${escapeHtml(redLabel.toLowerCase())},
         no un porcentaje: la operadora no publica el total de la red. Lo que
         importa es el escalón — si cae de golpe, el problema no es del domicilio.
-      </p>`
+      </p>` : ''}`
     : `<div class="detail-empty">La operadora no devolvió el histórico de estado de este equipo.</div>`;
 
   const consultado = data.fetchedAt
     ? `<p class="isp-consulted">Consultado: ${dateTimeHtml(data.fetchedAt)} · hora de Ecuador</p>`
     : '';
+  const techNote = terminal.found && tech && _ISP_TECH_SOURCE_TEXT[data.technologySource]
+    ? `<p class="isp-tech-source">Tecnología ${escapeHtml(tech)} ${escapeHtml(_ISP_TECH_SOURCE_TEXT[data.technologySource])}.</p>`
+    : '';
+
+  // Por tecnología: GPON → capa óptica y NADA DOCSIS; HFC → bloque DOCSIS +
+  // series SNR/FEC como antes; sin identificar → el técnico elige.
+  let techSections = '';
+  if (terminal.found && tech === 'GPON') {
+    techSections = renderIspGponSection(data.gpon);
+  } else if (terminal.found && tech === 'HFC') {
+    techSections = `
+      ${renderIspDocsisSection(data.docsis)}
+      ${_ispMetricSection('Señal a ruido (SNR) — 24 h · DOCSIS', 'snr', data.snr, { technology: tech }, skipped,
+        { unit: 'dB', ariaLabel: 'Señal a ruido de las últimas 24 horas' },
+        'Calidad de la señal del cablemódem, en <strong>dB</strong>: más alto es mejor. Un valor bajo o una caída brusca indica ruido en la red coaxial.')}
+      ${_ispMetricSection('Errores FEC — 24 h · DOCSIS', 'codewords', data.codewords, { technology: tech }, skipped,
+        { minZero: true, ariaLabel: 'Errores FEC de las últimas 24 horas' },
+        '<strong>Corregidos</strong>: errores que el módem reparó (en poca cantidad es normal). <strong>Sin corregir</strong>: datos perdidos; si suben, hay un problema de señal. Valores tal como los entrega ISP Monitor.')}`;
+  } else if (terminal.found) {
+    techSections = renderIspTechChooser();
+  }
 
   return `
-    <div class="isp-results">
-      <div class="isp-section-title isp-section-first">Estado actual del equipo</div>
+    <div class="isp-results" data-technology="${escapeHtml(tech || '')}">
+      <div class="isp-section-title isp-section-first isp-section-with-badge">Estado actual del equipo ${_ispSimBadge(data.simulated === true, 'Todo el resultado es simulado: conector de ISP Monitor en modo demo')}</div>
       ${consultado}
-      ${renderIspTerminalCard(terminal)}
+      ${renderIspTerminalCard(terminal, tech)}
+      ${techNote}
       ${errors}
 
       ${terminal.found ? `<div class="isp-section-title">Disponibilidad y caídas — últimas 24 h</div>${availability}` : ''}
 
-      ${terminal.found ? _ispMetricSection('Señal a ruido (SNR) — 24 h · DOCSIS', 'snr', data.snr, terminal, skipped,
-        { unit: 'dB', ariaLabel: 'Señal a ruido de las últimas 24 horas' },
-        'Calidad de la señal del cablemódem, en <strong>dB</strong>: más alto es mejor. Un valor bajo o una caída brusca indica ruido en la red coaxial.') : ''}
-
-      ${terminal.found ? _ispMetricSection('Errores FEC — 24 h · DOCSIS', 'codewords', data.codewords, terminal, skipped,
-        { minZero: true, ariaLabel: 'Errores FEC de las últimas 24 horas' },
-        '<strong>Corregidos</strong>: errores que el módem reparó (en poca cantidad es normal). <strong>Sin corregir</strong>: datos perdidos; si suben, hay un problema de señal. Valores tal como los entrega ISP Monitor.') : ''}
+      ${techSections}
 
       ${terminal.found ? renderIspHistory(terminal.history) : ''}
 
@@ -3855,6 +4174,15 @@ function renderIspPanel(cuenta) {
           autocapitalize="characters" autocomplete="off" spellcheck="false"
           placeholder="ZTEGC1234567 · A4B87E112233" value="${escapeHtml(remembered)}">
       </label>
+      <label class="form-row">
+        <span class="form-label">Tipo de equipo</span>
+        <select data-field="isp-tech" class="isp-tech-select" aria-describedby="ispTechHelp">
+          <option value=""${_ispState.tech ? '' : ' selected'}>Automático (por el serial o la MAC)</option>
+          <option value="GPON"${_ispState.tech === 'GPON' ? ' selected' : ''}>Fibra (GPON) — ONT / ONU</option>
+          <option value="HFC"${_ispState.tech === 'HFC' ? ' selected' : ''}>Cable (HFC) — cablemódem</option>
+        </select>
+        <span class="form-hint" id="ispTechHelp">Con un serial GPON la app ya avisa que es fibra. Elige a mano si ISP Monitor no lo identifica.</span>
+      </label>
       <div class="isp-actions">
         ${canScan ? `<button type="button" class="add-row-btn" data-action="isp-scan">Escanear</button>` : ''}
         ${canScan ? `<button type="button" class="add-row-btn" data-action="isp-photo">Tomar foto</button>` : ''}
@@ -3885,6 +4213,8 @@ function _bootIspPanel(body, cuenta) {
     feedback.className = `isp-feedback${kind ? ' ' + kind : ''}`;
   }
 
+  const techSelect = panel.querySelector('[data-field="isp-tech"]');
+
   async function consult() {
     const id = (input.value || '').trim();
     if (!id) {
@@ -3897,8 +4227,9 @@ function _bootIspPanel(body, cuenta) {
     setFeedback('');
     results.innerHTML = `<div class="detail-loading">Consultando ISP Monitor…</div>`;
     try {
-      const data = await WifixAPI.getTerminalDiagnostics(id);
-      _ispState = { id: id, data: data };
+      const tech = _ispTechHint(id, techSelect ? techSelect.value : '');
+      const data = await WifixAPI.getTerminalDiagnostics(id, tech ? { technology: tech } : undefined);
+      _ispState = { id: id, data: data, tech: techSelect ? techSelect.value : '' };
       _ispRememberId(cuenta, id);
       results.innerHTML = renderIspDiagnostics(data);
     } catch (err) {
@@ -3927,6 +4258,13 @@ function _bootIspPanel(body, cuenta) {
   }
 
   consultBtn.addEventListener('click', consult);
+  // "Tecnología no identificada": el técnico elige HFC/GPON y se reconsulta.
+  results.addEventListener('click', (ev) => {
+    const btn = ev.target && ev.target.closest ? ev.target.closest('[data-action="isp-tech"]') : null;
+    if (!btn || !techSelect) return;
+    techSelect.value = btn.dataset.tech;
+    consult();
+  });
   input.addEventListener('input', checkIdShape);
   input.addEventListener('keydown', (ev) => {
     if (ev.key === 'Enter') { ev.preventDefault(); consult(); }
@@ -4521,7 +4859,7 @@ const SERVICIO_ITEMS = [
     load: (cuenta) => loadNapPanel(cuenta) },
   { id: 'status',  icon: SERVICIO_ICONS.user,    title: 'Status del cliente por contrato/cuenta',
     load: (cuenta) => WifixAPI.getContractStatus(cuenta).then(c => renderStatusFromContract(c, cuenta)) },
-  { id: 'isp',     icon: SERVICIO_ICONS.metrics, title: 'ISP Monitor — señal, SNR, FEC y caídas 24 h',
+  { id: 'isp',     icon: SERVICIO_ICONS.metrics, title: 'ISP Monitor — señal (fibra o cable) y caídas 24 h',
     load: (cuenta) => renderIspPanel(cuenta) },
   // "Red de acceso" y no "nodo", igual que en el panel de ISP Monitor: la
   // operadora aclaró que ese concepto no existe (los datos salen de tarjetas de

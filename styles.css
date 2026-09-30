@@ -4476,3 +4476,66 @@ body.console-fullscreen-open { overflow: hidden; }
 .hop-n { color: var(--text-secondary); }
 .hop-host { overflow-wrap: anywhere; }
 .visit-link-note { margin: 8px 0 0; font-size: 10.5px; color: var(--text-secondary); font-style: italic; }
+
+/* ==========================================================================
+ * ISP Monitor por tecnología: GPON (óptica) / HFC (DOCSIS) / no identificada
+ * ========================================================================*/
+.isp-section-with-badge { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
+.isp-tech-source { margin: -4px 0 10px; font-size: 11px; color: var(--text-secondary); }
+.isp-tech-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 8px; }
+.isp-sim-note { font-size: 11px; color: var(--warn-text); }
+.isp-range {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  white-space: nowrap;
+}
+.isp-range svg { width: 13px; height: 13px; }
+.isp-range.ok { background: var(--success-bg); color: var(--success-text); border: 1px solid var(--success-border); }
+.isp-range.warn { background: var(--warn-bg); color: var(--warn-text); border: 1px solid var(--warn-border); }
+.isp-range.bad { background: var(--error-bg); color: var(--error-text); border: 1px solid var(--error-border); }
+.isp-range.unknown { background: var(--gray-50); color: var(--gray-700); border: 1px solid var(--gray-200); }
+.isp-metric-grid { display: grid; grid-template-columns: 1fr; gap: 8px; }
+@media (min-width: 560px) { .isp-metric-grid { grid-template-columns: 1fr 1fr; } }
+.isp-metric {
+  padding: 10px 12px;
+  border-radius: var(--radius-btn);
+  background: var(--surface-card);
+  border: 1px solid var(--border-lavender);
+}
+.isp-metric-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 8px; }
+.isp-metric-label { font-size: 12px; font-weight: 600; color: var(--text-primary); }
+.isp-metric-value { margin-top: 4px; font-size: 13px; color: var(--text-primary); font-variant-numeric: tabular-nums; }
+.isp-metric-value strong { font-size: 18px; }
+.isp-metric-range, .isp-metric-help { font-size: 11px; color: var(--text-secondary); line-height: 1.35; }
+.isp-sim-mark { color: var(--warn-text); font-weight: 700; }
+.isp-sim-legend { margin: 6px 0 0; font-size: 11px; color: var(--text-secondary); }
+.isp-topology { margin: 10px 0 0; display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.isp-topology > div { padding: 8px 10px; border-radius: var(--radius-btn); background: var(--surface-app); border: 1px solid var(--border-lavender); }
+.isp-topology dt { font-size: 10px; letter-spacing: 0.6px; text-transform: uppercase; color: var(--text-secondary); }
+.isp-topology dd { margin: 2px 0 0; font-size: 13px; font-weight: 600; color: var(--text-primary); overflow-wrap: anywhere; }
+.isp-channels { margin-top: 8px; }
+.isp-channels summary { min-height: 44px; display: flex; align-items: center; cursor: pointer; font-size: 12px; font-weight: 600; color: var(--brand-primary); }
+.isp-channels summary:focus-visible { outline: 2px solid var(--brand-primary); outline-offset: 2px; }
+.isp-table-wrap { overflow-x: auto; }
+.isp-table { width: 100%; border-collapse: collapse; font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.isp-table th, .isp-table td { padding: 6px; text-align: left; border-bottom: 1px solid var(--gray-100); white-space: nowrap; }
+.isp-table thead th { font-size: 10px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.4px; }
+.isp-table tbody th { font-weight: 600; color: var(--text-primary); white-space: normal; }
+.isp-tech-chooser {
+  padding: 10px 12px;
+  border-radius: var(--radius-btn);
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-border);
+  font-size: 12px;
+  color: var(--text-primary);
+}
+.isp-tech-chooser p { margin: 0 0 8px; }
+.isp-tech-chooser-btns { display: flex; flex-direction: column; gap: 6px; }
+.isp-tech-chooser-btns .add-row-btn { min-height: 44px; }
+.isp-uptime { margin: 0 0 10px; font-size: 12px; color: var(--text-primary); }
+.isp-uptime.is-down { color: var(--error-text); font-weight: 600; }
