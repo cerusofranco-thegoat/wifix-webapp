@@ -741,6 +741,111 @@ function formatDatePill(iso) {
 }
 
 // ============================================================================
+// FECHA/HORA COMÚN — zona America/Guayaquil
+// ----------------------------------------------------------------------------
+// Ecuador continental es UTC-5 fijo (sin horario de verano), así que se
+// calcula a mano: no depende de los datos de zona horaria del WebView ni de la
+// zona configurada en el teléfono del técnico. Formato largo:
+//   "lun 29 sep 2026, 14:32:05"  +  relativo "hace 3 h".
+// Usar en caídas, eventos e historial (ISP Monitor y eventos de red).
+// ============================================================================
+const EC_TIMEZONE = 'America/Guayaquil';
+const EC_UTC_OFFSET_MS = -5 * 3600000;
+const EC_WEEKDAYS = Object.freeze(['dom', 'lun', 'mar', 'mié', 'jue', 'vie', 'sáb']);
+const EC_MONTHS = Object.freeze(['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic']);
+
+/** Date válido o null (acepta ISO, epoch ms o Date). */
+function toValidDate(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const d = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+/** Partes de calendario/hora en hora de Ecuador. */
+function _ecParts(d) {
+  const e = new Date(d.getTime() + EC_UTC_OFFSET_MS);
+  return {
+    weekday: EC_WEEKDAYS[e.getUTCDay()],
+    day: e.getUTCDate(),
+    month: EC_MONTHS[e.getUTCMonth()],
+    year: e.getUTCFullYear(),
+    hh: pad(e.getUTCHours()),
+    mm: pad(e.getUTCMinutes()),
+    ss: pad(e.getUTCSeconds()),
+  };
+}
+
+/**
+ * "lun 29 sep 2026, 14:32:05" en hora de Ecuador.
+ * opts: { seconds = true, weekday = true, year = true }.
+ * null/vacío → '—'; texto no parseable → se devuelve tal cual.
+ */
+function fmtDateTimeEc(value, opts = {}) {
+  const d = toValidDate(value);
+  if (!d) return value === null || value === undefined || value === '' ? '—' : String(value);
+  const p = _ecParts(d);
+  const date = `${opts.weekday === false ? '' : p.weekday + ' '}${p.day} ${p.month}${opts.year === false ? '' : ' ' + p.year}`;
+  const time = opts.seconds === false ? `${p.hh}:${p.mm}` : `${p.hh}:${p.mm}:${p.ss}`;
+  return `${date}, ${time}`;
+}
+
+/** Solo la hora de Ecuador: "14:32" o "14:32:05". '' si no se puede leer. */
+function fmtTimeEc(value, opts = {}) {
+  const d = toValidDate(value);
+  if (!d) return '';
+  const p = _ecParts(d);
+  return opts.seconds ? `${p.hh}:${p.mm}:${p.ss}` : `${p.hh}:${p.mm}`;
+}
+
+/** Duración legible: "45 s", "12 min", "1 h 05 min", "2 d 3 h". */
+function fmtDuration(ms) {
+  if (ms === null || ms === undefined || !isFinite(ms) || ms < 0) return '—';
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s} s`;
+  const min = Math.round(s / 60);
+  if (min < 60) return `${min} min`;
+  const h = Math.floor(min / 60);
+  const rm = min % 60;
+  if (h < 24) return rm ? `${h} h ${pad(rm)} min` : `${h} h`;
+  const d = Math.floor(h / 24);
+  const rh = h % 24;
+  return rh ? `${d} d ${rh} h` : `${d} d`;
+}
+
+/** Relativo: "hace unos segundos", "hace 12 min", "hace 1 h 20 min", "hace 3 h", "hace 2 d". */
+function fmtRelative(value, now = Date.now()) {
+  const d = toValidDate(value);
+  if (!d) return '';
+  const diff = now - d.getTime();
+  const future = diff < 0;
+  const abs = Math.abs(diff);
+  const wrap = (txt) => (future ? `en ${txt}` : `hace ${txt}`);
+  if (abs < 45000) return future ? 'en unos segundos' : 'hace unos segundos';
+  const min = Math.round(abs / 60000);
+  if (min < 60) return wrap(`${min} min`);
+  const h = Math.floor(min / 60);
+  if (h < 3) return wrap(min % 60 ? `${h} h ${min % 60} min` : `${h} h`);
+  if (h < 24) return wrap(`${h} h`);
+  const days = Math.floor(h / 24);
+  if (days < 30) return wrap(`${days} d`);
+  const months = Math.floor(days / 30);
+  return wrap(`${months} ${months === 1 ? 'mes' : 'meses'}`);
+}
+
+/**
+ * <time> con la fecha absoluta (hora de Ecuador) y, por defecto, el relativo.
+ * opts: los de fmtDateTimeEc + { relative = true, now }.
+ */
+function dateTimeHtml(value, opts = {}) {
+  const d = toValidDate(value);
+  const abs = fmtDateTimeEc(value, opts);
+  if (!d) return `<span class="dt-abs">${escapeHtml(abs)}</span>`;
+  const rel = opts.relative === false ? '' : fmtRelative(d, opts.now);
+  return `<time class="dt-abs" datetime="${escapeHtml(d.toISOString())}">${escapeHtml(abs)}</time>` +
+    (rel ? ` <span class="dt-rel">(${escapeHtml(rel)})</span>` : '');
+}
+
+// ============================================================================
 // ICONOS
 // ============================================================================
 const SERVICIO_ICONS = {
@@ -2643,12 +2748,10 @@ function _fmtNum(v, dec = 2) {
   return String(Math.round(v * Math.pow(10, dec)) / Math.pow(10, dec));
 }
 
-/** "HH:mm" de un instante ISO; cadena vacía si no se puede parsear. */
+/** "HH:mm" (hora de Ecuador) de un instante ISO; '' si viene vacío. */
 function _fmtHour(iso) {
   if (!iso) return '';
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return String(iso).slice(0, 5);
-  return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  return fmtTimeEc(iso) || String(iso).slice(0, 5);
 }
 
 /** Etiqueta legible para el nombre de serie que devuelva la operadora. */
@@ -2987,14 +3090,27 @@ function renderStatusBand(series, label) {
       : `${_fmtHour(b.from)}–${_fmtHour(b.to)}`;
     return `<span class="band-cell ${b.state}" title="${escapeHtml(range)} · ${stateText}"></span>`;
   }).join('');
+  const downCount = buckets.filter(b => b.state === 'down').length;
+  const first = points[0].t;
+  const last = points[points.length - 1].t;
+  const axisOpts = { seconds: false, year: false };
+  const summary = `${label}: ${downCount ? `${downCount} de ${buckets.length} tramos con alguna caída` : 'en línea en todos los tramos'}, ` +
+    `del ${fmtDateTimeEc(first, axisOpts)} al ${fmtDateTimeEc(last, axisOpts)}. El detalle de cada caída está en la lista.`;
 
+  // La barra es de apoyo visual: el significado va en la leyenda con texto y
+  // en la lista de caídas (nunca solo el color).
   return `
     <div class="band-block">
       <div class="band-label">${escapeHtml(label)}</div>
-      <div class="band-track">${cells}</div>
+      <div class="band-track" role="img" aria-label="${escapeHtml(summary)}">${cells}</div>
       <div class="band-axis">
-        <span>${escapeHtml(_fmtHour(points[0].t))}</span>
-        <span>${escapeHtml(_fmtHour(points[points.length - 1].t))}</span>
+        <span>${escapeHtml(fmtDateTimeEc(first, axisOpts))}</span>
+        <span>${escapeHtml(fmtDateTimeEc(last, axisOpts))}</span>
+      </div>
+      <div class="band-legend" aria-hidden="true">
+        <span class="band-legend-item"><span class="band-swatch up"></span>En línea</span>
+        <span class="band-legend-item"><span class="band-swatch down"></span>Caído (al menos una muestra)</span>
+        <span class="band-legend-item"><span class="band-swatch unknown"></span>Sin dato</span>
       </div>
     </div>`;
 }
@@ -3120,6 +3236,133 @@ function _ispOutageStats(series) {
   return { outages, downSamples, totalSamples: points.length, uptimePercent };
 }
 
+/** Intervalo típico (mediana) entre muestras de una serie, en ms. 0 si no se sabe. */
+function _ispSampleStepMs(series) {
+  const points = (series && series.points) || [];
+  const gaps = [];
+  for (let i = 1; i < points.length; i++) {
+    const a = toValidDate(points[i - 1].t);
+    const b = toValidDate(points[i].t);
+    if (a && b && b > a) gaps.push(b - a);
+  }
+  if (!gaps.length) return 0;
+  gaps.sort((x, y) => x - y);
+  return gaps[Math.floor(gaps.length / 2)];
+}
+
+/**
+ * Caídas del equipo como eventos, de la más antigua a la más reciente:
+ *   { start, end, lastDown, lastSeenOnline, ongoing, startedBeforeWindow,
+ *     samples, durationMs }
+ *
+ * La operadora muestrea cada ~5 min, así que el instante exacto no se conoce:
+ * la caída empezó entre `lastSeenOnline` (última muestra en línea) y `start`
+ * (primera muestra sin conexión), y se recuperó en `end` (primera muestra en
+ * línea de nuevo). `durationMs` = end − start; si sigue caído, lastDown − start
+ * (es un mínimo). Muestras sin valor no cortan ni abren caídas.
+ */
+function _ispOutageEvents(series) {
+  const points = (series && series.points) || [];
+  const key = (series && series.keys && series.keys[0]) || 'online';
+  const events = [];
+  let cur = null;
+  let lastUp = null;
+  let sawKnown = false;
+  points.forEach(p => {
+    const v = p.values ? p.values[key] : undefined;
+    if (v === undefined || v === null || !isFinite(v)) return;
+    if (v <= 0) {
+      if (!cur) {
+        cur = { start: p.t, end: null, lastDown: p.t, lastSeenOnline: lastUp,
+          ongoing: false, startedBeforeWindow: !sawKnown, samples: 0 };
+      }
+      cur.lastDown = p.t;
+      cur.samples++;
+    } else {
+      if (cur) { cur.end = p.t; events.push(cur); cur = null; }
+      lastUp = p.t;
+    }
+    sawKnown = true;
+  });
+  if (cur) { cur.ongoing = true; events.push(cur); }
+  events.forEach(e => {
+    const s = toValidDate(e.start);
+    const f = toValidDate(e.ongoing ? e.lastDown : e.end);
+    e.durationMs = s && f ? Math.max(0, f - s) : null;
+  });
+  return events;
+}
+
+const _ISP_OUTAGE_ICONS = {
+  down: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M15 9l-6 6M9 9l6 6"/></svg>',
+  up: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M8 12.5l2.5 2.5L16 9.5"/></svg>',
+};
+
+// Máximo de caídas visibles sin expandir (un equipo intermitente puede tener
+// decenas en 24 h; el resto queda en un <details>).
+const _ISP_OUTAGES_VISIBLE = 6;
+
+function _ispOutageItemHtml(e) {
+  const ongoing = e.ongoing;
+  const tipo = ongoing ? 'Caída en curso' : 'Caída del equipo';
+  const estado = ongoing
+    ? `<span class="isp-outage-state down">${_ISP_OUTAGE_ICONS.down}Sigue sin conexión</span>`
+    : `<span class="isp-outage-state up">${_ISP_OUTAGE_ICONS.up}Recuperado</span>`;
+  const dur = e.durationMs === null ? '—'
+    : ongoing ? `al menos ${fmtDuration(e.durationMs)}` : `≈ ${fmtDuration(e.durationMs)}`;
+  const inicioNota = e.startedBeforeWindow
+    ? '<span class="isp-outage-note">Ya estaba caído al inicio de la ventana de 24 h.</span>'
+    : '';
+  const fin = ongoing
+    ? `<span class="isp-outage-pending">Sin recuperar: la última muestra (${escapeHtml(fmtDateTimeEc(e.lastDown))}) sigue sin conexión.</span>`
+    : dateTimeHtml(e.end);
+  return `
+    <li class="isp-outage ${ongoing ? 'is-ongoing' : 'is-recovered'}">
+      <div class="isp-outage-head">
+        <span class="isp-outage-type">${tipo}</span>
+        ${estado}
+      </div>
+      <dl class="isp-outage-times">
+        <div class="isp-outage-row"><dt>Se cayó</dt><dd>${dateTimeHtml(e.start)}${inicioNota}</dd></div>
+        ${e.lastSeenOnline ? `<div class="isp-outage-row"><dt>Última vez en línea</dt><dd>${dateTimeHtml(e.lastSeenOnline, { relative: false })}</dd></div>` : ''}
+        <div class="isp-outage-row"><dt>Volvió en línea</dt><dd>${fin}</dd></div>
+        <div class="isp-outage-row"><dt>Duración</dt><dd><strong>${escapeHtml(dur)}</strong></dd></div>
+      </dl>
+    </li>`;
+}
+
+/**
+ * Lista de caídas del equipo en las últimas 24 h, la más reciente primero,
+ * con hora de caída, de recuperación y duración (ícono + texto, no solo color).
+ */
+function renderIspOutageTimeline(series) {
+  const events = _ispOutageEvents(series);
+  if (!events.length) {
+    return `
+      <div class="isp-outage-none" role="status">
+        <span class="isp-outage-state up">${_ISP_OUTAGE_ICONS.up}Sin caídas</span>
+        <span>El equipo respondió en línea en todas las muestras de las últimas 24 h.</span>
+      </div>`;
+  }
+  const recientes = [...events].reverse();
+  const visibles = recientes.slice(0, _ISP_OUTAGES_VISIBLE).map(_ispOutageItemHtml).join('');
+  const resto = recientes.slice(_ISP_OUTAGES_VISIBLE);
+  const step = _ispSampleStepMs(series);
+  const stepTxt = step ? `cada ${fmtDuration(step)}` : 'a intervalos';
+  return `
+    <ol class="isp-outages" aria-label="Caídas del equipo, de la más reciente a la más antigua">${visibles}</ol>
+    ${resto.length ? `
+    <details class="isp-outages-more">
+      <summary>Ver ${resto.length} caída${resto.length === 1 ? '' : 's'} más antigua${resto.length === 1 ? '' : 's'}</summary>
+      <ol class="isp-outages">${resto.map(_ispOutageItemHtml).join('')}</ol>
+    </details>` : ''}
+    <p class="isp-hint">
+      Horas de Ecuador (UTC-5). ISP Monitor toma una muestra ${escapeHtml(stepTxt)}: «Se cayó» es la
+      primera muestra sin conexión, así que el corte real empezó entre «Última vez en línea» y esa hora.
+      La duración es aproximada (± un intervalo de muestreo).
+    </p>`;
+}
+
 // --- Render del resultado --------------------------------------------------
 
 function _ispBadge(value, okText, failText) {
@@ -3163,7 +3406,10 @@ function renderIspHistory(history) {
       return `<span class="isp-hist-eq"><span class="mono">${escapeHtml(id)}</span>
         <span class="isp-badge ${cls}">${escapeHtml(text)}</span></span>`;
     }).join('');
-    const extra = [entry.drop, entry.events].filter(Boolean).join(' · ');
+    const extra = [
+      entry.drop ? `Caída: ${_ispMaybeDateText(entry.drop)}` : '',
+      entry.events ? `Eventos: ${_ispMaybeDateText(entry.events)}` : '',
+    ].filter(Boolean).join(' · ');
     return `
       <div class="isp-hist-row">
         <span class="isp-hist-period">${escapeHtml(label)}</span>
@@ -3173,7 +3419,19 @@ function renderIspHistory(history) {
   }).join('');
   return `
     <div class="isp-section-title">Equipos en este puerto</div>
+    <p class="isp-hint">
+      Serial o MAC de cada equipo que ISP Monitor vio en este puerto por período, con su
+      estado en ese período. Sirve para saber si el equipo anterior del domicilio venía cayéndose.
+    </p>
     <div class="isp-hist">${rows}</div>`;
+}
+
+/** Si el valor es un instante ISO lo pasa al formato común; si no, texto tal cual. */
+function _ispMaybeDateText(value) {
+  const s = String(value);
+  return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(s) && toValidDate(s)
+    ? `${fmtDateTimeEc(s)} (${fmtRelative(s)})`
+    : s;
 }
 
 function renderIspTerminalCard(terminal) {
@@ -3205,6 +3463,7 @@ function renderIspTerminalCard(terminal) {
     ? `<div class="isp-event alert">
          <span class="isp-event-title">Caída de red detectada</span>
          <span class="isp-event-desc">${escapeHtml(drop.description || 'El monitoreo registró una caída.')}</span>
+         <span class="isp-event-meta">ISP Monitor no informa la hora de este aviso: las horas exactas están en «Caídas del equipo».</span>
        </div>`
     : '';
 
@@ -3260,15 +3519,17 @@ function _ispEmptyMetricNote(metric, technology, skipped) {
 }
 
 /** Series de una métrica en ambos ámbitos, o la nota si no hay datos. */
-function _ispMetricSection(title, metric, data, terminal, skipped, chartOpts) {
+function _ispMetricSection(title, metric, data, terminal, skipped, chartOpts, hint) {
   const cards = ['terminal', 'network'].map(scope => _ispSeriesCards(
     data && data[scope],
     scope === 'terminal' ? 'Equipo del cliente' : _ispNetworkLabel(terminal.technology),
     chartOpts,
   )).join('');
 
+  // La explicación solo tiene sentido si hay gráfico que leer.
   return `
     <div class="isp-section-title">${escapeHtml(title)}</div>
+    ${cards && hint ? `<p class="isp-hint">${hint}</p>` : ''}
     ${cards || _ispEmptyMetricNote(metric, terminal.technology, skipped)}`;
 }
 
@@ -3297,25 +3558,44 @@ function renderIspDiagnostics(data) {
       }. El resto de los datos sí se consultó.</div>`
     : '';
 
+  // El conteo sale de la misma lista que se muestra abajo: así "N caídas"
+  // coincide siempre con los ítems (incluye una caída que ya venía de antes
+  // del inicio de la ventana, que _ispOutageStats no cuenta como transición).
+  const outageEvents = _ispOutageEvents(statusTerminal);
+  const lastOutage = outageEvents.length ? outageEvents[outageEvents.length - 1] : null;
+  const lastOutageValue = lastOutage
+    ? (lastOutage.ongoing ? 'Ahora' : escapeHtml(fmtRelative(lastOutage.start)))
+    : '—';
+  const lastOutageLabel = lastOutage
+    ? (lastOutage.ongoing ? 'caído en este momento' : `última caída · ${escapeHtml(fmtDateTimeEc(lastOutage.start, { seconds: false, year: false }))}`)
+    : 'sin caídas en 24 h';
+
   const availability = statusTerminal && statusTerminal.points.length
     ? `
       <div class="isp-stats">
         <div class="isp-stat">
-          <span class="isp-stat-value">${stats.outages}</span>
-          <span class="isp-stat-label">caídas del equipo</span>
+          <span class="isp-stat-value">${outageEvents.length}</span>
+          <span class="isp-stat-label">caídas del equipo (24 h)</span>
         </div>
         <div class="isp-stat">
           <span class="isp-stat-value">${_fmtNum(stats.uptimePercent, 1)}%</span>
-          <span class="isp-stat-label">en línea</span>
+          <span class="isp-stat-label">del tiempo en línea (24 h)</span>
+        </div>
+        <div class="isp-stat${lastOutage && lastOutage.ongoing ? ' is-alert' : ''}">
+          <span class="isp-stat-value isp-stat-value-sm">${lastOutageValue}</span>
+          <span class="isp-stat-label">${lastOutageLabel}</span>
         </div>
         <div class="isp-stat">
-          <span class="isp-stat-value">${networkNow === null || networkNow === undefined ? '—' : networkNow}</span>
-          <span class="isp-stat-label">equipos en línea en la misma red</span>
+          <span class="isp-stat-value">${networkNow === null || networkNow === undefined ? '—' : escapeHtml(String(networkNow))}</span>
+          <span class="isp-stat-label">equipos en línea en su red (última muestra)</span>
         </div>
       </div>
       ${renderStatusBand(statusTerminal, 'Equipo del cliente')}
+      <div class="isp-subsection-title">Caídas del equipo</div>
+      ${renderIspOutageTimeline(statusTerminal)}
+      <div class="isp-subsection-title">Equipos en línea en la misma red</div>
       ${_ispChartCard(`Equipos en línea · ${redLabel}`, networkChart,
-        { minZero: true, ariaLabel: 'Equipos en línea en la misma red de acceso, últimas 24 horas' })}
+        { minZero: true, unit: 'equipos', ariaLabel: 'Equipos en línea en la misma red de acceso, últimas 24 horas' })}
       <p class="isp-hint">
         Es la cantidad de equipos en línea en ${escapeHtml(redLabel.toLowerCase())},
         no un porcentaje: la operadora no publica el total de la red. Lo que
@@ -3323,24 +3603,33 @@ function renderIspDiagnostics(data) {
       </p>`
     : `<div class="detail-empty">La operadora no devolvió el histórico de estado de este equipo.</div>`;
 
+  const consultado = data.fetchedAt
+    ? `<p class="isp-consulted">Consultado: ${dateTimeHtml(data.fetchedAt)} · hora de Ecuador</p>`
+    : '';
+
   return `
     <div class="isp-results">
+      <div class="isp-section-title isp-section-first">Estado actual del equipo</div>
+      ${consultado}
       ${renderIspTerminalCard(terminal)}
       ${errors}
 
-      ${terminal.found ? `<div class="isp-section-title">Disponibilidad — últimas 24 h</div>${availability}` : ''}
+      ${terminal.found ? `<div class="isp-section-title">Disponibilidad y caídas — últimas 24 h</div>${availability}` : ''}
 
-      ${terminal.found ? _ispMetricSection('Señal a ruido — 24 h (DOCSIS)', 'snr', data.snr, terminal, skipped,
-        { unit: 'dB', ariaLabel: 'Señal a ruido de las últimas 24 horas' }) : ''}
+      ${terminal.found ? _ispMetricSection('Señal a ruido (SNR) — 24 h · DOCSIS', 'snr', data.snr, terminal, skipped,
+        { unit: 'dB', ariaLabel: 'Señal a ruido de las últimas 24 horas' },
+        'Calidad de la señal del cablemódem, en <strong>dB</strong>: más alto es mejor. Un valor bajo o una caída brusca indica ruido en la red coaxial.') : ''}
 
-      ${terminal.found ? _ispMetricSection('Errores FEC corregidos y sin corregir — 24 h (DOCSIS)', 'codewords', data.codewords, terminal, skipped,
-        { minZero: true, ariaLabel: 'Errores FEC de las últimas 24 horas' }) : ''}
+      ${terminal.found ? _ispMetricSection('Errores FEC — 24 h · DOCSIS', 'codewords', data.codewords, terminal, skipped,
+        { minZero: true, ariaLabel: 'Errores FEC de las últimas 24 horas' },
+        '<strong>Corregidos</strong>: errores que el módem reparó (en poca cantidad es normal). <strong>Sin corregir</strong>: datos perdidos; si suben, hay un problema de señal. Valores tal como los entrega ISP Monitor.') : ''}
 
       ${terminal.found ? renderIspHistory(terminal.history) : ''}
 
       <div class="isp-footnote">
-        Consultado ${escapeHtml(formatDate(data.fetchedAt))} · ISP Monitor ·
+        Consultado ${escapeHtml(fmtDateTimeEc(data.fetchedAt))} · ISP Monitor ·
         las series cubren las últimas 24 h contadas desde ese instante.
+        Horas en hora de Ecuador (UTC-5).
       </div>
       <div class="isp-footnote">Tráfico del cliente (campo 13): pendiente de endpoint en la API de operadora.</div>
     </div>`;
@@ -3619,15 +3908,29 @@ function renderEventsList(events) {
     return `${aviso}<div class="detail-empty">Sin eventos registrados.</div>`;
   }
   const badgeClass = s => s === 'RESUELTO' ? 'badge-resolved' : s === 'PENDIENTE' ? 'badge-pending' : 'badge-fail';
-  return aviso + events.map(e => `
-    <div class="event-item">
-      <span class="event-date">${formatDatePill(e.occurredAt)}</span>
+  // Ícono + texto del estado (nunca solo color).
+  const badgeIcon = s => s === 'RESUELTO' ? _ISP_OUTAGE_ICONS.up : _ISP_OUTAGE_ICONS.down;
+  // Más reciente primero; los que no traen fecha van al final.
+  const sorted = [...events].sort((a, b) => {
+    const da = toValidDate(a.occurredAt);
+    const db = toValidDate(b.occurredAt);
+    if (!da && !db) return 0;
+    if (!da) return 1;
+    if (!db) return -1;
+    return db - da;
+  });
+  return aviso + `<ol class="event-list" aria-label="Eventos de la red de acceso, del más reciente al más antiguo">` +
+    sorted.map(e => `
+    <li class="event-item event-item-net">
       <div class="event-body">
-        <span class="event-badge ${badgeClass(e.status)}">${escapeHtml(e.status)}</span>
-        <span class="event-title">${escapeHtml(e.type)}</span>
-        <span class="event-desc">${escapeHtml(e.description || '')}</span>
+        <div class="event-head">
+          <span class="event-title">${escapeHtml(e.type || 'Evento de red')}</span>
+          <span class="event-badge event-badge-icon ${badgeClass(e.status)}">${badgeIcon(e.status)}${escapeHtml(e.status || 'Sin estado')}</span>
+        </div>
+        <span class="event-when"><span class="event-when-label">Ocurrió:</span> ${dateTimeHtml(e.occurredAt)}</span>
+        ${e.description ? `<span class="event-desc">${escapeHtml(e.description)}</span>` : ''}
       </div>
-    </div>`).join('');
+    </li>`).join('') + '</ol>';
 }
 
 // Badge por resultado de la visita. REALIZADA y CANCELADA son neutras: la

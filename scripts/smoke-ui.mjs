@@ -217,6 +217,60 @@ check('payload real: sin "undefined" ni "NaN"',
   !/>\s*(undefined|NaN)\s*</.test(realHtml) && !realHtml.includes('NaN,'),
   (realHtml.match(/NaN[^"]{0,20}/) || [])[0]);
 
+console.log('\n== Fecha/hora común (America/Guayaquil) y caídas ==');
+check('fmtDateTimeEc: "mar 29 sep 2026, 14:32:05" (UTC-5, coincide con Intl)',
+  ctx.fmtDateTimeEc('2026-09-29T19:32:05Z') === 'mar 29 sep 2026, 14:32:05'
+  && new Date('2026-09-29T19:32:05Z').toLocaleTimeString('es-EC', { timeZone: 'America/Guayaquil', hour12: false }) === '14:32:05',
+  ctx.fmtDateTimeEc('2026-09-29T19:32:05Z'));
+check('fmtDateTimeEc: cruce de medianoche en UTC cae el día anterior en Ecuador',
+  ctx.fmtDateTimeEc('2026-09-30T03:10:00Z', { seconds: false }) === 'mar 29 sep 2026, 22:10');
+check('fmtDateTimeEc: null → "—" y texto inválido tal cual',
+  ctx.fmtDateTimeEc(null) === '—' && ctx.fmtDateTimeEc('ayer') === 'ayer');
+{
+  const now = Date.parse('2026-09-29T19:32:05Z');
+  check('fmtRelative: segundos, minutos, horas y días',
+    ctx.fmtRelative(now - 10000, now) === 'hace unos segundos'
+    && ctx.fmtRelative(now - 12 * 60000, now) === 'hace 12 min'
+    && ctx.fmtRelative(now - 80 * 60000, now) === 'hace 1 h 20 min'
+    && ctx.fmtRelative(now - 3 * 3600000, now) === 'hace 3 h'
+    && ctx.fmtRelative(now - 2 * 86400000, now) === 'hace 2 d');
+  check('fmtDuration: 45 s / 15 min / 1 h 05 min / 2 d 3 h',
+    ctx.fmtDuration(45000) === '45 s' && ctx.fmtDuration(900000) === '15 min'
+    && ctx.fmtDuration(65 * 60000) === '1 h 05 min' && ctx.fmtDuration((51 * 60) * 60000) === '2 d 3 h');
+  check('dateTimeHtml: <time datetime> + relativo',
+    ctx.dateTimeHtml('2026-09-29T16:32:05Z', { now }).includes('datetime="2026-09-29T16:32:05.000Z"')
+    && ctx.dateTimeHtml('2026-09-29T16:32:05Z', { now }).includes('(hace 3 h)'));
+}
+{
+  const ev = ctx._ispOutageEvents(real.status.terminal);
+  check('caídas: una, con inicio, recuperación y 15 min de duración',
+    ev.length === 1 && ev[0].start === '2026-08-26T02:58:53.000Z' && ev[0].end === '2026-08-26T03:13:53.000Z'
+    && ev[0].durationMs === 900000 && !ev[0].ongoing && ev[0].lastSeenOnline === '2026-08-26T02:53:53.000Z');
+  check('caídas: la lista muestra hora de caída y de recuperación en hora de Ecuador',
+    realHtml.includes('mar 25 ago 2026, 21:58:53') && realHtml.includes('mar 25 ago 2026, 22:13:53')
+    && realHtml.includes('≈ 15 min') && realHtml.includes('Recuperado'));
+  const enCurso = JSON.parse(JSON.stringify(real.status.terminal));
+  enCurso.points.slice(-3).forEach((p) => { p.values.online = 0; });
+  const evc = ctx._ispOutageEvents(enCurso);
+  const htmlc = ctx.renderIspOutageTimeline(enCurso);
+  check('caída en curso: ícono+texto "Sigue sin conexión" y duración mínima',
+    evc.length === 2 && evc[1].ongoing && htmlc.includes('Sigue sin conexión') && htmlc.includes('al menos 10 min')
+    && htmlc.indexOf('Caída en curso') < htmlc.indexOf('Caída del equipo'));
+  const inicial = JSON.parse(JSON.stringify(real.status.terminal));
+  inicial.points[0].values.online = 0;
+  check('caída que ya venía de antes de la ventana se rotula',
+    ctx.renderIspOutageTimeline(inicial).includes('Ya estaba caído al inicio'));
+  const sin = JSON.parse(JSON.stringify(real.status.terminal));
+  sin.points.forEach((p) => { p.values.online = 1; });
+  check('sin caídas: mensaje explícito', ctx.renderIspOutageTimeline(sin).includes('Sin caídas'));
+  check('caídas: HTML balanceado', balanced(htmlc) === null, balanced(htmlc));
+}
+check('eventos de red: fecha larga con <time> y estado con texto',
+  (() => {
+    const h = ctx.renderEventsList([{ type: 'Corte', description: 'x', status: 'PENDIENTE', occurredAt: '2026-09-29T19:32:05Z' }]);
+    return h.includes('mar 29 sep 2026, 14:32:05') && h.includes('<time') && h.includes('PENDIENTE') && balanced(h) === null;
+  })());
+
 // --- `drop`: la operadora confirmó que es el único campo extra relevante de la
 // ficha (informa si el monitoreo detectó una caída de red).
 const conCaida = realFixture();

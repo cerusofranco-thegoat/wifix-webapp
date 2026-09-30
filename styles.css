@@ -4284,3 +4284,158 @@ body.console-fullscreen-open { overflow: hidden; }
   padding: 2px 8px;
   white-space: nowrap;
 }
+
+/* ==========================================================================
+ * Fecha/hora común y caídas del ISP Monitor
+ * ========================================================================*/
+.dt-abs { font-variant-numeric: tabular-nums; color: var(--text-primary); }
+.dt-rel { color: var(--text-secondary); white-space: nowrap; }
+
+.isp-section-first { padding-top: 2px; }
+.isp-subsection-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-primary);
+  padding: 12px 0 6px;
+}
+.isp-consulted {
+  margin: 0 0 10px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.isp-event-meta {
+  font-size: 11px;
+  color: var(--warn-text);
+}
+
+/* Cuatro indicadores: 2x2 en teléfono, 4 en fila si hay ancho. */
+.isp-stats { grid-template-columns: repeat(2, 1fr); }
+@media (min-width: 560px) {
+  .isp-stats { grid-template-columns: repeat(4, 1fr); }
+}
+.isp-stat-value-sm { font-size: 15px; line-height: 1.2; text-align: center; }
+.isp-stat.is-alert { background: var(--error-bg); border-color: var(--error-border); }
+.isp-stat.is-alert .isp-stat-value { color: var(--error-text); }
+
+.band-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin-top: 6px;
+  font-size: 10.5px;
+  color: var(--text-secondary);
+}
+.band-legend-item { display: inline-flex; align-items: center; gap: 5px; }
+.band-swatch {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 2px;
+  border: 1px solid var(--gray-200);
+}
+.band-swatch.up { background: var(--success-fill); }
+.band-swatch.down { background: var(--error-fill); }
+.band-swatch.unknown { background: var(--gray-50); }
+
+/* Lista de caídas */
+.isp-outages {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.isp-outage {
+  padding: 10px 12px;
+  border-radius: var(--radius-btn);
+  background: var(--surface-card);
+  border: 1px solid var(--border-lavender);
+  border-left: 4px solid var(--success-border);
+}
+.isp-outage.is-ongoing {
+  background: var(--error-bg);
+  border-color: var(--error-border);
+  border-left-color: var(--error-fill);
+}
+.isp-outage-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px 8px;
+  margin-bottom: 6px;
+}
+.isp-outage-type { font-size: 13px; font-weight: 700; color: var(--text-primary); }
+.isp-outage-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  white-space: nowrap;
+}
+.isp-outage-state.up { background: var(--success-bg); color: var(--success-text); border: 1px solid var(--success-border); }
+.isp-outage-state.down { background: var(--error-bg); color: var(--error-text); border: 1px solid var(--error-border); }
+.isp-outage-times { margin: 0; display: flex; flex-direction: column; gap: 4px; }
+.isp-outage-row {
+  display: grid;
+  grid-template-columns: 118px 1fr;
+  gap: 8px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.isp-outage-row dt { color: var(--text-secondary); }
+.isp-outage-row dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+@media (max-width: 360px) {
+  .isp-outage-row { grid-template-columns: 1fr; gap: 0; }
+}
+.isp-outage-note,
+.isp-outage-pending {
+  display: block;
+  font-size: 11px;
+  color: var(--error-text);
+}
+.isp-outage-none {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  padding: 10px 12px;
+  border-radius: var(--radius-btn);
+  background: var(--success-bg);
+  border: 1px solid var(--success-border);
+  font-size: 12px;
+  color: var(--text-primary);
+}
+.isp-outages-more { margin-top: 8px; }
+.isp-outages-more summary {
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--brand-primary);
+}
+.isp-outages-more summary:focus-visible { outline: 2px solid var(--brand-primary); outline-offset: 2px; }
+
+/* Eventos de la red de acceso */
+.event-list { list-style: none; margin: 0; padding: 0; }
+.event-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px 8px;
+}
+.event-badge-icon { display: inline-flex; align-items: center; gap: 4px; }
+.event-badge-icon svg { width: 12px; height: 12px; }
+.event-when {
+  display: block;
+  font-size: 12px;
+  margin: 2px 0;
+}
+.event-when-label { color: var(--text-secondary); }
