@@ -4140,20 +4140,31 @@ function visitBadgeClass(result) {
   return VISIT_BADGE_CLASS[result] || 'badge-neutral';
 }
 
-function renderVisitItem(t, extraClass) {
-  // ⚠2 FSM no expone el técnico que cerró la tarea: llega null y se muestra
-  // como "—". Queda pendiente pedirlo a la operadora.
-  const tecnico = t.technician || '—';
-  const notas = t.closingNotes ? escapeHtml(t.closingNotes) : '';
-  // Notas bajo demanda: una expansión = una llamada. Nada de precargar.
-  const botonNotas = (!t.notesLoaded && t.workOrder)
+// Botón de notas bajo demanda: una expansión = una llamada. Nada de precargar.
+function _visitNotesButtonHtml(t) {
+  return (!t.notesLoaded && t.workOrder)
     ? `
       <button type="button" class="task-notes-btn" data-action="task-notes"
         data-workorder="${escapeHtml(t.workOrder)}" aria-expanded="false">Ver notas de cierre</button>
       <div class="task-notes-slot" data-slot="task-notes"></div>`
     : '';
+}
+
+// Visita pendiente (la próxima): se pinta como siempre, destacada arriba. Si
+// ya tiene registros de esta visita, se agregan colapsados al final.
+function renderVisitItem(t, extraClass) {
+  // ⚠2 FSM no expone el técnico que cerró la tarea: llega null y se muestra
+  // como "—". Queda pendiente pedirlo a la operadora.
+  const tecnico = t.technician || '—';
+  const notas = t.closingNotes ? escapeHtml(t.closingNotes) : '';
   const aviso = t.result === 'REALIZADA'
     ? '<span class="visit-hint">Resultado no verificado por la operadora</span>'
+    : '';
+  const registros = _visitHasRecords(t.records)
+    ? `<details class="visit-records-inline">
+         <summary>Registros de esta visita (${_visitDoneCount(t.records)} de ${_visitChecklist(t.records).length})</summary>
+         ${renderVisitRecords(t.records)}
+       </details>`
     : '';
   return `
     <div class="event-item${extraClass ? ' ' + extraClass : ''}" data-workorder="${escapeHtml(t.workOrder || '')}" data-result="${escapeHtml(t.result || '')}">
@@ -4163,16 +4174,210 @@ function renderVisitItem(t, extraClass) {
         <span class="event-title">${escapeHtml(t.taskId || t.workOrder || '—')} · ${escapeHtml(tecnico)}</span>
         <span class="event-desc"><strong>${escapeHtml(t.reason || '—')}</strong>${notas ? ' — ' + notas : ''}</span>
         ${aviso}
-        ${botonNotas}
+        ${_visitNotesButtonHtml(t)}
+        ${registros}
       </div>
     </div>`;
 }
 
-// Panel único "Visitas pendientes y anteriores" (GET /accounts/{n}/visits).
-// `result` es { items, pendingCount, totalOrders, scanned, truncated, brand,
-// degraded? }; se tolera el array desnudo. El backend ya ordena: la pendiente
-// primero y el resto por fecha descendente. Aquí solo se separan en grupos
-// sin reordenar, por si llegara más de una pendiente.
+// ---------------------------------------------------------------------------
+// Registros de la app por visita (GET /accounts/{n}/visits?include=records)
+// ---------------------------------------------------------------------------
+const VISIT_LINKED_BY_TEXT = Object.freeze({
+  TASK_ID: 'Registros vinculados por nº de tarea',
+  TIME_WINDOW: 'Registros vinculados por horario de la visita',
+  MIXED: 'Registros vinculados por nº de tarea y por horario',
+});
+
+const _VISIT_CHECK_ICONS = {
+  done: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>',
+  missing: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M6 6l12 12M18 6L6 18"/></svg>',
+};
+
+function _visitChecklist(records) {
+  return records && Array.isArray(records.checklist) ? records.checklist : [];
+}
+function _visitDoneCount(records) {
+  return _visitChecklist(records).filter(c => c && c.done).length;
+}
+function _visitHasRecords(records) {
+  return _visitDoneCount(records) > 0;
+}
+
+/** "(por horario)" discreto en un registro que no vino por nº de tarea. */
+function _recordLinkHint(rec) {
+  return rec && rec.linkedBy === 'TIME_WINDOW'
+    ? ' <span class="rec-link" title="Asociado a esta visita por la hora en que se tomó">· por horario</span>'
+    : '';
+}
+function _recordWhen(rec, field) {
+  const v = rec && (rec[field] || rec.measuredAt || rec.createdAt);
+  return v ? `<span class="rec-when">${escapeHtml(fmtDateTimeEc(v, { seconds: false, year: false }))}</span>` : '';
+}
+
+function _recSpeedtestHtml(s) {
+  const externo = s.source === 'external-device';
+  const fuente = externo
+    ? `Dispositivo externo${s.deviceName ? ' · ' + escapeHtml(s.deviceName) : ''}`
+    : `App${s.serverName ? ' · ' + escapeHtml(s.serverName) : ''}`;
+  const extras = [
+    s.latencyMs !== undefined && s.latencyMs !== null ? `latencia ${escapeHtml(_fmtNum(s.latencyMs, 1))} ms` : '',
+    s.jitterMs !== undefined && s.jitterMs !== null ? `jitter ${escapeHtml(_fmtNum(s.jitterMs, 1))} ms` : '',
+  ].filter(Boolean).join(' · ');
+  return `
+    <li class="rec-item">
+      <div class="rec-head"><span class="rec-title">Speedtest — ${fuente}</span>
+        ${s.simulated ? '<span class="sim-badge">Simulado</span>' : ''}</div>
+      <div class="rec-values"><strong>↓ ${escapeHtml(_fmtNum(s.downloadMbps, 1))}</strong> / <strong>↑ ${escapeHtml(_fmtNum(s.uploadMbps, 1))}</strong> Mbps${extras ? ' · ' + extras : ''}</div>
+      <div class="rec-meta">${_recordWhen(s)}${_recordLinkHint(s)}</div>
+    </li>`;
+}
+
+function _recPingHtml(p) {
+  const sent = Number(p.packetsSent);
+  const recv = Number(p.packetsReceived);
+  let loss = p.packetLossPercent;
+  if ((loss === undefined || loss === null) && sent > 0 && Number.isFinite(recv)) loss = ((sent - recv) / sent) * 100;
+  const partes = [
+    p.avgLatencyMs !== undefined && p.avgLatencyMs !== null ? `promedio <strong>${escapeHtml(_fmtNum(p.avgLatencyMs, 1))} ms</strong>` : '',
+    loss !== undefined && loss !== null ? `pérdida <strong>${escapeHtml(_fmtNum(loss, 1))} %</strong>` : '',
+    sent > 0 ? `${escapeHtml(String(Number.isFinite(recv) ? recv : '—'))}/${escapeHtml(String(sent))} paquetes` : '',
+  ].filter(Boolean).join(' · ');
+  return `
+    <li class="rec-item">
+      <div class="rec-head"><span class="rec-title">Ping a ${escapeHtml(p.target || '—')}${p.continuous ? ' (continuo)' : ''}</span></div>
+      <div class="rec-values">${partes || 'Sin valores'}</div>
+      <div class="rec-meta">${_recordWhen(p)}${_recordLinkHint(p)}</div>
+    </li>`;
+}
+
+function _recTracerouteHtml(t) {
+  const hops = Array.isArray(t.hops) ? t.hops : [];
+  const filas = hops.map(h => `
+    <li><span class="hop-n">${escapeHtml(String(h.hopNumber))}</span>
+      <span class="hop-host">${h.host ? escapeHtml(h.host) : 'sin respuesta'}</span>
+      <span class="hop-ms">${h.latencyMs !== undefined && h.latencyMs !== null ? escapeHtml(_fmtNum(h.latencyMs, 1)) + ' ms' : '—'}</span></li>`).join('');
+  return `
+    <li class="rec-item">
+      <div class="rec-head"><span class="rec-title">Traceroute a ${escapeHtml(t.target || '—')}</span></div>
+      <div class="rec-values">${hops.length} salto${hops.length === 1 ? '' : 's'}</div>
+      ${hops.length ? `<details class="rec-hops"><summary>Ver saltos</summary><ol class="hop-list">${filas}</ol></details>` : ''}
+      <div class="rec-meta">${_recordWhen(t)}${_recordLinkHint(t)}</div>
+    </li>`;
+}
+
+// Mejor señal por habitación (multi-AP) o el signalDbm legacy.
+function _roomBestSignal(room) {
+  const ms = Array.isArray(room.measurements) ? room.measurements : [];
+  const vals = ms.map(m => Number(m.signalDbm)).filter(Number.isFinite);
+  if (vals.length) return Math.max(...vals);
+  return Number.isFinite(Number(room.signalDbm)) ? Number(room.signalDbm) : null;
+}
+
+function _recWifiHtml(h) {
+  const rooms = Array.isArray(h.rooms) ? h.rooms : [];
+  const lista = rooms.map((r) => {
+    const best = _roomBestSignal(r);
+    return `<li>${escapeHtml(r.roomName || 'Habitación')}: <strong>${best === null ? '—' : escapeHtml(String(best)) + ' dBm'}</strong></li>`;
+  }).join('');
+  return `
+    <li class="rec-item">
+      <div class="rec-head"><span class="rec-title">Señal WiFi${h.label ? ' — ' + escapeHtml(h.label) : ''}</span></div>
+      <div class="rec-values">${rooms.length} habitación${rooms.length === 1 ? '' : 'es'} medida${rooms.length === 1 ? '' : 's'} (mejor señal por habitación)</div>
+      ${lista ? `<ul class="rec-rooms">${lista}</ul>` : ''}
+      <div class="rec-meta">${_recordWhen(h, 'createdAt')}${_recordLinkHint(h)}</div>
+    </li>`;
+}
+
+function _recDistanceHtml(d) {
+  return `
+    <li class="rec-item">
+      <div class="rec-head"><span class="rec-title">Distancia medida</span></div>
+      <div class="rec-values"><strong>${escapeHtml(_fmtNum(d.distanceMeters, 1))} m</strong></div>
+      <div class="rec-meta">${_recordWhen(d)}${_recordLinkHint(d)}</div>
+    </li>`;
+}
+
+function _recRetiredHtml(e) {
+  return `
+    <li class="rec-item">
+      <div class="rec-head"><span class="rec-title">Equipo retirado</span></div>
+      <div class="rec-values">Serial <strong class="mono">${escapeHtml(e.serialValue || '—')}</strong>${e.equipmentModelId ? ' · ' + escapeHtml(e.equipmentModelId) : ''}${e.removalReasonCode ? ' · motivo ' + escapeHtml(e.removalReasonCode) : ''}</div>
+      <div class="rec-meta">${_recordWhen(e, 'retiredAt')}${_recordLinkHint(e)}</div>
+    </li>`;
+}
+
+/** Checklist (7 tipos, ✓/✗ con texto) + los datos de cada prueba. */
+function renderVisitRecords(records) {
+  if (!records) return '';
+  const checklist = _visitChecklist(records);
+  const items = checklist.map((c) => `
+    <li class="visit-check ${c.done ? 'is-done' : 'is-missing'}">
+      <span class="visit-check-icon" aria-hidden="true">${c.done ? _VISIT_CHECK_ICONS.done : _VISIT_CHECK_ICONS.missing}</span>
+      <span class="visit-check-label">${escapeHtml(c.label || c.type)}</span>
+      <span class="visit-check-state">${c.done ? `Hecho${c.count > 1 ? ` (${escapeHtml(String(c.count))})` : ''}` : 'No hecho'}</span>
+    </li>`).join('');
+  const arr = (k) => (Array.isArray(records[k]) ? records[k] : []);
+  const detalle = [
+    ...arr('speedtests').map(_recSpeedtestHtml),
+    ...arr('pingTests').map(_recPingHtml),
+    ...arr('tracerouteTests').map(_recTracerouteHtml),
+    ...arr('wifiHeatmaps').map(_recWifiHtml),
+    ...arr('distanceMeasurements').map(_recDistanceHtml),
+    ...arr('retiredEquipment').map(_recRetiredHtml),
+  ].join('');
+  const vinculo = VISIT_LINKED_BY_TEXT[records.linkedBy] || '';
+  return `
+    ${checklist.length ? `<ul class="visit-checklist" aria-label="Qué se hizo en la visita">${items}</ul>` : ''}
+    ${detalle ? `<ul class="rec-list" aria-label="Datos de las pruebas">${detalle}</ul>` : ''}
+    ${vinculo ? `<p class="visit-link-note">${escapeHtml(vinculo)}</p>` : ''}`;
+}
+
+/**
+ * Visita anterior como tarjeta expandible (<details>): en el resumen, fecha,
+ * resultado, orden y cuántas pruebas se hicieron; dentro, fechas completas,
+ * notas, checklist y datos de cada prueba.
+ */
+function renderVisitCard(t) {
+  const tecnico = t.technician || '—';
+  const notas = t.closingNotes ? escapeHtml(t.closingNotes) : '';
+  const checklist = _visitChecklist(t.records);
+  const resumen = checklist.length
+    ? `${_visitDoneCount(t.records)} de ${checklist.length} pruebas`
+    : '';
+  const fechaResumen = t.endedAt || t.occurredAt;
+  const fsm = t.fsmTaskId && t.fsmTaskId !== t.workOrder ? `<div><dt>Tarea FSM</dt><dd>${escapeHtml(t.fsmTaskId)}</dd></div>` : '';
+  return `
+    <details class="visit-card" data-workorder="${escapeHtml(t.workOrder || '')}" data-result="${escapeHtml(t.result || '')}">
+      <summary class="visit-card-summary">
+        <span class="visit-card-date">${escapeHtml(fmtDateTimeEc(fechaResumen, { seconds: false }))}</span>
+        <span class="visit-card-main">
+          <span class="event-badge ${visitBadgeClass(t.result)}">${escapeHtml(t.result || '—')}</span>
+          <span class="event-title">${escapeHtml(t.taskId || t.workOrder || '—')} · ${escapeHtml(tecnico)}</span>
+          <span class="visit-card-reason">${escapeHtml(t.reason || '—')}${resumen ? ` · <span class="visit-card-count">${resumen}</span>` : ''}</span>
+        </span>
+        <span class="visit-card-chev" aria-hidden="true">${SERVICIO_ICONS.chev}</span>
+      </summary>
+      <div class="visit-card-body">
+        <dl class="visit-card-dates">
+          <div><dt>Orden</dt><dd>${escapeHtml(t.workOrder || '—')}</dd></div>
+          ${fsm}
+          <div><dt>Creada</dt><dd>${t.createdAt ? dateTimeHtml(t.createdAt) : '—'}</dd></div>
+          <div><dt>Finalizada</dt><dd>${t.endedAt ? dateTimeHtml(t.endedAt) : (t.result === 'CANCELADA' ? 'Cancelada' : '—')}</dd></div>
+        </dl>
+        ${notas ? `<p class="visit-card-notes">${notas}</p>` : ''}
+        ${t.result === 'REALIZADA' ? '<span class="visit-hint">Resultado no verificado por la operadora</span>' : ''}
+        ${_visitNotesButtonHtml(t)}
+        ${renderVisitRecords(t.records)}
+      </div>
+    </details>`;
+}
+
+// Panel único "Visitas pendientes y anteriores" (GET /accounts/{n}/visits
+// ?include=records). `result` es { items, pendingCount, totalOrders, scanned,
+// truncated, brand, degraded?, recordsSummary? }; se tolera el array desnudo.
+// El backend ya ordena: la pendiente primero y el resto por fecha descendente.
+// Sin visitas anteriores no se pinta esa sección (ni contadores en cero).
 function renderVisitsList(result) {
   const items = Array.isArray(result) ? result : ((result && result.items) || []);
   const truncated = !Array.isArray(result) && result ? result.truncated === true : false;
@@ -4201,12 +4406,63 @@ function renderVisitsList(result) {
     ? `
     <section class="visits-group" aria-label="Visitas anteriores">
       ${pendientes.length ? '<h3 class="visits-heading visits-heading-sep">Visitas anteriores</h3>' : ''}
-      ${anteriores.map(t => renderVisitItem(t)).join('')}
+      ${anteriores.map(renderVisitCard).join('')}
     </section>`
     : '';
 
   return nota + bloquePendiente + bloqueAnteriores;
 }
+
+// ---------------------------------------------------------------------------
+// Visita en curso: taskId de los registros que se guardan
+// ---------------------------------------------------------------------------
+// Todos los POST de herramientas/equipos retirados mandan como `taskId` el
+// workOrder (o fsmTaskId) de la visita PENDIENTE de la cuenta. Sin visita
+// pendiente no se manda taskId y el backend asocia por horario. Nunca se usa
+// el TASK/… que genera el panel NAP (es un identificador local, no de FSM).
+// Se lee de lo que ya cargó el panel de visitas; si no se abrió, se consulta
+// /visits una vez por cuenta y se recuerda (sin tocar la operadora de más).
+const PENDING_VISIT_TTL_MS = 30 * 60 * 1000;
+const PENDING_VISIT_FAIL_TTL_MS = 2 * 60 * 1000;
+const _pendingVisitCache = new Map();   // cuenta → { taskId, promise?, at, ttl }
+
+function pendingVisitTaskId(result) {
+  const items = Array.isArray(result) ? result : ((result && result.items) || []);
+  const p = items.find(t => t && t.result === 'PENDIENTE');
+  return p ? (p.workOrder || p.fsmTaskId || null) : null;
+}
+
+function rememberVisits(cuenta, result) {
+  if (!cuenta) return;
+  _pendingVisitCache.set(cuenta, { taskId: pendingVisitTaskId(result), at: Date.now(), ttl: PENDING_VISIT_TTL_MS });
+}
+
+/** taskId ya conocido (sin red), o null. */
+function peekCurrentVisitTaskId(cuenta) {
+  const hit = cuenta ? _pendingVisitCache.get(cuenta) : null;
+  if (!hit || hit.promise || Date.now() - hit.at > hit.ttl) return null;
+  return hit.taskId || null;
+}
+
+/** taskId de la visita en curso; consulta /visits una vez si hace falta. */
+function resolveCurrentVisitTaskId(cuenta) {
+  if (!cuenta) return Promise.resolve(null);
+  const hit = _pendingVisitCache.get(cuenta);
+  if (hit && Date.now() - hit.at <= hit.ttl) {
+    return hit.promise || Promise.resolve(hit.taskId || null);
+  }
+  const promise = WifixAPI.getVisits(cuenta)
+    .then((r) => { rememberVisits(cuenta, r); return pendingVisitTaskId(r); })
+    .catch((err) => {
+      console.warn('[Wifix] visita en curso (taskId):', err);
+      _pendingVisitCache.set(cuenta, { taskId: null, at: Date.now(), ttl: PENDING_VISIT_FAIL_TTL_MS });
+      return null;
+    });
+  _pendingVisitCache.set(cuenta, { promise, at: Date.now(), ttl: PENDING_VISIT_TTL_MS });
+  return promise;
+}
+
+WifixAPI.setTaskIdResolver(resolveCurrentVisitTaskId);
 
 // Notas de cierre de una orden, cargadas solo cuando el técnico las pide.
 function wireTaskNotesButtons(scope) {
@@ -4260,19 +4516,6 @@ function renderWorkOrderNotes(data) {
     </ul>`;
 }
 
-function renderHistorySummary(history) {
-  const lines = [
-    ['Distance', history.distanceMeasurements.length],
-    ['Speedtest', history.speedtests.length],
-    ['Heatmap', history.wifiHeatmaps.length],
-    ['Ping', history.pingTests.length],
-    ['Traceroute', history.tracerouteTests.length],
-    ['Equipos retirados', history.retiredEquipment.length],
-  ];
-  return lines.map(([label, n]) => `
-    <div class="mini-row"><span class="mr-label">${label}</span><span class="mr-value">${n}</span></div>`).join('');
-}
-
 const SERVICIO_ITEMS = [
   { id: 'naps',    icon: SERVICIO_ICONS.nap,     title: 'NAPs cercanas y seleccion GPON Xtreme',
     load: (cuenta) => loadNapPanel(cuenta) },
@@ -4288,9 +4531,13 @@ const SERVICIO_ITEMS = [
     load: (cuenta) => WifixAPI.getNodeEvents(cuenta).then(renderEventsList) },
   // Una sola ruta para la visita pendiente y el historial (campos 15-16).
   { id: 'visits',  icon: SERVICIO_ICONS.history, title: 'Visitas pendientes y anteriores',
-    load: (cuenta) => WifixAPI.getVisits(cuenta).then(renderVisitsList) },
-  { id: 'history', icon: SERVICIO_ICONS.history, title: 'Historial de la app (registros guardados)',
-    load: (cuenta) => WifixAPI.getAccountToolHistory(cuenta).then(renderHistorySummary) },
+    // Con include=records cada visita trae qué se hizo y qué datos arrojó
+    // (reemplaza al antiguo "Historial de la app"). La pendiente se recuerda
+    // para vincular los registros que se guarden durante esta visita.
+    load: (cuenta) => WifixAPI.getVisits(cuenta, { includeRecords: true }).then((r) => {
+      rememberVisits(cuenta, r);
+      return renderVisitsList(r);
+    }) },
 ];
 
 // Paneles de Datos del Servicio que corresponden al módulo actual.
@@ -4685,44 +4932,41 @@ const extSpeedDriver = {
   async disconnect() { /* simulado: nada que cerrar */ },
 };
 
-/** Nº de tarea actual en el estado de la app (el del panel NAP), si existe. */
+/** taskId de la visita en curso (visita pendiente de /visits), si ya se conoce. */
 function _extSpeedCurrentTaskId() {
-  return (_napPanelState && _napPanelState.taskId) || null;
+  return peekCurrentVisitTaskId(currentAccount());
 }
 
 /**
- * Payload para WifixAPI.createSpeedtest (POST /speedtests). Los campos del
- * contrato actual (download/upload/latency/jitter/loss/serverId/serverName/
- * measuredAt/notes) se persisten; los de origen (source, simulated, device*,
- * linkSpeedMbps, taskId) viajan también, y hasta que el backend los acepte
- * quedan además resumidos en `notes` para no perder la marca de simulado.
+ * Payload para WifixAPI.createSpeedtest (POST /speedtests, contrato
+ * SpeedtestInput): source 'external-device', simulated, deviceName/deviceId,
+ * measuredAt y taskId (visita en curso) son campos propios. Bajada/subida no
+ * pueden superar 10000 Mbps (tope del dispositivo). `notes` queda como texto
+ * legible para quien lea el registro (modelo y enlace no tienen campo propio).
  */
+const EXT_SPEED_MAX_MBPS = 10000;
 function buildExternalSpeedtestPayload(result, device, opts = {}) {
   const taskId = opts.taskId || null;
   const simulated = opts.simulated !== false;
   const linkGbps = (result.linkSpeedMbps || device.portSpeedMbps) / 1000;
+  const cap = (v) => Math.min(EXT_SPEED_MAX_MBPS, Math.max(0, Number(v) || 0));
   const notes = [
-    `${simulated ? 'Medición SIMULADA' : 'Medición'} con dispositivo externo ${device.deviceName} (${device.deviceModel}, id ${device.deviceId})`,
+    `${simulated ? 'Medición simulada' : 'Medición'} con ${device.deviceName} (${device.deviceModel})`,
     `enlace ${linkGbps} Gb/s`,
-    taskId ? `tarea ${taskId}` : null,
-    opts.planKnown === false ? 'plan del cliente no disponible: se simuló sobre un plan de referencia' : null,
+    opts.planKnown === false ? 'plan del cliente no disponible: se usó un plan de referencia' : null,
   ].filter(Boolean).join(' · ');
   const payload = {
-    downloadMbps: result.downloadMbps,
-    uploadMbps: result.uploadMbps,
-    latencyMs: result.latencyMs,
-    jitterMs: result.jitterMs,
-    packetLossPercent: result.packetLossPercent,
-    measuredAt: result.measuredAt,
-    serverId: device.deviceId,
-    serverName: simulated ? `${device.deviceName} (simulado)` : device.deviceName,
-    notes,
     source: 'external-device',
     simulated,
     deviceName: device.deviceName,
     deviceId: device.deviceId,
-    deviceModel: device.deviceModel,
-    linkSpeedMbps: result.linkSpeedMbps || device.portSpeedMbps,
+    downloadMbps: cap(result.downloadMbps),
+    uploadMbps: cap(result.uploadMbps),
+    latencyMs: result.latencyMs,
+    jitterMs: result.jitterMs,
+    packetLossPercent: result.packetLossPercent,
+    measuredAt: result.measuredAt,
+    notes,
   };
   if (taskId) payload.taskId = taskId;
   return payload;
@@ -4960,8 +5204,11 @@ function wireExternalSpeedtest(formEl) {
     busy = true;
     saveBtn.disabled = true;
     saveBtn.textContent = 'Guardando…';
+    // Visita en curso: workOrder de la visita pendiente (o nada: el backend
+    // asocia por horario). Nunca el TASK/… local del panel NAP.
+    const taskId = await resolveCurrentVisitTaskId(cuenta);
     const payload = buildExternalSpeedtestPayload(result, device, {
-      taskId: _extSpeedCurrentTaskId(),
+      taskId,
       simulated: extSpeedDriver.simulated,
       planKnown: plan ? plan.known : undefined,
     });

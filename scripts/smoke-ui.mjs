@@ -921,6 +921,79 @@ const notes = ctx.renderWorkOrderNotes(await WifixAPI.getWorkOrderTasks('ORDER/4
 check('renderiza las notas de cierre', notes.includes('task-note-date') && notes.includes('ONT'));
 check('notas HTML balanceado', balanced(notes) === null, balanced(notes));
 
+console.log('\n== Visitas con registros de la app (include=records) ==');
+{
+  const conReg = await WifixAPI.getVisits('35070291', { includeRecords: true });
+  check('mock include=records: cada visita trae checklist de 7 tipos',
+    conReg.items.every((t) => t.records && t.records.checklist.length === 7) && conReg.recordsSummary);
+  const html = ctx.renderVisitsList(conReg);
+  check('visitas con registros: HTML balanceado', balanced(html) === null, balanced(html));
+  check('anteriores como tarjetas expandibles (<details>)',
+    (html.match(/<details class="visit-card"/g) || []).length === conReg.items.length - 1);
+  check('checklist con ícono y texto: Hecho / No hecho',
+    html.includes('visit-check is-done') && html.includes('>Hecho<') && html.includes('>No hecho<'));
+  check('speedtest externo: fuente, deviceName y badge Simulado',
+    html.includes('Dispositivo externo · Medidor Xtrim 10G') && html.includes('sim-badge'));
+  check('speedtest de la app se distingue del externo', html.includes('Speedtest — App'));
+  check('ping (promedio/pérdida), traceroute (saltos), WiFi (dBm), distancia y equipo retirado',
+    html.includes('promedio <strong>12.3 ms</strong>') && html.includes('pérdida <strong>0 %</strong>')
+    && html.includes('4 saltos') && html.includes('sin respuesta') && html.includes('-41 dBm')
+    && html.includes('142.7 m') && html.includes('ZTEGD0BB8294'));
+  check('fechas creada/finalizada con el formateador común',
+    html.includes('>Creada<') && html.includes('>Finalizada<') && /<time class="dt-abs"/.test(html));
+  check('vínculo por tarea / por horario indicado sutilmente',
+    html.includes('por horario') && html.includes('Registros vinculados por'));
+  check('sin contadores "0 registros"', !/\b0 registros\b/.test(html));
+  const soloPend = ctx.renderVisitsList({ items: conReg.items.slice(0, 1) });
+  check('sin visitas anteriores no hay sección de anteriores',
+    !soloPend.includes('Visitas anteriores') && !soloPend.includes('visit-card'));
+  check('"Historial de la app" eliminado',
+    !vm.runInContext('SERVICIO_ITEMS', ctx).some((i) => i.id === 'history')
+    && typeof WifixAPI.getAccountToolHistory === 'undefined');
+
+  let url = null;
+  WifixAPI.useRealApi = true;
+  const origFetch = ctx.fetch;
+  ctx.fetch = async (u) => { url = String(u); return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({ items: [] }), text: async () => '{"items":[]}' }; };
+  await WifixAPI.getVisits('35070291', { includeRecords: true });
+  ctx.fetch = origFetch;
+  WifixAPI.useRealApi = false;
+  check('real: GET /accounts/{n}/visits?include=records', /\/accounts\/35070291\/visits\?include=records$/.test(url || ''), url);
+}
+
+console.log('\n== Vínculo taskId de la visita en curso ==');
+{
+  const cache = vm.runInContext('_pendingVisitCache', ctx);
+  cache.clear();
+  const ping = await WifixAPI.createPingTest('35070291', { target: '8.8.8.8' });
+  check('POST de herramientas: taskId = workOrder de la visita pendiente',
+    ping.taskId === 'ORDER/424900/2026', ping.taskId);
+  check('ya no se manda visitId de prueba', !('visitId' in ping));
+  const ret = await WifixAPI.createRetiredEquipment('35070291', { serialValue: 'X', equipmentModelId: 'm', removalReasonCode: 'DANADO' });
+  check('equipos retirados también llevan el taskId', ret.taskId === 'ORDER/424900/2026');
+  const explicito = await WifixAPI.createPingTest('35070291', { target: '1.1.1.1', taskId: 'TASK/1/2026' });
+  check('un taskId explícito manda sobre el resolver', explicito.taskId === 'TASK/1/2026');
+  cache.clear();
+  const origGet = WifixAPI.getVisits;
+  WifixAPI.getVisits = async () => ({ items: [{ result: 'SATISFACTORIA', workOrder: 'ORDER/9/2026' }] });
+  const sinPend = await WifixAPI.createPingTest('35070291', { target: '8.8.8.8' });
+  check('sin visita pendiente no se manda taskId (el backend asocia por horario)', !('taskId' in sinPend));
+  cache.clear();
+  WifixAPI.getVisits = async () => { throw new Error('sin red'); };
+  const origWarn = console.warn;
+  console.warn = () => {};
+  const conFallo = await WifixAPI.createPingTest('35070291', { target: '8.8.8.8' });
+  console.warn = origWarn;
+  check('si /visits falla, el registro se guarda igual sin taskId', !('taskId' in conFallo) && conFallo.target === '8.8.8.8');
+  WifixAPI.getVisits = origGet;
+  cache.clear();
+  vm.runInContext("_napPanelState.taskId = 'TASK/999999/2026'", ctx);
+  const noNap = await WifixAPI.createSpeedtest('35070291', { downloadMbps: 1, uploadMbps: 1 });
+  check('nunca usa el TASK/… generado por el panel NAP', noNap.taskId === 'ORDER/424900/2026');
+  vm.runInContext('_napPanelState.taskId = null', ctx);
+  cache.clear();
+}
+
 console.log('\n== Integración FSM ==');
 const health = await WifixAPI.getFsmHealth();
 check('health informa modo, marca por defecto y marcas',
@@ -1031,7 +1104,7 @@ const MODULE_TABLE = {
   visitas: {
     title: 'Visitas técnicas',
     cards: ['personales', 'servicio', 'red', 'herramientas', 'retirados'],
-    servicio: ['naps', 'status', 'isp', 'events', 'visits', 'history'],
+    servicio: ['naps', 'status', 'isp', 'events', 'visits'],
   },
   cancelaciones: {
     title: 'Cancelación de servicio',
@@ -1524,15 +1597,16 @@ console.log('\n== Speedtest con dispositivo externo (simulado) ==');
 
   const device = vm.runInContext('EXT_SPEED_SIM_DEVICE', ctx);
   const payload = ctx.buildExternalSpeedtestPayload(bajo, device, { taskId: 'TASK/123456/2026', simulated: true, planKnown: true });
-  check('payload: marca source external-device, simulated y dispositivo',
+  check('payload: campos propios del contrato (source, simulated, deviceName/deviceId, taskId, measuredAt)',
     payload.source === 'external-device' && payload.simulated === true
     && payload.deviceName === 'Medidor Xtrim 10G' && payload.deviceId === device.deviceId
-    && payload.taskId === 'TASK/123456/2026' && payload.linkSpeedMbps === 10000);
-  check('payload: campos del contrato POST /speedtests y la marca de simulado también en notes',
-    payload.downloadMbps === bajo.downloadMbps && payload.uploadMbps === bajo.uploadMbps
-    && payload.measuredAt === bajo.measuredAt && payload.serverId === device.deviceId
-    && payload.serverName === 'Medidor Xtrim 10G (simulado)'
-    && payload.notes.includes('SIMULADA') && payload.notes.includes('TASK/123456/2026'));
+    && payload.taskId === 'TASK/123456/2026' && payload.measuredAt === bajo.measuredAt
+    && payload.downloadMbps === bajo.downloadMbps && payload.uploadMbps === bajo.uploadMbps);
+  check('payload: sin campos fuera del contrato ni marca metida en serverName; notes legible',
+    !('serverName' in payload) && !('serverId' in payload) && !('linkSpeedMbps' in payload) && !('deviceModel' in payload)
+    && payload.notes.includes('Medidor Xtrim 10G') && payload.notes.includes('10 Gb/s'));
+  check('payload: bajada/subida topadas a 10000 Mbps',
+    ctx.buildExternalSpeedtestPayload(Object.assign({}, bajo, { downloadMbps: 12000 }), device, {}).downloadMbps === 10000);
   const sinTarea = ctx.buildExternalSpeedtestPayload(bajo, device, { taskId: null });
   check('payload sin tarea: no inventa taskId', !('taskId' in sinTarea) && !sinTarea.notes.includes('tarea'));
   const guardado = await WifixAPI.createSpeedtest('35070291', payload);

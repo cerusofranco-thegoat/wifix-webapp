@@ -152,17 +152,37 @@
       throw new Error('accountNumber es obligatorio.');
     }
     // technicianId NO se envía desde el frontend: el backend lo derivará del
-    // user.id del JWT. clientId/visitId siguen como valores de prueba hasta
-    // que exista el sistema upstream.
+    // user.id del JWT. clientId/contractId siguen como valores de prueba hasta
+    // que exista el sistema upstream. visitId ya NO se envía: la visita la
+    // identifica `taskId` (ver withVisitContext).
     return Object.assign(
       {
         accountNumber: String(accountNumber).trim(),
         clientId: 'CLI-FASE2-TEST',
         contractId: 'CTR-FASE2-TEST',
-        visitId: 'VIS-FASE2-TEST',
       },
       body,
     );
+  }
+
+  // Visita en curso: app.js registra un resolver que devuelve el workOrder
+  // (o fsmTaskId) de la visita PENDIENTE de la cuenta, o null. Todos los POST
+  // de herramientas y equipos retirados lo mandan como `taskId`; sin visita
+  // pendiente no se manda nada y el backend asocia el registro por horario.
+  // Un `taskId` explícito en el payload manda sobre el resolver.
+  let taskIdResolver = null;
+  async function withVisitContext(accountNumber, body) {
+    const ctx = withContext(accountNumber, body);
+    if (ctx.taskId === undefined || ctx.taskId === null || String(ctx.taskId).trim() === '') {
+      delete ctx.taskId;
+      if (typeof taskIdResolver === 'function') {
+        try {
+          const t = await taskIdResolver(ctx.accountNumber);
+          if (t && String(t).trim()) ctx.taskId = String(t).trim();
+        } catch (_) { /* sin taskId: el backend asocia por horario */ }
+      }
+    }
+    return ctx;
   }
 
   function delay(ms) {
@@ -985,19 +1005,19 @@
 
     // ---- Herramientas ------------------------------------------------------
     async createDistanceMeasurement(accountNumber, payload) {
-      const body = withContext(accountNumber, Object.assign({ measuredAt: nowIso() }, payload));
+      const body = await withVisitContext(accountNumber, Object.assign({ measuredAt: nowIso() }, payload));
       if (this.useRealApi) return fetchJson('POST', '/distance-measurements', body);
       await delay(80);
       return Object.assign({ id: uuidMock(), createdAt: nowIso() }, body);
     },
     async createSpeedtest(accountNumber, payload) {
-      const body = withContext(accountNumber, Object.assign({ measuredAt: nowIso() }, payload));
+      const body = await withVisitContext(accountNumber, Object.assign({ measuredAt: nowIso() }, payload));
       if (this.useRealApi) return fetchJson('POST', '/speedtests', body);
       await delay(80);
       return Object.assign({ id: uuidMock(), createdAt: nowIso() }, body);
     },
     async createWifiHeatmap(accountNumber, payload) {
-      const body = withContext(accountNumber, payload);
+      const body = await withVisitContext(accountNumber, payload);
       if (this.useRealApi) return fetchJson('POST', '/wifi-heatmaps', body);
       await delay(80);
       return Object.assign({ id: uuidMock(), createdAt: nowIso() }, body);
@@ -1029,13 +1049,13 @@
       return Object.assign({ id, updatedAt: nowIso() }, patch);
     },
     async createPingTest(accountNumber, payload) {
-      const body = withContext(accountNumber, Object.assign({ measuredAt: nowIso() }, payload));
+      const body = await withVisitContext(accountNumber, Object.assign({ measuredAt: nowIso() }, payload));
       if (this.useRealApi) return fetchJson('POST', '/ping-tests', body);
       await delay(80);
       return Object.assign({ id: uuidMock(), createdAt: nowIso() }, body);
     },
     async createTracerouteTest(accountNumber, payload) {
-      const body = withContext(accountNumber, Object.assign({ measuredAt: nowIso() }, payload));
+      const body = await withVisitContext(accountNumber, Object.assign({ measuredAt: nowIso() }, payload));
       if (this.useRealApi) return fetchJson('POST', '/traceroute-tests', body);
       await delay(80);
       return Object.assign({ id: uuidMock(), createdAt: nowIso() }, body);
@@ -1043,7 +1063,7 @@
 
     // ---- Equipos retirados -------------------------------------------------
     async createRetiredEquipment(accountNumber, payload) {
-      const body = withContext(accountNumber, Object.assign({ retiredAt: nowIso() }, payload));
+      const body = await withVisitContext(accountNumber, Object.assign({ retiredAt: nowIso() }, payload));
       if (this.useRealApi) return fetchJson('POST', '/retired-equipment', body);
       await delay(80);
       return Object.assign({ id: uuidMock(), createdAt: nowIso() }, body);
@@ -1083,22 +1103,6 @@
     },
 
     // ---- Historial de la cuenta -------------------------------------------
-    async getAccountToolHistory(accountNumber) {
-      if (this.useRealApi) {
-        return fetchJson('GET', '/accounts/' + encodeURIComponent(accountNumber) + '/tool-history');
-      }
-      await delay(60);
-      return {
-        accountNumber: accountNumber,
-        distanceMeasurements: [],
-        speedtests: [],
-        wifiHeatmaps: [],
-        pingTests: [],
-        tracerouteTests: [],
-        retiredEquipment: [],
-      };
-    },
-
     // ---- Datos del Cliente (campos 1-5, 7) ---------------------------------
     async getClientProfile(accountNumber) {
       if (this.useRealApi) {
@@ -1362,43 +1366,155 @@
     // brand, degraded? }. Los items ya vienen ordenados por el backend: la
     // pendiente primero (a lo sumo una: la próxima visita) y luego el resto
     // por fecha descendente. Se tolera el array desnudo por robustez.
-    async getVisits(accountNumber) {
+    // opts.includeRecords → `?include=records`: cada visita trae `records`
+    // (checklist de 7 tipos + los registros de la app asociados por taskId o
+    // por horario). Reemplaza al "historial de la app".
+    async getVisits(accountNumber, opts) {
+      const withRecords = !!(opts && opts.includeRecords);
       if (this.useRealApi) {
-        const r = await fetchJson('GET', '/accounts/' + encodeURIComponent(accountNumber) + '/visits');
+        const r = await fetchJson('GET', '/accounts/' + encodeURIComponent(accountNumber) + '/visits' +
+          (withRecords ? '?include=records' : ''));
         return asItemsEnvelope(r);
       }
       await delay(80);
-      return mockVisits();
+      return mockVisits(accountNumber, withRecords);
+    },
+
+    // Registra quién resuelve el taskId de la visita en curso (ver withVisitContext).
+    setTaskIdResolver(fn) {
+      taskIdResolver = typeof fn === 'function' ? fn : null;
     },
   };
 
   // Mock de visitas: una pendiente (la más reciente, sin notas de cierre) y el
   // historial con la mezcla de resultados que devuelve la operadora. Nunca más
-  // de una PENDIENTE.
-  function mockVisits() {
+  // de una PENDIENTE. Con `withRecords`, cada visita trae `records` con la
+  // forma de VisitRecords (checklist de 7 tipos + registros por tipo).
+  const VISIT_CHECKLIST = [
+    ['speedtest', 'Speedtest (app)'],
+    ['externalSpeedtest', 'Speedtest (dispositivo externo)'],
+    ['ping', 'Ping'],
+    ['traceroute', 'Traceroute'],
+    ['wifiSignal', 'Medición de señal WiFi'],
+    ['distance', 'Medición de distancia'],
+    ['retiredEquipment', 'Equipos retirados'],
+  ];
+  function mockVisitRecords(visit, accountNumber, spec) {
+    const acct = String(accountNumber || '35070291');
+    const at = function (min) { return new Date(new Date(visit.occurredAt).getTime() - min * 60000).toISOString(); };
+    const link = function (by) {
+      return by === 'TASK_ID' ? { taskId: visit.workOrder, linkedBy: 'TASK_ID' } : { linkedBy: 'TIME_WINDOW' };
+    };
+    const base = function (min, by) {
+      return Object.assign({ id: uuidMock(), accountNumber: acct, createdAt: at(min - 1), measuredAt: at(min) }, link(by));
+    };
+    const r = { speedtests: [], pingTests: [], tracerouteTests: [], wifiHeatmaps: [], distanceMeasurements: [], retiredEquipment: [] };
+    (spec || []).forEach(function (k) {
+      if (k === 'ext') {
+        r.speedtests.push(Object.assign(base(40, 'TASK_ID'), {
+          source: 'external-device', deviceName: 'Medidor Xtrim 10G', deviceId: 'XTM10G-SIM-0001', simulated: true,
+          downloadMbps: 487.3, uploadMbps: 241.8, latencyMs: 4.1, jitterMs: 0.6, packetLossPercent: 0,
+        }));
+      }
+      if (k === 'app') {
+        r.speedtests.push(Object.assign(base(55, 'TIME_WINDOW'), {
+          source: 'app', simulated: false, downloadMbps: 212.4, uploadMbps: 98.7, latencyMs: 14.2, jitterMs: 2.3,
+          packetLossPercent: 0, serverName: 'CNT Guayaquil',
+        }));
+      }
+      if (k === 'ping') {
+        r.pingTests.push(Object.assign(base(35, 'TIME_WINDOW'), {
+          target: '8.8.8.8', packetsSent: 10, packetsReceived: 10, packetLossPercent: 0,
+          minLatencyMs: 10.9, avgLatencyMs: 12.3, maxLatencyMs: 15.8, continuous: false,
+        }));
+      }
+      if (k === 'trace') {
+        r.tracerouteTests.push(Object.assign(base(30, 'TASK_ID'), {
+          target: '8.8.8.8',
+          hops: [
+            { hopNumber: 1, host: '192.168.1.1', latencyMs: 1.2 },
+            { hopNumber: 2, host: '10.20.0.1', latencyMs: 4.8 },
+            { hopNumber: 3, host: null },
+            { hopNumber: 4, host: '8.8.8.8', latencyMs: 11.6 },
+          ],
+        }));
+      }
+      if (k === 'wifi') {
+        r.wifiHeatmaps.push(Object.assign(base(25, 'TIME_WINDOW'), {
+          label: 'Planta baja',
+          rooms: [
+            { roomName: 'Sala', floor: 1, measuredAt: at(25),
+              measurements: [{ bssid: 'aa:bb:cc:dd:ee:01', apLabelSnapshot: 'Router principal', signalDbm: -41, isConnected: true }] },
+            { roomName: 'Dormitorio', floor: 1, measuredAt: at(22),
+              measurements: [{ bssid: 'aa:bb:cc:dd:ee:01', apLabelSnapshot: 'Router principal', signalDbm: -67, isConnected: true }] },
+          ],
+        }));
+      }
+      if (k === 'dist') r.distanceMeasurements.push(Object.assign(base(20, 'TIME_WINDOW'), { distanceMeters: 142.7 }));
+      if (k === 'retired') {
+        r.retiredEquipment.push(Object.assign(base(15, 'TASK_ID'), {
+          equipmentModelId: 'ONT ZTE (todas)', serialValue: 'ZTEGD0BB8294', removalReasonCode: 'DANADO', retiredAt: at(15),
+        }));
+      }
+    });
+    const counts = {
+      speedtest: r.speedtests.filter(function (x) { return x.source !== 'external-device'; }).length,
+      externalSpeedtest: r.speedtests.filter(function (x) { return x.source === 'external-device'; }).length,
+      ping: r.pingTests.length,
+      traceroute: r.tracerouteTests.length,
+      wifiSignal: r.wifiHeatmaps.length,
+      distance: r.distanceMeasurements.length,
+      retiredEquipment: r.retiredEquipment.length,
+    };
+    const all = [].concat(r.speedtests, r.pingTests, r.tracerouteTests, r.wifiHeatmaps, r.distanceMeasurements, r.retiredEquipment);
+    const kinds = all.map(function (x) { return x.linkedBy; })
+      .filter(function (v, i, arr) { return arr.indexOf(v) === i; });
+    const until = visit.endedAt
+      ? new Date(new Date(visit.endedAt).getTime() + 2 * 3600000).toISOString()
+      : new Date(Date.now() + 2 * 3600000).toISOString();
+    return Object.assign({
+      linkedBy: all.length === 0 ? null : kinds.length > 1 ? 'MIXED' : kinds[0],
+      window: visit.result === 'CANCELADA' ? null : { from: visit.createdAt, until: until },
+      checklist: VISIT_CHECKLIST.map(function (c) {
+        return { type: c[0], label: c[1], done: counts[c[0]] > 0, count: counts[c[0]] };
+      }),
+    }, r);
+  }
+  function mockVisits(accountNumber, withRecords) {
     const pendiente = mockClosedTask(0);
     pendiente.occurredAt = new Date(Date.now() - 3 * 3600000).toISOString();
     pendiente.reason = 'Sin servicio de internet';
     pendiente.closingNotes = '';
     pendiente.result = 'PENDIENTE';
     pendiente.notesLoaded = true;
+    pendiente.createdAt = pendiente.occurredAt;
+    pendiente.endedAt = null;
+    pendiente.fsmTaskId = 'TASK/294328/2026';
+    pendiente.taskId = pendiente.workOrder;
 
     const historial = [
-      { seed: 6,  result: 'INSATISFACTORIA', reason: 'Intermitencia en la conexión', notesLoaded: true },
-      { seed: 14, result: 'SATISFACTORIA',   reason: 'WiFi débil en habitaciones',    notesLoaded: false },
-      { seed: 27, result: 'CANCELADA',       reason: 'Cliente ausente',               notesLoaded: true, closingNotes: 'Cliente no se encontraba en el domicilio.' },
-      { seed: 41, result: 'REALIZADA',       reason: 'Cambio de equipo',              notesLoaded: false },
-      { seed: 63, result: 'SATISFACTORIA',   reason: 'Instalación',                   notesLoaded: false },
+      { seed: 6,  result: 'INSATISFACTORIA', reason: 'Intermitencia en la conexión', notesLoaded: true, recs: ['ext', 'ping', 'trace'] },
+      { seed: 14, result: 'SATISFACTORIA',   reason: 'WiFi débil en habitaciones',    notesLoaded: false, recs: ['wifi', 'dist', 'retired'] },
+      { seed: 27, result: 'CANCELADA',       reason: 'Cliente ausente',               notesLoaded: true, closingNotes: 'Cliente no se encontraba en el domicilio.', recs: [] },
+      { seed: 41, result: 'REALIZADA',       reason: 'Cambio de equipo',              notesLoaded: false, recs: ['app'] },
+      { seed: 63, result: 'SATISFACTORIA',   reason: 'Instalación',                   notesLoaded: false, recs: [] },
     ].map(function (v) {
       const t = mockClosedTask(v.seed);
       t.result = v.result;
       t.reason = v.reason;
       t.notesLoaded = v.notesLoaded;
       t.closingNotes = v.notesLoaded ? (v.closingNotes || t.closingNotes) : '';
+      // La lista es por orden: taskId == workOrder (contrato VisitItem).
+      t.fsmTaskId = t.taskId;
+      t.taskId = t.workOrder;
+      t.endedAt = t.occurredAt;
+      t.createdAt = new Date(new Date(t.occurredAt).getTime() - 26 * 3600000).toISOString();
+      if (withRecords) t.records = mockVisitRecords(t, accountNumber, v.recs);
       return t;
     });
+    if (withRecords) pendiente.records = mockVisitRecords(pendiente, accountNumber, []);
 
-    return {
+    const out = {
       items: [pendiente].concat(historial),
       pendingCount: 1,
       totalOrders: 14,
@@ -1410,6 +1526,8 @@
         message: 'Se revisaron las 10 órdenes más recientes de 14. Abre una visita concreta para ver sus notas.',
       },
     };
+    if (withRecords) out.recordsSummary = { linked: 10, unlinked: 0, windowGraceHours: 2, windowLookbackHours: 72 };
+    return out;
   }
 
   global.WifixAPI = WifixAPI;

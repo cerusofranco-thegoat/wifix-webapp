@@ -4382,3 +4382,97 @@ body.console-fullscreen-open { overflow: hidden; }
 .lookup-item .wl-chip.warn { background: var(--warn-bg); border-color: var(--warn-border); color: var(--warn-text); }
 .lookup-item .wl-chip.fail { background: var(--error-bg); border-color: var(--error-border); color: var(--error-text); }
 .lookup-item .wl-mora { color: var(--warn-text); font-weight: 600; }
+
+/* ==========================================================================
+ * Visitas anteriores con registros de la app (include=records)
+ * ========================================================================*/
+.visit-card {
+  border: 1px solid var(--border-lavender);
+  border-radius: var(--radius-btn);
+  background: var(--surface-card);
+  margin-top: 8px;
+}
+.visit-card-summary {
+  list-style: none;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-areas: "date chev" "main chev";
+  gap: 2px 8px;
+  padding: 10px 12px;
+  min-height: 44px;
+  cursor: pointer;
+}
+.visit-card-summary::-webkit-details-marker { display: none; }
+.visit-card-summary:focus-visible { outline: 2px solid var(--brand-primary); outline-offset: 2px; border-radius: var(--radius-btn); }
+.visit-card-date { grid-area: date; font-size: 11px; color: var(--brand-primary); font-weight: 600; }
+.visit-card-main { grid-area: main; display: flex; flex-direction: column; align-items: flex-start; min-width: 0; }
+.visit-card-main .event-badge { margin-bottom: 2px; }
+.visit-card-reason { font-size: 12px; color: var(--text-secondary); }
+.visit-card-count { color: var(--text-primary); font-weight: 600; }
+.visit-card-chev { grid-area: chev; align-self: center; color: var(--brand-primary); transition: transform 0.2s; }
+.visit-card[open] .visit-card-chev { transform: rotate(180deg); }
+@media (prefers-reduced-motion: reduce) { .visit-card-chev { transition: none; } }
+.visit-card-body { padding: 0 12px 12px; border-top: 1px dashed var(--border-lavender); }
+.visit-card-dates { margin: 8px 0; display: grid; gap: 3px; }
+.visit-card-dates > div { display: grid; grid-template-columns: 84px 1fr; gap: 8px; font-size: 12px; }
+.visit-card-dates dt { color: var(--text-secondary); }
+.visit-card-dates dd { margin: 0; overflow-wrap: anywhere; }
+.visit-card-notes { margin: 6px 0; font-size: 12px; color: var(--text-primary); line-height: 1.4; }
+
+.visit-checklist {
+  list-style: none;
+  margin: 10px 0 6px;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+}
+.visit-check {
+  display: grid;
+  grid-template-columns: 20px 1fr auto;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+.visit-check-icon {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.visit-check.is-done .visit-check-icon { background: var(--success-bg); color: var(--success-text); border: 1px solid var(--success-border); }
+.visit-check.is-missing .visit-check-icon { background: var(--gray-50); color: var(--gray-600); border: 1px solid var(--gray-200); }
+.visit-check-state { font-size: 11px; font-weight: 600; }
+.visit-check.is-done .visit-check-state { color: var(--success-text); }
+.visit-check.is-missing .visit-check-state { color: var(--text-secondary); }
+.visit-check.is-missing .visit-check-label { color: var(--text-secondary); }
+
+.rec-list { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.rec-item {
+  padding: 8px 10px;
+  border-radius: var(--radius-btn);
+  background: var(--surface-app);
+  border: 1px solid var(--border-lavender);
+  font-size: 12px;
+}
+.rec-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 8px; }
+.rec-title { font-weight: 700; color: var(--text-primary); }
+.rec-values { margin-top: 2px; color: var(--text-primary); }
+.rec-meta { margin-top: 2px; font-size: 11px; color: var(--text-secondary); }
+.rec-link { font-style: italic; }
+.rec-rooms { margin: 4px 0 0; padding-left: 18px; }
+.rec-hops summary, .visit-records-inline summary {
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--brand-primary);
+}
+.visit-records-inline summary { min-height: 44px; font-size: 12px; }
+.hop-list { list-style: none; margin: 4px 0 0; padding: 0; font-variant-numeric: tabular-nums; }
+.hop-list li { display: grid; grid-template-columns: 22px 1fr auto; gap: 6px; }
+.hop-n { color: var(--text-secondary); }
+.hop-host { overflow-wrap: anywhere; }
+.visit-link-note { margin: 8px 0 0; font-size: 10.5px; color: var(--text-secondary); font-style: italic; }
