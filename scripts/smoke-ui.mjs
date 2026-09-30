@@ -761,10 +761,34 @@ console.log('\n== NAP del cliente (visita técnica) y mapa ==');
         && data.ports.filter((p) => p.isClientPort).length === 1;
     })());
 
+  const portsOrig = WifixAPI.getNapPorts;
+  let llamadasPorts = 0;
+  WifixAPI.getNapPorts = async function (...a) { llamadasPorts++; return portsOrig.apply(this, a); };
   const simHtml = await ctx.loadNapPanel('99999999');
+  ctx._bootNapPanel({ querySelector: () => fakeEl(), isConnected: true });
   check('visita con NAP simulada: tarjeta con badge "Simulado" y sin búsqueda',
     simHtml.includes('nap-card nap-current') && simHtml.includes('class="sim-badge"') && simHtml.includes('>Simulado<')
     && !simHtml.includes('data-action="nap-search"'));
+  check('NAP simulada: sin "Ver puertos" ni grilla, y cero llamadas a /naps/{ref}/ports',
+    !simHtml.includes('data-action="view-ports"') && !simHtml.includes('nap-ports-slot') && llamadasPorts === 0, `llamadas=${llamadasPorts}`);
+  check('NAP simulada: usados/total, puerto, Cómo llegar y el motivo de la simulación',
+    simHtml.includes('ocupados') && /Puerto \d\d/.test(simHtml) && simHtml.includes('data-action="nap-directions"')
+    && simHtml.includes('NAP asignada simulada: la operadora no identificó la NAP de esta cuenta'));
+  check('NAP simulada: estado "Activo (simulado)" sin duplicar el grupo',
+    simHtml.includes('Activo (simulado)') && !simHtml.includes('(Activo (simulado))'));
+  WifixAPI.getNapPorts = portsOrig;
+  {
+    const deg = await WifixAPI.getCurrentNap('99999999');
+    deg.simulationReason = 'UPSTREAM_AUTH_ERROR';
+    deg.degraded = { reason: 'FSM_AUTH', message: 'El acceso a FSM no está disponible: se muestra la NAP asignada del cliente de forma simulada.' };
+    vm.runInContext('_napPanelState', ctx).currentNap = deg;
+    const h = ctx._renderCurrentNapCard();
+    check('NAP simulada por FSM caído: muestra el degraded del backend una sola vez',
+      (h.match(/El acceso a FSM no está disponible/g) || []).length === 1 && !h.includes('NAP asignada simulada:'));
+    deg.degraded = 'FSM_UNAVAILABLE';
+    check('degraded como código suelto también se explica',
+      ctx._renderCurrentNapCard().includes('FSM no está respondiendo'));
+  }
   {
     const nfOrig = WifixAPI.getCurrentNap;
     WifixAPI.getCurrentNap = async () => ({ accountNumber: '1', found: false, nap: null, portNumber: null,
@@ -908,9 +932,19 @@ console.log('\n== Ubicación "Casa cliente" (Visita técnica / Migración) ==');
   check('payload: sin clientId/contractId ni accountNumber en el cuerpo',
     !('clientId' in p1) && !('contractId' in p1) && !('accountNumber' in p1));
   const p2 = ctx.buildClientLocationPayload({ latitude: -2.1, longitude: -79.8, accuracyMeters: 12, source: 'MANUAL' }, { napCode: null, napPort: null, taskId: null, notes: '' });
-  check('payload manual: accuracy null, sin taskId/napCode/napPort/notes, capturedAt presente',
-    p2.source === 'MANUAL' && p2.accuracyMeters === null && !('taskId' in p2) && !('napCode' in p2)
+  check('payload manual: SIN accuracyMeters (el backend no acepta null), sin taskId/napCode/napPort/notes',
+    p2.source === 'MANUAL' && !('accuracyMeters' in p2) && !('taskId' in p2) && !('napCode' in p2)
     && !('napPort' in p2) && !('notes' in p2) && typeof p2.capturedAt === 'string');
+  const pFut = ctx.buildClientLocationPayload(Object.assign({}, gpsDraft, { capturedAt: new Date(Date.now() + 3600000).toISOString() }), {});
+  check('payload: capturedAt futuro se corrige a "ahora" (el backend da 400)',
+    new Date(pFut.capturedAt).getTime() <= Date.now());
+  const pSinAcc = ctx.buildClientLocationPayload(Object.assign({}, gpsDraft, { accuracyMeters: null }), {});
+  check('payload GPS sin precisión: se omite accuracyMeters', !('accuracyMeters' in pSinAcc));
+  let rechazoNull = false;
+  try { await WifixAPI.createClientLocation('35070291', Object.assign({}, p2, { accuracyMeters: null })); } catch (e) { rechazoNull = e.code === 'VALIDATION_ERROR'; }
+  let rechazoCero = false;
+  try { await WifixAPI.createClientLocation('35070291', Object.assign({}, p2, { latitude: 0, longitude: 0 })); } catch (e) { rechazoCero = e.code === 'VALIDATION_ERROR'; }
+  check('mock POST con las reglas del backend: accuracyMeters null y (0,0) → 400', rechazoNull && rechazoCero);
 
   // --- Mock GET/POST ------------------------------------------------------
   const vacio = await WifixAPI.getClientLocation('35070291');
@@ -965,6 +999,12 @@ console.log('\n== Ubicación "Casa cliente" (Visita técnica / Migración) ==');
     && sc.slots['[data-action="client-loc-gps"]'].getAttribute('aria-busy') === null);
 
   // Manual inválido → aria-invalid + mensaje; válido → draft MANUAL.
+  sc.slots['[data-field="client-loc-lat"]'].value = '123';
+  sc.slots['[data-field="client-loc-lng"]'].value = '-79.9';
+  sc.slots['[data-field="client-loc-lat"]'].value = '0';
+  sc.slots['[data-field="client-loc-lng"]'].value = '0';
+  check('manual (0,0): se rechaza en la app (el backend da 400)', ctx._clientLocUseManual(sc) === null
+    && sc.slots['[data-slot="client-loc-manual-error"]'].textContent !== '');
   sc.slots['[data-field="client-loc-lat"]'].value = '123';
   sc.slots['[data-field="client-loc-lng"]'].value = '-79.9';
   check('manual inválido: no crea captura y marca aria-invalid',
@@ -1056,6 +1096,12 @@ console.log('\n== Ubicación "Casa cliente" (Visita técnica / Migración) ==');
   vm.runInContext("_napPanelState.clientLoc.draft = { latitude: -2.2478, longitude: -79.9044, accuracyMeters: 4, source: 'GPS', capturedAt: new Date().toISOString() }", ctx);
   check('registeredLocation null: "Sin ubicación registrada de la operadora para comparar"',
     ctx._clientLocDraftHtml().includes('Sin ubicación registrada de la operadora para comparar'));
+  vm.runInContext("_napPanelState.clientLoc.registeredLocation = { latitude: -2.247946, longitude: -79.904161, source: 'MOCK' }", ctx);
+  check('registeredLocation MOCK: la comparación dice "(de prueba)"',
+    ctx._clientLocDraftHtml().includes('de la ubicación registrada del cliente (de prueba)'));
+  vm.runInContext("_napPanelState.currentNap = null; _napPanelState.clientLoc.latest = { latitude: -2.2478, longitude: -79.9044, napLocation: { latitude: -2.2476, longitude: -79.9046, simulated: true } }", ctx);
+  check('mapa sin current-nap: marcador de la NAP desde napLocation de la última captura',
+    (() => { const nf = ctx._napMapClientPoints().napFallback; return nf && nf.latitude === -2.2476 && nf.simulated === true; })());
   // GET con error: aviso con Reintentar, la captura sigue disponible.
   WifixAPI.getClientLocation = async () => { throw new Error('Error interno del servidor'); };
   const html3 = await ctx.loadNapPanel('35070291');

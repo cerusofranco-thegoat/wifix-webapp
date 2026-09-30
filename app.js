@@ -2112,6 +2112,41 @@ function _napCurrentNoticeHtml() {
   return `<div class="nap-current-note" role="status">${escapeHtml(txt)}</div>${retry}`;
 }
 
+// Motivo de la NAP simulada (simulationReason del backend), en español.
+const NAP_SIMULATION_REASON_TEXT = Object.freeze({
+  NOT_FOUND: 'la operadora no identificó la NAP de esta cuenta',
+  NO_COORDS: 'el cliente no tiene coordenadas registradas',
+  NOT_SUPPORTED: 'la fuente de NAPs de la operadora no soporta esta consulta',
+  UPSTREAM_AUTH_ERROR: 'el acceso a FSM no está disponible',
+  UPSTREAM_UNAVAILABLE: 'FSM no está respondiendo',
+});
+
+// ¿Se pueden pedir los puertos de la NAP del cliente? Una NAP simulada trae
+// napId null y un código inventado: NUNCA se consulta /naps/{ref}/ports.
+function _napCanLoadPorts(cur) {
+  return !!(cur && cur.nap) && !_napIsSimulated(cur);
+}
+
+// Aviso de la NAP simulada. Si el backend ya manda `degraded` (FSM caído) su
+// mensaje lo explica: no se repite.
+function _napSimulationNoteHtml(cur) {
+  if (!_napIsSimulated(cur) || (cur.degraded && cur.degraded.message)) return '';
+  const motivo = NAP_SIMULATION_REASON_TEXT[cur.simulationReason];
+  return `<div class="nap-degraded-note" role="status">NAP asignada simulada${motivo ? `: ${escapeHtml(motivo)}` : ''}. ` +
+    'Son datos de prueba; el detalle de puertos no está disponible.</div>';
+}
+
+// Aviso de degradación: objeto { reason, message } o solo el código.
+function _napDegradedText(degraded) {
+  if (!degraded) return '';
+  if (typeof degraded === 'string') {
+    if (degraded === 'FSM_AUTH') return 'El acceso a FSM no está disponible: se muestra la NAP asignada de forma simulada.';
+    if (degraded === 'FSM_UNAVAILABLE') return 'FSM no está respondiendo: se muestra la NAP asignada de forma simulada.';
+    return '';
+  }
+  return degraded.message || '';
+}
+
 // Badges de la NAP del cliente: "Contratada" (assignment) y "Simulado".
 function _napClientBadgesHtml(cur) {
   const asignada = cur && (cur.assignment || (cur.nap && cur.nap.assignment));
@@ -2138,11 +2173,20 @@ function _renderCurrentNapCard() {
     : '<div class="nap-client-port is-unknown">Puerto del cliente no informado</div>';
   const st = cur.clientStatus;
   const grupo = clientStatusGroup(st ? (st.code || st.name) : null);
-  // Texto literal de la operadora bajo el grupo, si aporta (p. ej. "Suspendido por mora").
-  const literal = st && st.description && String(st.description).toUpperCase() !== grupo.label.toUpperCase()
-    ? ` <span class="nap-client-status-sub">(${escapeHtml(st.description)})</span>` : '';
-  const degraded = cur.degraded && cur.degraded.message
-    ? `<div class="nap-degraded-note" role="status">${escapeHtml(cur.degraded.message)}</div>` : '';
+  // Texto literal de la operadora: si ya empieza con el grupo ("Activo
+  // (simulado)") va solo; si aporta otra cosa ("Suspendido por mora"), entre
+  // paréntesis tras el grupo.
+  const desc = st && st.description ? String(st.description) : '';
+  const extiende = !!desc && desc.toUpperCase().startsWith(grupo.label.toUpperCase());
+  const estadoTxt = extiende ? desc : grupo.label;
+  const literal = desc && !extiende
+    ? ` <span class="nap-client-status-sub">(${escapeHtml(desc)})</span>` : '';
+  const degTxt = _napDegradedText(cur.degraded);
+  const degraded = (degTxt ? `<div class="nap-degraded-note" role="status">${escapeHtml(degTxt)}</div>` : '')
+    + _napSimulationNoteHtml(cur);
+  const puertos = _napCanLoadPorts(cur) ? `
+        <button class="add-row-btn nap-ports-btn" type="button" data-action="view-ports" data-nap="${escapeHtml(ref)}"
+          aria-expanded="false">Ver puertos</button>` : '';
   const equipo = cur.equipmentId ? `
         <span class="nap-client-equipment">
           <span class="nap-client-key">Equipo</span><span class="mono">${escapeHtml(cur.equipmentId)}</span>
@@ -2162,22 +2206,21 @@ function _renderCurrentNapCard() {
       ${puerto}
       <div class="nap-client-meta">
         <span class="nap-client-status ${escapeHtml(grupo.tile)}">
-          <span class="nap-client-key">Cliente</span>${escapeHtml(grupo.label)}${literal}
+          <span class="nap-client-key">Cliente</span>${escapeHtml(estadoTxt)}${literal}
         </span>${equipo}
       </div>
-      <div class="nap-actions">
-        <button class="add-row-btn nap-ports-btn" type="button" data-action="view-ports" data-nap="${escapeHtml(ref)}"
-          aria-expanded="false">Ver puertos</button>
+      <div class="nap-actions">${puertos}
         ${_napDirectionsBtnHtml(n)}
       </div>
-      <div class="nap-ports-slot" data-ports-for="${escapeHtml(ref)}" data-slot="ports-${escapeHtml(ref)}"></div>
+      ${_napCanLoadPorts(cur) ? `<div class="nap-ports-slot" data-ports-for="${escapeHtml(ref)}" data-slot="ports-${escapeHtml(ref)}"></div>` : ''}
       ${_renderClientLocSection()}
     </div>`;
 }
 
-// "Ver puertos" de la tarjeta del cliente (misma grilla que la lista).
+// "Ver puertos" de la tarjeta del cliente (misma grilla que la lista). Con la
+// NAP simulada no hay botón ni se conecta nada.
 function _wireNapCurrentCard(scope) {
-  if (!_napHasClientNap()) return;
+  if (!_napHasClientNap() || !_napCanLoadPorts(_napPanelState.currentNap)) return;
   wireNapPortsButtons(scope);
 }
 
@@ -2268,10 +2311,11 @@ function _clientLocComparisonHtml(pt, fromBackend) {
   const napTxt = dNap !== null
     ? `${escapeHtml(_fmtMeters(dNap))}${napCode ? ` de la NAP ${escapeHtml(napCode)}` : ''}`
     : 'Sin coordenada de la NAP para calcular';
+  const dePrueba = reg && reg.source === 'MOCK' ? ' (de prueba)' : '';
   let regTxt;
   if (!reg) regTxt = 'Sin ubicación registrada de la operadora para comparar';
-  else if (dReg !== null) regTxt = `A ${escapeHtml(_fmtMeters(dReg))} de la ubicación registrada del cliente`;
-  else regTxt = 'La ubicación registrada no trae una coordenada válida';
+  else if (dReg !== null) regTxt = `A ${escapeHtml(_fmtMeters(dReg))} de la ubicación registrada del cliente${dePrueba}`;
+  else regTxt = `La ubicación registrada${dePrueba} no trae una coordenada válida`;
   return `
           <div><dt>Distancia a la NAP</dt><dd data-field="client-loc-dist-nap">${napTxt}</dd></div>
           <div><dt>Ubicación registrada</dt><dd data-field="client-loc-dist-reg">${regTxt}</dd></div>`;
@@ -2365,19 +2409,24 @@ function _renderClientLocSection() {
 
 /**
  * Cuerpo del POST .../client-location a partir de la captura.
- * ctx = { napCode, napPort, taskId, notes }. taskId (y napCode/napPort) se
- * omiten si no hay; accuracyMeters va null si la coordenada es manual.
+ * ctx = { napCode, napPort, taskId, notes }. Lo que no hay se OMITE (el
+ * backend valida accuracyMeters como número >= 0 opcional: null da 400), así
+ * que una coordenada manual va sin accuracyMeters. capturedAt nunca en el
+ * futuro (el backend responde 400): si el reloj se adelantó, se usa "ahora".
  */
 function buildClientLocationPayload(draft, ctx = {}) {
+  const ahora = Date.now();
+  const t = toValidDate(draft.capturedAt);
   const body = {
     latitude: Number(draft.latitude),
     longitude: Number(draft.longitude),
-    accuracyMeters: draft.source !== 'MANUAL' && _isNum(draft.accuracyMeters)
-      ? Math.round(Number(draft.accuracyMeters) * 10) / 10 : null,
     label: CLIENT_LOC_LABEL,
     source: draft.source === 'MANUAL' ? 'MANUAL' : 'GPS',
-    capturedAt: draft.capturedAt || new Date().toISOString(),
+    capturedAt: t && t.getTime() <= ahora ? t.toISOString() : new Date(ahora).toISOString(),
   };
+  if (body.source === 'GPS' && _isNum(draft.accuracyMeters) && Number(draft.accuracyMeters) >= 0) {
+    body.accuracyMeters = Math.round(Number(draft.accuracyMeters) * 10) / 10;
+  }
   if (ctx.napCode) body.napCode = String(ctx.napCode);
   if (_isNum(ctx.napPort)) body.napPort = Number(ctx.napPort);
   if (ctx.taskId && String(ctx.taskId).trim()) body.taskId = String(ctx.taskId).trim();
@@ -2578,7 +2627,8 @@ function _recClientLocationHtml(c) {
   if (c.source === 'MANUAL') acc = 'ingresada manualmente';
   else acc = _isNum(c.accuracyMeters) ? `GPS ±${Math.round(Number(c.accuracyMeters))} m` : 'GPS, precisión no informada';
   let reg = '';
-  if (dReg) reg = `a <strong>${escapeHtml(dReg)}</strong> de la ubicación registrada`;
+  const dePrueba = c.registeredLocation && c.registeredLocation.source === 'MOCK' ? ' (de prueba)' : '';
+  if (dReg) reg = `a <strong>${escapeHtml(dReg)}</strong> de la ubicación registrada${dePrueba}`;
   else if (c.registeredLocation === null) reg = 'sin ubicación registrada de la operadora para comparar';
   const distancias = [
     dNap ? `a <strong>${escapeHtml(dNap)}</strong> de la NAP${c.napCode ? ' ' + escapeHtml(c.napCode) : ''}` : '',
@@ -2679,7 +2729,7 @@ function _napMapNaps() {
 //   registered: ubicación registrada de la operadora (del GET client-location;
 //   mientras no llega, la coordenada del domicilio del perfil).
 function _napMapClientPoints() {
-  if (!_napUsesContractedNap()) return { casa: null, registered: null };
+  if (!_napUsesContractedNap()) return { casa: null, registered: null, napFallback: null };
   const st = _napPanelState.clientLoc;
   const valid = (p) => !!p && _isNum(p.latitude) && _isNum(p.longitude);
   let casa = null;
@@ -2687,8 +2737,14 @@ function _napMapClientPoints() {
   else if (valid(st.latest)) casa = { latitude: Number(st.latest.latitude), longitude: Number(st.latest.longitude), unsaved: false };
   let reg = st.registeredLocation;
   if (!reg && (st.loading || st.error)) reg = _napPanelState.homeCoords;
-  const registered = valid(reg) ? { latitude: Number(reg.latitude), longitude: Number(reg.longitude) } : null;
-  return { casa, registered };
+  const registered = valid(reg)
+    ? { latitude: Number(reg.latitude), longitude: Number(reg.longitude), mock: reg.source === 'MOCK' } : null;
+  // Sin NAP de current-nap (error de consulta): la posición de la NAP que
+  // guardó el backend con la última captura (napLocation), si la hay.
+  const nl = st.latest && st.latest.napLocation;
+  const napFallback = !_napHasClientNap() && valid(nl)
+    ? { latitude: Number(nl.latitude), longitude: Number(nl.longitude), simulated: nl.simulated === true } : null;
+  return { casa, registered, napFallback };
 }
 
 const _NAP_MAP_HOME_SVG = '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false">' +
@@ -2728,8 +2784,9 @@ function _napRenderMap(scope) {
   const extra = _napMapClientPoints();
   const home = contratada ? extra.registered : _napPanelState.homeCoords;
   const casa = extra.casa;
+  const napFallback = contratada ? extra.napFallback : null;
   const naps = _napMapNaps();
-  if (!tech && !home && !casa && naps.length === 0) {
+  if (!tech && !home && !casa && !napFallback && naps.length === 0) {
     _napMapDestroy();
     slot.innerHTML = contratada
       ? '<div class="nap-map-empty">Sin coordenadas para el mapa: captura la ubicación de la casa del cliente.</div>'
@@ -2745,7 +2802,8 @@ function _napRenderMap(scope) {
   _napMap.layer.clearLayers();
   _napMap.markers = {};
   if (home) {
-    const homeTxt = contratada ? 'Ubicación registrada del cliente' : 'Domicilio del cliente';
+    const homeTxt = contratada
+      ? `Ubicación registrada del cliente${home.mock ? ' (de prueba)' : ''}` : 'Domicilio del cliente';
     L.marker([home.latitude, home.longitude], {
       icon: L.divIcon({ className: 'nap-map-home', html: _NAP_MAP_HOME_SVG, iconSize: [28, 28], iconAnchor: [14, 14] }),
       title: homeTxt, alt: homeTxt, keyboard: false,
@@ -2757,6 +2815,13 @@ function _napRenderMap(scope) {
       icon: L.divIcon({ className: `nap-map-casa${casa.unsaved ? ' is-unsaved' : ''}`, html: _NAP_MAP_HOME_SVG, iconSize: [30, 30], iconAnchor: [15, 15] }),
       title: casaTxt, alt: casaTxt, keyboard: false, zIndexOffset: 600,
     }).bindTooltip(casaTxt).addTo(_napMap.layer);
+  }
+  if (napFallback) {
+    const nfTxt = `NAP del cliente (según la última captura${napFallback.simulated ? ', simulada' : ''})`;
+    L.marker([napFallback.latitude, napFallback.longitude], {
+      icon: L.divIcon({ className: 'nap-map-pin unknown is-client', html: '<span></span>', iconSize: [28, 28], iconAnchor: [14, 14] }),
+      title: nfTxt, alt: nfTxt, keyboard: false,
+    }).bindTooltip(nfTxt).addTo(_napMap.layer);
   }
   const clienteRef = _napCurrentRef();
   naps.forEach((n) => {

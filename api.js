@@ -604,19 +604,33 @@
     const hit = MOCK_CURRENT_NAPS[cuenta];
     if (!hit) {
       // El backend ahora SIEMPRE devuelve una NAP: si la operadora no la
-      // informa, una simulada marcada simulated:true / source:'SIMULATED'.
-      const sim = Object.assign({}, mockNearbyNaps(center, { meters: 1000 })[1], { source: 'SIMULATED', simulated: true });
+      // informa, una simulada (simulated:true, source:'SIMULATED') con napId
+      // y equipmentId null y código inventado: la app no pide sus puertos.
+      const ref = mockNearbyNaps(center, { meters: 1000 })[1];
       const digits = cuenta.replace(/[^0-9]/g, '');
+      const sim = {
+        napId: null,
+        napCode: 'PL' + (10 + (Number(digits.slice(-2) || 0) % 90)) + 'XR' + (1 + (Number(digits.slice(-1) || 0) % 9)),
+        networkName: 'OLT-GYE-03/1/4',
+        latitude: ref.latitude,
+        longitude: ref.longitude,
+        distanceMeters: ref.distanceMeters,
+        occupiedPorts: ref.occupiedPorts,
+        totalPorts: ref.totalPorts,
+        freePorts: ref.freePorts,
+        source: 'SIMULATED',
+      };
       return Object.assign(base, {
         found: true,
         nap: sim,
         portNumber: (Number(digits.slice(-2) || 0) % sim.totalPorts) + 1,
         equipmentId: null,
-        clientStatus: null,
+        clientStatus: { code: 'A', name: 'ACTIVA', description: 'Activo (simulado)' },
         searchedNaps: 0,
         assignment: 'CONTRACTED',
         simulated: true,
         source: 'SIMULATED',
+        simulationReason: 'NOT_FOUND',
       });
     }
     const nap = mockNearbyNaps(center, { meters: 1000 })[hit.idx];
@@ -647,8 +661,9 @@
   }
   function mockRegisteredLocation(cuenta) {
     const p = mockClientProfile(cuenta);
+    // En demo el backend marca la registrada como MOCK ("de prueba").
     return typeof p.latitude === 'number' && typeof p.longitude === 'number'
-      ? { latitude: p.latitude, longitude: p.longitude, source: 'FSM' } : null;
+      ? { latitude: p.latitude, longitude: p.longitude, source: 'MOCK' } : null;
   }
   function mockClientLocationList(accountNumber) {
     const cuenta = String(accountNumber);
@@ -660,7 +675,13 @@
     const b = body || {};
     const lat = Number(b.latitude);
     const lng = Number(b.longitude);
+    // Mismas reglas que el backend: (0,0) inválido, accuracyMeters número >= 0
+    // opcional (null no), capturedAt no futuro.
+    const acc = b.accuracyMeters;
+    const accBad = acc !== undefined && (typeof acc !== 'number' || !isFinite(acc) || acc < 0);
+    const futuro = b.capturedAt && new Date(b.capturedAt).getTime() > Date.now() + 60000;
     if (!isFinite(lat) || !isFinite(lng) || lat < -90 || lat > 90 || lng < -180 || lng > 180 ||
+        (lat === 0 && lng === 0) || accBad || futuro ||
         b.label !== 'CASA_CLIENTE' || (b.source !== 'GPS' && b.source !== 'MANUAL')) {
       const err = new Error('Datos de ubicación inválidos.');
       err.code = 'VALIDATION_ERROR';
@@ -690,6 +711,8 @@
       registeredLocation: reg,
       distanceToRegisteredMeters: reg ? mockHaversine(pt, reg) : null,
       distanceToNapMeters: nap && typeof nap.latitude === 'number' ? mockHaversine(pt, nap) : null,
+      napLocation: cur && cur.nap && typeof cur.nap.latitude === 'number'
+        ? { latitude: cur.nap.latitude, longitude: cur.nap.longitude, simulated: cur.simulated === true } : null,
     };
     if (b.notes) rec.notes = String(b.notes);
     MOCK_CLIENT_LOCATIONS[cuenta] = [rec].concat(MOCK_CLIENT_LOCATIONS[cuenta] || []);
