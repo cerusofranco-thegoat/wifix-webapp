@@ -1435,8 +1435,55 @@ console.log('\n== Identidad del cliente con FSM sin datos (client-profile) ==');
   ctx.selectModule('instalaciones');
 }
 
+console.log('\n== Speedtest con dispositivo externo (simulado) ==');
+{
+  const html = ctx.externalSpeedtestHtml();
+  check('flujo externo: HTML balanceado', balanced(html) === null, balanced(html));
+  check('flujo externo: badge "Simulado" y botón "Conectar dispositivo de medición"',
+    html.includes('class="sim-badge"') && html.includes('Simulado') && html.includes('Conectar dispositivo de medición'));
+  check('flujo externo: sin selector de servidores ni botón de speedtest nativo',
+    !/servidor/i.test(html) && !html.includes('run-speedtest') && !html.includes('data-tool="speedtest"'));
+  check('flujo externo: progreso accesible y resultados anunciados',
+    html.includes('role="progressbar"') && html.includes('aria-live="polite"'));
+  const item = vm.runInContext('HERRAMIENTAS_ITEMS.find((x) => x.id === "speedtest")', ctx);
+  check('Herramientas: el ítem de velocidad usa el flujo externo y no el guardado genérico',
+    item && item.render === ctx.externalSpeedtestHtml && item.wire === ctx.wireExternalSpeedtest && !item.save);
+
+  const plan = { downMbps: 500, upMbps: 250 };
+  const seq = [0, 0.999];
+  const bajo = ctx._extSpeedSimulatedResult(plan, () => seq[0]);
+  const alto = ctx._extSpeedSimulatedResult(plan, () => seq[1]);
+  check('resultado simulado realista: plan ± variación, LAN de baja latencia, enlace 10 Gb/s',
+    bajo.downloadMbps >= 465 && alto.downloadMbps <= 515 && bajo.uploadMbps >= 230 && alto.uploadMbps <= 255
+    && bajo.latencyMs >= 2.5 && alto.latencyMs <= 8.5 && alto.jitterMs <= 1.8
+    && bajo.packetLossPercent === 0 && bajo.linkSpeedMbps === 10000,
+    JSON.stringify({ bajo, alto }));
+
+  const device = vm.runInContext('EXT_SPEED_SIM_DEVICE', ctx);
+  const payload = ctx.buildExternalSpeedtestPayload(bajo, device, { taskId: 'TASK/123456/2026', simulated: true, planKnown: true });
+  check('payload: marca source external-device, simulated y dispositivo',
+    payload.source === 'external-device' && payload.simulated === true
+    && payload.deviceName === 'Medidor Xtrim 10G' && payload.deviceId === device.deviceId
+    && payload.taskId === 'TASK/123456/2026' && payload.linkSpeedMbps === 10000);
+  check('payload: campos del contrato POST /speedtests y la marca de simulado también en notes',
+    payload.downloadMbps === bajo.downloadMbps && payload.uploadMbps === bajo.uploadMbps
+    && payload.measuredAt === bajo.measuredAt && payload.serverId === device.deviceId
+    && payload.serverName === 'Medidor Xtrim 10G (simulado)'
+    && payload.notes.includes('SIMULADA') && payload.notes.includes('TASK/123456/2026'));
+  const sinTarea = ctx.buildExternalSpeedtestPayload(bajo, device, { taskId: null });
+  check('payload sin tarea: no inventa taskId', !('taskId' in sinTarea) && !sinTarea.notes.includes('tarea'));
+  const guardado = await WifixAPI.createSpeedtest('35070291', payload);
+  check('se guarda con el mecanismo existente (createSpeedtest) conservando la marca',
+    guardado.accountNumber === '35070291' && guardado.simulated === true && guardado.source === 'external-device'
+    && guardado.measuredAt === bajo.measuredAt);
+  const t0 = Date.now();
+  const medido = await vm.runInContext('extSpeedDriver', ctx).measure({ plan, onProgress: () => {} });
+  check('driver simulado: mide y devuelve el contrato del dispositivo',
+    medido.downloadMbps > 0 && medido.uploadMbps > 0 && typeof medido.measuredAt === 'string' && Date.now() - t0 < 10000);
+}
+
 console.log('\n== Prohibiciones del contrato ==');
-const fuentes = ['api.js', 'app.js'].map((f) => readFileSync(new URL('../' + f, import.meta.url), 'utf8'));
+const fuentes =['api.js', 'app.js'].map((f) => readFileSync(new URL('../' + f, import.meta.url), 'utf8'));
 check('la webapp nunca envía withStatus',
   !fuentes.some((s) => /withStatus\s*[=:]/.test(s) || s.includes("'withStatus'") || s.includes('withStatus=1')));
 check('no hay import/export en los archivos planos',

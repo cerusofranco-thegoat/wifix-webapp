@@ -4404,29 +4404,391 @@ function distanceFormHtml() {
     </div>`;
 }
 
-function speedtestFormHtml() {
+// ============================================================================
+// TEST DE VELOCIDAD — DISPOSITIVO EXTERNO (SIMULADO)
+// ----------------------------------------------------------------------------
+// El speedtest ya no lo mide la app: lo mide un dispositivo Android dedicado
+// del técnico (conector de hasta 10 Gb/s) y el resultado se carga aquí. Hasta
+// definir la conexión real, un driver SIMULADO produce valores realistas
+// (plan del cliente ± variación). Todo el flujo lleva el badge "Simulado" y lo
+// guardado va marcado source:'external-device', simulated:true.
+// El motor nativo anterior (NetworkTools / Ookla) quedó desconectado de la UI.
+// ============================================================================
+
+/** Plan por defecto si no hay perfil validado con velocidad contratada. */
+const EXT_SPEED_FALLBACK_PLAN = Object.freeze({ downMbps: 300, upMbps: 150 });
+
+/** Datos del medidor simulado. */
+const EXT_SPEED_SIM_DEVICE = Object.freeze({
+  deviceId: 'XTM10G-SIM-0001',
+  deviceName: 'Medidor Xtrim 10G',
+  deviceModel: 'XT-SPEED-10G',
+  firmware: '1.0.0-sim',
+  portSpeedMbps: 10000,
+  connection: 'Bluetooth (simulado)',
+});
+
+/** Plan contratado del cliente de la cuenta actual, si se conoce. */
+function _extSpeedPlan() {
+  const cuenta = currentAccount();
+  const p = validatedProfile && validatedAccount === cuenta ? validatedProfile : null;
+  const down = p ? Number(p.contractedDownloadMbps) : NaN;
+  const up = p ? Number(p.contractedUploadMbps) : NaN;
+  if (Number.isFinite(down) && down > 0 && Number.isFinite(up) && up > 0) {
+    return { downMbps: down, upMbps: up, known: true };
+  }
+  return { downMbps: EXT_SPEED_FALLBACK_PLAN.downMbps, upMbps: EXT_SPEED_FALLBACK_PLAN.upMbps, known: false };
+}
+
+/** Resultado simulado realista: plan ± variación, latencia/jitter de LAN. */
+function _extSpeedSimulatedResult(plan, rand = Math.random) {
+  const r1 = (x) => Math.round(x * 10) / 10;
+  return {
+    downloadMbps: r1(plan.downMbps * (0.93 + rand() * 0.1)),   // 93 %–103 % del plan
+    uploadMbps: r1(plan.upMbps * (0.92 + rand() * 0.1)),       // 92 %–102 % del plan
+    latencyMs: r1(2.5 + rand() * 6),                          // 2.5–8.5 ms
+    jitterMs: r1(0.2 + rand() * 1.6),                         // 0.2–1.8 ms
+    packetLossPercent: 0,
+    linkSpeedMbps: EXT_SPEED_SIM_DEVICE.portSpeedMbps,
+    measuredAt: new Date().toISOString(),
+  };
+}
+
+// TODO(dispositivo-real): reemplazar este driver por la conexión real con el
+// medidor (Bluetooth LE / USB-OTG / Wi-Fi Direct: a definir). La UI solo usa
+// esta interfaz, así que el cambio queda acotado aquí:
+//   connect({ signal })            → { deviceId, deviceName, deviceModel, firmware, portSpeedMbps, connection }
+//   measure({ plan, onProgress })  → { downloadMbps, uploadMbps, latencyMs, jitterMs,
+//                                      packetLossPercent, linkSpeedMbps, measuredAt }
+//                                    onProgress({ phase: 'latency'|'download'|'upload'|'done', progress 0..1, mbps? })
+//   disconnect()
+// Al conectar el real, `simulated` pasa a false y el badge desaparece solo.
+const extSpeedDriver = {
+  simulated: true,
+  async connect() {
+    await new Promise(r => setTimeout(r, 1400));   // "buscando…"
+    return Object.assign({}, EXT_SPEED_SIM_DEVICE);
+  },
+  async measure({ plan, onProgress }) {
+    const final = _extSpeedSimulatedResult(plan);
+    const report = typeof onProgress === 'function' ? onProgress : () => {};
+    const phases = [
+      { phase: 'latency', ms: 900 },
+      { phase: 'download', ms: 2600, target: final.downloadMbps },
+      { phase: 'upload', ms: 2200, target: final.uploadMbps },
+    ];
+    for (const ph of phases) {
+      const steps = Math.max(1, Math.round(ph.ms / 150));
+      for (let i = 1; i <= steps; i++) {
+        await new Promise(r => setTimeout(r, 150));
+        const progress = i / steps;
+        // Rampa tipo TCP: sube rápido y se estabiliza cerca del valor final.
+        const mbps = ph.target ? Math.round(ph.target * (1 - Math.pow(1 - progress, 3)) * 10) / 10 : undefined;
+        report({ phase: ph.phase, progress, mbps });
+      }
+    }
+    report({ phase: 'done', progress: 1 });
+    return final;
+  },
+  async disconnect() { /* simulado: nada que cerrar */ },
+};
+
+/** Nº de tarea actual en el estado de la app (el del panel NAP), si existe. */
+function _extSpeedCurrentTaskId() {
+  return (_napPanelState && _napPanelState.taskId) || null;
+}
+
+/**
+ * Payload para WifixAPI.createSpeedtest (POST /speedtests). Los campos del
+ * contrato actual (download/upload/latency/jitter/loss/serverId/serverName/
+ * measuredAt/notes) se persisten; los de origen (source, simulated, device*,
+ * linkSpeedMbps, taskId) viajan también, y hasta que el backend los acepte
+ * quedan además resumidos en `notes` para no perder la marca de simulado.
+ */
+function buildExternalSpeedtestPayload(result, device, opts = {}) {
+  const taskId = opts.taskId || null;
+  const simulated = opts.simulated !== false;
+  const linkGbps = (result.linkSpeedMbps || device.portSpeedMbps) / 1000;
+  const notes = [
+    `${simulated ? 'Medición SIMULADA' : 'Medición'} con dispositivo externo ${device.deviceName} (${device.deviceModel}, id ${device.deviceId})`,
+    `enlace ${linkGbps} Gb/s`,
+    taskId ? `tarea ${taskId}` : null,
+    opts.planKnown === false ? 'plan del cliente no disponible: se simuló sobre un plan de referencia' : null,
+  ].filter(Boolean).join(' · ');
+  const payload = {
+    downloadMbps: result.downloadMbps,
+    uploadMbps: result.uploadMbps,
+    latencyMs: result.latencyMs,
+    jitterMs: result.jitterMs,
+    packetLossPercent: result.packetLossPercent,
+    measuredAt: result.measuredAt,
+    serverId: device.deviceId,
+    serverName: simulated ? `${device.deviceName} (simulado)` : device.deviceName,
+    notes,
+    source: 'external-device',
+    simulated,
+    deviceName: device.deviceName,
+    deviceId: device.deviceId,
+    deviceModel: device.deviceModel,
+    linkSpeedMbps: result.linkSpeedMbps || device.portSpeedMbps,
+  };
+  if (taskId) payload.taskId = taskId;
+  return payload;
+}
+
+function _extSimBadge() {
+  return extSpeedDriver.simulated
+    ? '<span class="sim-badge" title="Dispositivo y resultados simulados: la conexión real con el medidor está pendiente">Simulado</span>'
+    : '';
+}
+
+function externalSpeedtestHtml() {
+  const plan = _extSpeedPlan();
   return `
-    <div class="tool-form" data-tool="speedtest">
-      <div class="form-grid-2">
-        <label class="form-row"><span class="form-label">Descarga (Mbps) *</span>
-          <input type="number" step="0.1" min="0" data-field="downloadMbps" placeholder="185.4"></label>
-        <label class="form-row"><span class="form-label">Subida (Mbps) *</span>
-          <input type="number" step="0.1" min="0" data-field="uploadMbps" placeholder="92.1"></label>
+    <div class="tool-form ext-speed" data-tool="external-speedtest" data-state="idle">
+      <div class="ext-speed-head">
+        <span class="ext-speed-title">Medición con dispositivo externo</span>
+        ${_extSimBadge()}
       </div>
-      <div class="form-grid-2">
-        <label class="form-row"><span class="form-label">Latencia (ms)</span>
-          <input type="number" step="0.1" data-field="latencyMs" placeholder="11.3"></label>
-        <label class="form-row"><span class="form-label">Jitter (ms)</span>
-          <input type="number" step="0.1" data-field="jitterMs" placeholder="1.8"></label>
+      <p class="form-hint">
+        La velocidad la mide tu medidor dedicado (puerto de hasta 10 Gb/s) conectado al equipo del cliente;
+        el resultado se carga en Wifix.
+        Plan de referencia: <strong>${escapeHtml(_fmtNum(plan.downMbps, 1))} ↓ / ${escapeHtml(_fmtNum(plan.upMbps, 1))} ↑ Mbps</strong>${plan.known ? '' : ' (sin perfil del cliente: valor de referencia)'}.
+      </p>
+
+      <div class="ext-speed-device" data-slot="device" aria-live="polite">
+        <div class="ext-speed-device-state" data-slot="device-state">
+          <span class="ext-dot is-off" aria-hidden="true"></span>
+          <span>Sin dispositivo conectado</span>
+        </div>
+        <dl class="ext-speed-device-info" data-slot="device-info" hidden></dl>
       </div>
-      <label class="form-row"><span class="form-label">Pérdida de paquetes (%)</span>
-        <input type="number" step="0.1" min="0" max="100" data-field="packetLossPercent" placeholder="0"></label>
-      <label class="form-row"><span class="form-label">Servidor / ISP</span>
-        <input type="text" data-field="serverName" placeholder="Servidor Quito"></label>
-      <label class="form-row"><span class="form-label">Notas</span>
+
+      <div class="ext-speed-actions">
+        <button type="button" class="save-btn" data-action="ext-connect">Conectar dispositivo de medición</button>
+        <button type="button" class="save-btn" data-action="ext-measure" hidden>Medir velocidad</button>
+        <button type="button" class="add-row-btn" data-action="ext-disconnect" hidden>Desconectar</button>
+      </div>
+
+      <div class="ext-speed-progress-wrap" data-slot="progress-wrap" hidden>
+        <div class="ext-speed-progress" role="progressbar" aria-label="Progreso de la medición"
+          aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" data-slot="progress">
+          <div class="ext-speed-progress-bar" data-slot="bar"></div>
+        </div>
+        <div class="ext-speed-phase" data-slot="phase" role="status" aria-live="polite"></div>
+      </div>
+
+      <div class="ext-speed-gauges" data-slot="gauges" hidden>
+        <div class="ext-speed-gauge">
+          <span class="ext-speed-gauge-label">Bajada</span>
+          <span class="ext-speed-gauge-value" data-slot="dl">—</span>
+          <span class="ext-speed-gauge-unit">Mbps</span>
+        </div>
+        <div class="ext-speed-gauge">
+          <span class="ext-speed-gauge-label">Subida</span>
+          <span class="ext-speed-gauge-value" data-slot="ul">—</span>
+          <span class="ext-speed-gauge-unit">Mbps</span>
+        </div>
+      </div>
+
+      <dl class="ext-speed-result" data-slot="result" hidden></dl>
+
+      <label class="form-row" data-slot="notes-row" hidden><span class="form-label">Notas (opcional)</span>
         <textarea data-field="notes" rows="2"></textarea></label>
-      <button class="save-btn" data-action="save">Guardar speedtest</button>
+      <button type="button" class="save-btn" data-action="ext-save" hidden>Guardar resultado</button>
+      <div class="ext-speed-feedback" data-slot="feedback" role="status" aria-live="polite"></div>
     </div>`;
+}
+
+/** Activa el flujo conectar → medir → guardar sobre el HTML de externalSpeedtestHtml. */
+function wireExternalSpeedtest(formEl) {
+  if (!formEl || formEl.dataset.extWired === '1') return;
+  formEl.dataset.extWired = '1';
+  const $ = (slot) => formEl.querySelector(`[data-slot="${slot}"]`);
+  const btn = (action) => formEl.querySelector(`[data-action="${action}"]`);
+  const connectBtn = btn('ext-connect');
+  const measureBtn = btn('ext-measure');
+  const disconnectBtn = btn('ext-disconnect');
+  const saveBtn = btn('ext-save');
+
+  let device = null;
+  let result = null;
+  let plan = null;
+  let busy = false;
+  const PHASE_TEXT = {
+    latency: 'Midiendo latencia y jitter…',
+    download: 'Midiendo bajada…',
+    upload: 'Midiendo subida…',
+    done: 'Medición completa.',
+  };
+  // Tramos de la barra por fase (latencia 0–15, bajada 15–60, subida 60–100).
+  const PHASE_RANGE = { latency: [0, 15], download: [15, 60], upload: [60, 100], done: [100, 100] };
+
+  function setState(state) { formEl.dataset.state = state; }
+  function setDeviceState(text, dotClass) {
+    $('device-state').innerHTML = `<span class="ext-dot ${dotClass}" aria-hidden="true"></span><span>${escapeHtml(text)}</span>`;
+  }
+  function setProgress(pct) {
+    const v = Math.max(0, Math.min(100, Math.round(pct)));
+    $('bar').style.width = `${v}%`;
+    $('progress').setAttribute('aria-valuenow', String(v));
+  }
+  function feedback(text, kind) {
+    const el = $('feedback');
+    el.textContent = text || '';
+    el.className = `ext-speed-feedback${kind ? ' is-' + kind : ''}`;
+  }
+  function resetResult() {
+    result = null;
+    $('result').hidden = true;
+    $('result').innerHTML = '';
+    $('gauges').hidden = true;
+    $('dl').textContent = '—';
+    $('ul').textContent = '—';
+    $('progress-wrap').hidden = true;
+    $('notes-row').hidden = true;
+    saveBtn.hidden = true;
+    saveBtn.disabled = false;
+    saveBtn.textContent = 'Guardar resultado';
+    setProgress(0);
+  }
+
+  connectBtn.addEventListener('click', async () => {
+    if (busy) return;
+    busy = true;
+    connectBtn.disabled = true;
+    feedback('');
+    setState('searching');
+    setDeviceState('Buscando dispositivo de medición…', 'is-searching');
+    try {
+      device = await extSpeedDriver.connect();
+      setState('connected');
+      setDeviceState('Conectado', 'is-on');
+      const info = $('device-info');
+      info.innerHTML = `
+        <div><dt>Dispositivo</dt><dd>${escapeHtml(device.deviceName)}</dd></div>
+        <div><dt>Modelo</dt><dd>${escapeHtml(device.deviceModel)}</dd></div>
+        <div><dt>ID</dt><dd class="mono">${escapeHtml(device.deviceId)}</dd></div>
+        <div><dt>Puerto</dt><dd>${escapeHtml(_fmtNum(device.portSpeedMbps / 1000, 1))} Gb/s</dd></div>
+        <div><dt>Conexión</dt><dd>${escapeHtml(device.connection || '—')}</dd></div>`;
+      info.hidden = false;
+      connectBtn.hidden = true;
+      measureBtn.hidden = false;
+      disconnectBtn.hidden = false;
+      measureBtn.focus();
+    } catch (err) {
+      console.error('[Wifix] medidor externo (conectar):', err);
+      device = null;
+      setState('idle');
+      setDeviceState('No se encontró el dispositivo', 'is-error');
+      feedback((err && err.message) || 'No se pudo conectar con el medidor.', 'error');
+    } finally {
+      connectBtn.disabled = false;
+      busy = false;
+    }
+  });
+
+  disconnectBtn.addEventListener('click', async () => {
+    if (busy) return;
+    try { await extSpeedDriver.disconnect(); } catch (_) { /* nada */ }
+    device = null;
+    resetResult();
+    feedback('');
+    setState('idle');
+    setDeviceState('Sin dispositivo conectado', 'is-off');
+    $('device-info').hidden = true;
+    connectBtn.hidden = false;
+    measureBtn.hidden = true;
+    disconnectBtn.hidden = true;
+    connectBtn.focus();
+  });
+
+  measureBtn.addEventListener('click', async () => {
+    if (busy || !device) return;
+    busy = true;
+    resetResult();
+    feedback('');
+    plan = _extSpeedPlan();
+    setState('measuring');
+    measureBtn.disabled = true;
+    disconnectBtn.disabled = true;
+    measureBtn.textContent = 'Midiendo…';
+    $('progress-wrap').hidden = false;
+    $('gauges').hidden = false;
+    let lastPhase = null;
+    try {
+      result = await extSpeedDriver.measure({
+        plan,
+        onProgress: (p) => {
+          const range = PHASE_RANGE[p.phase] || [0, 100];
+          setProgress(range[0] + (range[1] - range[0]) * (p.progress || 0));
+          // El texto de fase se anuncia solo al cambiar (no en cada tick).
+          if (p.phase !== lastPhase) { $('phase').textContent = PHASE_TEXT[p.phase] || ''; lastPhase = p.phase; }
+          if (p.phase === 'download' && p.mbps !== undefined) $('dl').textContent = _fmtNum(p.mbps, 1);
+          if (p.phase === 'upload' && p.mbps !== undefined) $('ul').textContent = _fmtNum(p.mbps, 1);
+        },
+      });
+      setState('result');
+      $('dl').textContent = _fmtNum(result.downloadMbps, 1);
+      $('ul').textContent = _fmtNum(result.uploadMbps, 1);
+      const pctDown = plan.downMbps ? Math.round((result.downloadMbps / plan.downMbps) * 100) : null;
+      $('result').innerHTML = `
+        <div><dt>Bajada</dt><dd><strong>${escapeHtml(_fmtNum(result.downloadMbps, 1))} Mbps</strong>${pctDown !== null ? ` (${pctDown} % del plan)` : ''}</dd></div>
+        <div><dt>Subida</dt><dd><strong>${escapeHtml(_fmtNum(result.uploadMbps, 1))} Mbps</strong></dd></div>
+        <div><dt>Latencia</dt><dd>${escapeHtml(_fmtNum(result.latencyMs, 1))} ms</dd></div>
+        <div><dt>Jitter</dt><dd>${escapeHtml(_fmtNum(result.jitterMs, 1))} ms</dd></div>
+        <div><dt>Pérdida</dt><dd>${escapeHtml(_fmtNum(result.packetLossPercent, 1))} %</dd></div>
+        <div><dt>Enlace</dt><dd>${escapeHtml(_fmtNum(result.linkSpeedMbps / 1000, 1))} Gb/s (puerto del medidor)</dd></div>
+        <div><dt>Medido</dt><dd>${dateTimeHtml(result.measuredAt, { relative: false })}</dd></div>
+        ${_extSpeedCurrentTaskId() ? `<div><dt>Tarea</dt><dd>${escapeHtml(_extSpeedCurrentTaskId())}</dd></div>` : ''}`;
+      $('result').hidden = false;
+      $('notes-row').hidden = false;
+      saveBtn.hidden = false;
+      saveBtn.focus();
+    } catch (err) {
+      console.error('[Wifix] medidor externo (medir):', err);
+      setState('connected');
+      $('phase').textContent = '';
+      feedback((err && err.message) || 'La medición falló. Vuelve a intentarlo.', 'error');
+    } finally {
+      measureBtn.disabled = false;
+      disconnectBtn.disabled = false;
+      measureBtn.textContent = result ? 'Medir de nuevo' : 'Medir velocidad';
+      busy = false;
+    }
+  });
+
+  saveBtn.addEventListener('click', async () => {
+    if (busy || !result || !device) return;
+    const cuenta = currentAccount();
+    if (!cuenta) {
+      feedback('Falta el número de cuenta: confírmala antes de guardar.', 'error');
+      return;
+    }
+    busy = true;
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Guardando…';
+    const payload = buildExternalSpeedtestPayload(result, device, {
+      taskId: _extSpeedCurrentTaskId(),
+      simulated: extSpeedDriver.simulated,
+      planKnown: plan ? plan.known : undefined,
+    });
+    const notas = nonEmpty(formEl.querySelector('[data-field="notes"]').value);
+    if (notas) payload.notes = `${payload.notes} · ${notas}`;
+    try {
+      await WifixAPI.createSpeedtest(cuenta, payload);
+      setState('saved');
+      saveBtn.textContent = 'Guardado';
+      feedback(`Resultado guardado en la cuenta ${cuenta}${extSpeedDriver.simulated ? ' (marcado como simulado)' : ''}.`, 'ok');
+    } catch (err) {
+      console.error('[Wifix] medidor externo (guardar):', err);
+      saveBtn.disabled = false;
+      saveBtn.textContent = 'Reintentar guardado';
+      feedback(`No se pudo guardar: ${(err && err.message) || 'error desconocido'}.`, 'error');
+    } finally {
+      busy = false;
+    }
+  });
 }
 
 function heatmapFormHtml() {
@@ -4557,16 +4919,6 @@ function collectDistance(formEl) {
   if (nonEmpty(f.notes)) payload.notes = nonEmpty(f.notes);
   return payload;
 }
-function collectSpeedtest(formEl) {
-  const f = collectFields(formEl);
-  const payload = { downloadMbps: num(f.downloadMbps), uploadMbps: num(f.uploadMbps) };
-  ['latencyMs', 'jitterMs', 'packetLossPercent'].forEach(k => {
-    if (num(f[k]) !== undefined) payload[k] = num(f[k]);
-  });
-  if (nonEmpty(f.serverName)) payload.serverName = nonEmpty(f.serverName);
-  if (nonEmpty(f.notes)) payload.notes = nonEmpty(f.notes);
-  return payload;
-}
 function collectHeatmap(formEl) {
   const f = collectFields(formEl);
   const roomsEl = formEl.querySelector('[data-slot="rooms"]');
@@ -4586,9 +4938,10 @@ function collectHeatmap(formEl) {
 }
 
 const HERRAMIENTAS_ITEMS = [
-  { id: 'speedtest', title: 'Test de Velocidad', icon: TOOL_ICONS.speed,
-    render: speedtestFormHtml, collect: collectSpeedtest,
-    save: (acct, payload) => WifixAPI.createSpeedtest(acct, payload) },
+  // Lo mide un dispositivo externo (hoy simulado); guarda con su propio flujo
+  // (wireExternalSpeedtest → WifixAPI.createSpeedtest), no con el botón genérico.
+  { id: 'speedtest', title: 'Test de Velocidad (dispositivo externo)', icon: TOOL_ICONS.speed,
+    render: externalSpeedtestHtml, wire: wireExternalSpeedtest },
   { id: 'heatmap', title: 'Medición de Señal WiFi', icon: TOOL_ICONS.heatmap,
     render: heatmapFormHtml, collect: collectHeatmap,
     save: (acct, payload) => WifixAPI.createWifiHeatmap(acct, payload) },
@@ -4639,6 +4992,10 @@ function openHerramientas() {
 function wireToolForm(bodyEl, item) {
   const formEl = bodyEl.querySelector('.tool-form');
   if (!formEl) return;
+  if (typeof item.wire === 'function') {
+    item.wire(formEl);
+    return;
+  }
 
   const roomsSlot = formEl.querySelector('[data-slot="rooms"]');
   if (roomsSlot) {

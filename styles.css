@@ -310,272 +310,125 @@ body {
   color: var(--text-secondary);
 }
 
-/* === Panel del speedtest (Cloudflare) ===================================== */
-.speedtest-panel {
-  border: 1px solid var(--border-lavender);
-  border-radius: var(--radius-card);
-  padding: 14px 16px 12px;
-  margin-bottom: 14px;
-  background: linear-gradient(135deg,
-    var(--surface-app) 0%,
-    var(--surface-card) 100%);
+/* === Test de velocidad con dispositivo externo (hoy simulado) ============= */
+.ext-speed [hidden] { display: none !important; }
+.ext-speed-head {
   display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-.speedtest-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  gap: 8px;
-}
-.speedtest-label {
-  font-family: var(--font-sans);
-  font-size: 10.5px;
-  letter-spacing: 2.2px;
-  text-transform: uppercase;
-  color: var(--brand-primary);
-}
-.speedtest-server {
-  font-size: 10.5px;
-  color: var(--text-secondary);
-  text-align: right;
-}
-.speedtest-gauges {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 10px;
-}
-.speedtest-gauge {
-  display: flex;
-  flex-direction: column;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 2px;
-  padding: 8px 6px;
-  border-radius: var(--radius-btn);
-  background: var(--gray-50);
-}
-.speedtest-gauge-icon {
-  font-size: 16px;
-  color: var(--brand-primary);
-}
-.speedtest-gauge-value {
-  font-family: var(--font-sans);
-  font-size: 28px;
-  font-weight: 700;
-  color: var(--text-primary);
-  letter-spacing: 1px;
-  line-height: 1;
-}
-.speedtest-gauge-unit {
-  font-size: 10px;
-  letter-spacing: 0.8px;
-  color: var(--text-secondary);
-  text-transform: uppercase;
-}
-.speedtest-extras {
-  display: flex;
   justify-content: space-between;
-  font-size: 11px;
-  color: var(--text-secondary);
+  gap: 6px 10px;
 }
-.speedtest-progress {
-  height: 4px;
+.ext-speed-title { font-size: 14px; font-weight: 700; color: var(--text-primary); }
+/* Badge "Simulado": visible en todo el flujo; texto oscuro sobre amarillo. */
+.sim-badge {
+  display: inline-flex;
+  align-items: center;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  padding: 3px 9px;
+  border-radius: var(--radius-pill);
+  background: var(--brand-accent);
+  color: var(--brand-ink);
+  border: 1px solid var(--warn-text-strong);
+  white-space: nowrap;
+}
+.ext-speed-device {
+  padding: 10px 12px;
+  border-radius: var(--radius-btn);
+  background: var(--surface-app);
+  border: 1px solid var(--border-lavender);
+}
+.ext-speed-device-state {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.ext-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--gray-400);
+}
+.ext-dot.is-on { background: var(--success-fill); box-shadow: 0 0 0 3px var(--success-bg); }
+.ext-dot.is-error { background: var(--error-fill); }
+.ext-dot.is-searching { background: var(--brand-primary); animation: ext-pulse 1s ease-in-out infinite; }
+@keyframes ext-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+@media (prefers-reduced-motion: reduce) { .ext-dot.is-searching { animation: none; } }
+.ext-speed-device-info,
+.ext-speed-result {
+  margin: 8px 0 0;
+  display: grid;
+  gap: 4px;
+}
+.ext-speed-device-info > div,
+.ext-speed-result > div {
+  display: grid;
+  grid-template-columns: 96px 1fr;
+  gap: 8px;
+  font-size: 12.5px;
+}
+.ext-speed-device-info dt,
+.ext-speed-result dt { color: var(--text-secondary); }
+.ext-speed-device-info dd,
+.ext-speed-result dd { margin: 0; color: var(--text-primary); overflow-wrap: anywhere; }
+.ext-speed-device-info .mono { font-family: ui-monospace, 'Roboto Mono', monospace; }
+.ext-speed-result {
+  padding: 10px 12px;
+  border-radius: var(--radius-btn);
+  background: var(--surface-card);
+  border: 1px solid var(--border-lavender);
+}
+.ext-speed-actions { display: flex; flex-direction: column; gap: 8px; }
+.ext-speed-actions .add-row-btn { min-height: 44px; }
+.ext-speed-progress {
+  height: 8px;
   border-radius: var(--radius-pill);
   background: var(--surface-tint);
   overflow: hidden;
 }
-.speedtest-progress-bar {
+.ext-speed-progress-bar {
   height: 100%;
   width: 0%;
   background: var(--brand-primary);
-  transition: width 0.25s ease, background 0.3s ease;
+  transition: width 0.15s linear;
 }
-.speedtest-run { margin: 0; background: var(--brand-accent); color: var(--brand-ink); }
-.speedtest-status {
-  font-size: 11px;
-  text-align: center;
-  min-height: 14px;
-  color: var(--text-secondary);
-}
-
-/* === Speedtest — descubrimiento de servidores (estilo Ookla) ============== */
-.speedtest-elapsed {
-  font-family: var(--font-sans);
-  font-size: 11px;
-  letter-spacing: 1px;
-  color: var(--text-secondary);
-  margin-left: auto;
-}
-
-.speedtest-server-card {
-  border: 1px solid var(--border-lavender);
-  border-radius: var(--radius-btn);
-  padding: 10px 12px;
-  background: var(--gray-50);
-  margin-bottom: 4px;
-}
-.speedtest-server-row {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  margin-bottom: 8px;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-.speedtest-server-label {
-  font-size: 10.5px;
-  letter-spacing: 1.5px;
-  text-transform: uppercase;
-  color: var(--text-secondary);
-}
-.speedtest-server-name {
-  font-family: var(--font-sans);
-  font-size: 12.5px;
-  font-weight: 700;
-  color: var(--brand-primary);
-  text-align: right;
-}
-.speedtest-server-toggle {
-  width: 100%;
-  background: transparent;
-  border: 0;
-  padding: 4px 0;
-  color: var(--text-secondary);
-  font: inherit;
-  font-size: 11px;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-.speedtest-server-toggle:hover { color: var(--brand-primary); }
-
-/* Estado de descubrimiento (buscando / error) */
-.speedtest-server-status {
-  font-size: 11px;
-  color: var(--text-secondary);
-  margin-top: 6px;
-}
-.speedtest-server-status.is-error { color: var(--error-text); }
-
-/* Botón de reintento de búsqueda */
-.speedtest-server-refresh {
-  margin-top: 6px;
-  background: transparent;
-  border: 1px solid var(--border-lavender);
-  border-radius: var(--radius-btn);
-  color: var(--brand-primary);
-  font: inherit;
-  font-size: 11px;
-  padding: 5px 10px;
-  cursor: pointer;
-}
-.speedtest-server-refresh:hover { background: var(--surface-tint); }
-.speedtest-server-refresh:focus-visible {
-  outline: 2px solid var(--brand-primary);
-  outline-offset: 2px;
-}
-
-.speedtest-server-list {
+.ext-speed-phase { margin-top: 6px; font-size: 12px; color: var(--text-secondary); min-height: 16px; }
+.ext-speed-gauges { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.ext-speed-gauge {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  margin-top: 6px;
-}
-.speedtest-server-empty {
-  font-size: 11px;
-  color: var(--text-secondary);
-  padding: 6px 8px;
-}
-.speedtest-server-item {
-  display: flex;
-  justify-content: space-between;
   align-items: center;
-  padding: 6px 8px;
-  border-radius: var(--radius-btn);
-  background: var(--gray-50);
-  border: 1px solid transparent;
-  font-size: 11.5px;
-  gap: 8px;
-  cursor: pointer;
-  transition: background 0.12s ease, border-color 0.12s ease;
-}
-.speedtest-server-item:hover {
-  background: var(--surface-tint);
-  border-color: var(--border-lavender);
-}
-.speedtest-server-item:focus-visible {
-  outline: 2px solid var(--brand-primary);
-  outline-offset: 2px;
-}
-.speedtest-server-item.selected {
-  background: var(--surface-tint);
-  border-color: var(--border-lavender);
-}
-/* Punto tipo radio a la izquierda del nombre */
-.speedtest-server-item .speedtest-server-info { position: relative; padding-left: 20px; }
-.speedtest-server-item .speedtest-server-info::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 2px;
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  border: 2px solid var(--gray-400);
-  box-sizing: border-box;
-}
-.speedtest-server-item.selected .speedtest-server-info::before {
-  border-color: var(--brand-primary);
-  background:
-    radial-gradient(circle, var(--brand-primary) 0 3px, transparent 4px);
-}
-/* Servidores sin conexión: atenuados pero aún seleccionables */
-.speedtest-server-item.is-offline { opacity: 0.65; }
-.speedtest-server-sub {
-  font-size: 10px;
-  color: var(--text-secondary);
-}
-.speedtest-server-info {
-  display: flex;
-  flex-direction: column;
   gap: 2px;
-  min-width: 0;
+  padding: 10px 6px;
+  border-radius: var(--radius-btn);
+  background: var(--gray-50);
+  border: 1px solid var(--gray-200);
 }
-.speedtest-server-info strong { color: var(--text-primary); font-size: 12px; }
-.speedtest-server-badge {
-  font-size: 9px;
-  line-height: 1.35;
-  letter-spacing: 0.3px;
-  text-transform: uppercase;
-  color: var(--brand-primary);
-  background: var(--surface-tint);
-  border: 1px solid var(--border-lavender);
-  padding: 1px 5px;
-  border-radius: var(--radius-pill);
-  margin-top: 2px;
-  /* Antes width:max-content forzaba el ancho del texto y el badge se salía de
-     la fila en pantallas de 360px: ahora se limita al ancho disponible y
-     envuelve a una segunda línea si hace falta. */
-  display: inline-block;
-  align-self: flex-start;
-  max-width: 100%;
-  white-space: normal;
-  overflow-wrap: anywhere;
-}
-.speedtest-server-ping {
-  font-family: monospace;
-  color: var(--text-primary);
+.ext-speed-gauge-label {
+  font-size: 10px;
   font-weight: 700;
-  font-size: 12px;
-  flex: 0 0 auto;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  color: var(--text-secondary);
 }
-.speedtest-server-ping.offline {
-  color: var(--error-text);
-  font-weight: 500;
-  font-style: italic;
+.ext-speed-gauge-value {
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 1.1;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
 }
+.ext-speed-gauge-unit { font-size: 11px; color: var(--text-secondary); }
+.ext-speed-feedback { font-size: 12px; min-height: 16px; }
+.ext-speed-feedback.is-ok { color: var(--success-text); }
+.ext-speed-feedback.is-error { color: var(--error-text); }
 
 /* === Mapa de Calor WiFi (medidor + odómetro por habitación) =============== */
 .heatmap-router-card,

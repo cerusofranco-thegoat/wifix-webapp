@@ -7,6 +7,11 @@
  * Cubre la orquestación JS, NO la medición en sí: los Mbps los calcula
  * NetworkToolsPlugin.java y eso sólo se verifica en un APK real.
  *
+ * OJO: desde que la velocidad la mide un dispositivo externo, este motor
+ * (WifixNative.speedtest / speedtestServers) quedó DESCONECTADO de la UI.
+ * El test se conserva mientras el puente siga en native.js; si se borra el
+ * motor, borrar también este script y `npm run smoke:speedtest`.
+ *
  *   node scripts/smoke-speedtest.mjs
  */
 import { readFileSync } from 'node:fs';
