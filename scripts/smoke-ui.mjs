@@ -393,10 +393,27 @@ check('pide coordenada antes de consultar', napPanel.includes('Captura tu ubicac
 
 check('ofrece elegir el radio de búsqueda', napPanel.includes('data-action="nap-meters"'));
 check('el radio no se consulta solo: hay botón explícito', napPanel.includes('data-action="nap-search"'));
+check('solo dos radios: 280 m (instalación, default) y 500 m (extendido)',
+  (napPanel.match(/data-action="nap-meters"/g) || []).length === 2
+  && napPanel.includes('data-meters="280"') && napPanel.includes('data-meters="500"')
+  && !napPanel.includes('data-meters="100"') && !napPanel.includes('data-meters="250"')
+  && vm.runInContext('_napPanelState.meters', ctx) === 280
+  && /data-meters="280"\s+aria-label="[^"]*"\s+aria-pressed="true"/.test(napPanel));
+check('500 m rotulado como rango extendido / fuera del radio de instalación',
+  napPanel.includes('rango extendido, fuera del radio de instalación'));
+check('NAP a 300 m se marca fuera de radio; a 200 m no',
+  ctx._napOutOfRadiusBadgeHtml({ distanceMeters: 300 }).includes('Fuera de radio de instalación')
+  && ctx._napOutOfRadiusBadgeHtml({ distanceMeters: 200 }) === '');
+check('mock: 280 m no trae NAPs fuera de radio; 500 m sí', await (async () => {
+  const c = { latitude: -2.1685, longitude: -79.9189 };
+  const a = await WifixAPI.getNearbyNaps(c, { meters: 280, maxRows: 20 });
+  const b = await WifixAPI.getNearbyNaps(c, { meters: 500, maxRows: 20 });
+  return a.naps.every((n) => n.distanceMeters <= 280) && b.naps.some((n) => n.distanceMeters > 280);
+})());
 
 // getNearbyNaps devuelve { naps, degraded }: el aviso de degradación viaja en
 // el header X-Wifix-Degraded porque la respuesta del backend es un array.
-const nearby = await WifixAPI.getNearbyNaps({ latitude: -2.1685, longitude: -79.9189 }, { meters: 100, maxRows: 5 });
+const nearby = await WifixAPI.getNearbyNaps({ latitude: -2.1685, longitude: -79.9189 }, { meters: 280, maxRows: 5 });
 check('getNearbyNaps devuelve { naps, degraded }',
   Array.isArray(nearby.naps) && 'degraded' in nearby);
 check('mock de NAPs trae lat/lng y puertos libres',
@@ -694,7 +711,7 @@ console.log('\n== NAP del cliente (visita técnica) y mapa ==');
     querySelector: (sel) => slots[sel] || null,
     querySelectorAll: () => [],
   };
-  vm.runInContext('_napPanelState.coords = { latitude: -2.247946, longitude: -79.904161, accuracy: 5 }; _napPanelState.meters = 100; _napPanelState.maxRows = 5;', ctx);
+  vm.runInContext('_napPanelState.coords = { latitude: -2.247946, longitude: -79.904161, accuracy: 5 }; _napPanelState.meters = 280; _napPanelState.maxRows = 5;', ctx);
   await ctx._napFetchAndRender(instScope);
   const listaHtml = slots['[data-slot="nap-cards"]'].innerHTML;
   const nLista = (listaHtml.match(/class="nap-card /g) || []).length;

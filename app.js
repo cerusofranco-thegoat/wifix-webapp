@@ -1050,6 +1050,23 @@ function renderStatusFromContract(contract, account) {
 // ---------------------------------------------------------------------------
 // El taskId se genera una vez por apertura del panel y se mantiene estable
 // mientras el panel esté abierto. Se resetea en null al cerrar.
+// Radios de búsqueda de NAPs (decisión de Franco): SOLO dos.
+//   280 m → radio establecido para poder hacer la instalación (default).
+//   500 m → rango extendido, para cuando todas las cercanas están ocupadas.
+//           Las NAP entre 280 y 500 m se marcan "Fuera de radio de instalación".
+const NAP_INSTALL_RADIUS_M = 280;
+const NAP_EXTENDED_RADIUS_M = 500;
+const NAP_RADIUS_OPTIONS = Object.freeze([
+  Object.freeze({ meters: NAP_INSTALL_RADIUS_M, tag: 'Instalación',
+    help: 'Radio de instalación (280 m): NAPs a las que se puede conectar al cliente.' }),
+  Object.freeze({ meters: NAP_EXTENDED_RADIUS_M, tag: 'Extendido',
+    help: 'Rango extendido (500 m): incluye NAPs fuera del radio de instalación. Úsalo cuando todas las cercanas están ocupadas.' }),
+]);
+
+function _napRadiusOption(meters) {
+  return NAP_RADIUS_OPTIONS.find(o => o.meters === meters) || NAP_RADIUS_OPTIONS[0];
+}
+
 let _napPanelState = {
   taskId: null,
   openedAt: null,
@@ -1057,7 +1074,7 @@ let _napPanelState = {
   selectedNap: null, // napRef seleccionado para GPON (napId o napCode)
   selectedPort: null, // puerto elegido dentro de la NAP GPON (libre o cancelado)
   naps: [],          // array de NAPs cargadas (se guarda al cargar el panel)
-  meters: 100,       // radio de búsqueda (100 / 250 / 500)
+  meters: NAP_INSTALL_RADIUS_M, // radio: 280 (instalación) / 500 (extendido)
   maxRows: 5,        // cuántas NAPs mostrar (5 / 10 / 20)
   degraded: null,    // aviso de degradación de la última consulta
   homeCoords: null,  // coordenada del domicilio que trae la orden (si existe)
@@ -1142,6 +1159,22 @@ function _napDistanceToNap(nap) {
   const c = _napPanelState.coords;
   if (!c || !nap || !isFinite(nap.latitude) || !isFinite(nap.longitude)) return null;
   return _napHaversineMeters(c.latitude, c.longitude, nap.latitude, nap.longitude);
+}
+
+// ¿La NAP está más allá del radio de instalación (280 m)? Solo aparece con
+// el rango extendido. Sin distancia conocida no se afirma nada (false).
+function _napIsOutOfInstallRadius(nap) {
+  const d = _napDistanceToNap(nap);
+  return d !== null && d > NAP_INSTALL_RADIUS_M;
+}
+
+// Badge "Fuera de radio de instalación" (ícono + texto, no solo color). No
+// toca el color binario verde/rojo de la NAP: es una marca aparte.
+function _napOutOfRadiusBadgeHtml(nap) {
+  if (!_napIsOutOfInstallRadius(nap)) return '';
+  return `<span class="nap-out-radius-badge" title="A más de ${NAP_INSTALL_RADIUS_M} m: fuera del radio establecido para la instalación">` +
+    '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M10.3 3.7L2 18a2 2 0 0 0 1.7 3h16.6A2 2 0 0 0 22 18L13.7 3.7a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg>' +
+    'Fuera de radio de instalación</span>';
 }
 
 // Texto de distancia para mostrar en la tarjeta.
@@ -1283,13 +1316,15 @@ function _renderNapCards(naps, scope) {
       ? `<span class="nap-network-name"><span class="nap-network-key">Red de acceso</span>${escapeHtml(n.networkName)}</span>`
       : '';
     const esDelCliente = !!ref && ref === _napCurrentRef();
+    const fueraRadio = _napIsOutOfInstallRadius(n);
     return `
-      <div class="nap-card nap-state-${color}${isSelected ? ' nap-selected' : ''}" data-nap="${escapeHtml(ref)}">
+      <div class="nap-card nap-state-${color}${isSelected ? ' nap-selected' : ''}${fueraRadio ? ' nap-out-of-radius' : ''}" data-nap="${escapeHtml(ref)}">
         <div class="nap-head">
           ${_napNameHtml(n, ref)}
           <span class="nap-badges">
             <span class="nap-state-badge ${color}">${escapeHtml(_napColorLabel(n))}</span>
             ${esDelCliente ? '<span class="nap-client-badge">NAP del cliente</span>' : ''}
+            ${_napOutOfRadiusBadgeHtml(n)}
             ${isSelected ? '<span class="nap-selected-badge">GPON seleccionada</span>' : ''}
           </span>
         </div>
@@ -1511,7 +1546,7 @@ async function _napFetchAndRender(scope) {
     _napRenderDegradedNote(scope, _napPanelState.degraded);
 
     if (_napPanelState.naps.length === 0) {
-      slot.innerHTML = `<div class="detail-empty">No hay NAPs registradas a ${_napPanelState.meters} m de esta coordenada. Prueba con un radio mayor.</div>`;
+      slot.innerHTML = `<div class="detail-empty">${escapeHtml(_napEmptyText())}</div>`;
       _napRenderMap(scope);
       return;
     }
@@ -1523,6 +1558,7 @@ async function _napFetchAndRender(scope) {
       await _renderGponSummary(scope);
     }
     _renderNapCards(_napPanelState.naps, scope);
+    _napRenderAllFullHint(scope);
     _wireNapCardButtons(scope, _napPanelState.naps);
     _napRenderMap(scope);
   } catch (err) {
@@ -1531,6 +1567,26 @@ async function _napFetchAndRender(scope) {
     _napPanelState.naps = [];
     _napRenderMap(scope);
   }
+}
+
+// Lista vacía según el radio elegido.
+function _napEmptyText() {
+  if (_napPanelState.meters >= NAP_EXTENDED_RADIUS_M) {
+    return `No hay NAPs registradas a ${NAP_EXTENDED_RADIUS_M} m (rango extendido) de esta coordenada.`;
+  }
+  return `No hay NAPs a ${NAP_INSTALL_RADIUS_M} m (radio de instalación). Prueba el rango extendido de ${NAP_EXTENDED_RADIUS_M} m.`;
+}
+
+// Con el radio de instalación, si TODAS las NAPs encontradas están llenas se
+// sugiere el rango extendido. Se antepone a las tarjetas (no las oculta).
+function _napRenderAllFullHint(scope) {
+  const slot = scope.querySelector('[data-slot="nap-cards"]');
+  if (!slot || _napPanelState.meters >= NAP_EXTENDED_RADIUS_M) return;
+  const naps = _napPanelState.naps || [];
+  if (!naps.length || !naps.every(n => _napColorClass(n) === 'full')) return;
+  slot.insertAdjacentHTML('afterbegin',
+    `<div class="nap-radius-hint" role="status">Todas las NAPs del radio de instalación (${NAP_INSTALL_RADIUS_M} m) están llenas. ` +
+    `Prueba el rango extendido de ${NAP_EXTENDED_RADIUS_M} m.</div>`);
 }
 
 // Aviso discreto de resultado degradado (fuente alternativa, lista recortada…).
@@ -1628,6 +1684,11 @@ function _wireNapPanel(scope) {
         b.classList.toggle('is-active', on);
         b.setAttribute('aria-pressed', on ? 'true' : 'false');
       });
+      const help = scope.querySelector('[data-slot="nap-radius-help"]');
+      if (help) {
+        help.textContent = _napRadiusOption(meters).help;
+        help.classList.toggle('is-extended', meters >= NAP_EXTENDED_RADIUS_M);
+      }
       adoptInputCoords();
       _napFetchAndRender(scope);
     });
@@ -1921,6 +1982,7 @@ function _napMapPopupHtml(n) {
     <div class="nap-map-popup">
       <strong class="nap-map-popup-code">${escapeHtml(n.napCode || '—')}</strong>
       ${esCliente ? '<span class="nap-client-badge">NAP del cliente</span>' : ''}
+      ${_napOutOfRadiusBadgeHtml(n)}
       <span class="nap-map-popup-occ">${escapeHtml(_napOccupancyText(n))}</span>
       ${_napDirectionsBtnHtml(n)}
     </div>`;
@@ -2219,12 +2281,20 @@ function renderNapPanel() {
       <div class="nap-nearby" id="napNearbySection" data-slot="nap-nearby"${visita && !_napPanelState.showNearby ? ' hidden' : ''}>
       <!-- 4) Radio de búsqueda y cantidad de resultados -->
       <div class="nap-radius-control">
-        <div class="nap-radius-group" role="group" aria-label="Radio de búsqueda">
+        <div class="nap-radius-group" role="group" aria-label="Radio de búsqueda" aria-describedby="napRadiusHelp">
           <span class="nap-radius-label">Radio</span>
-          ${[100, 250, 500].map((m) => `
-            <button type="button" class="nap-radius-btn${_napPanelState.meters === m ? ' is-active' : ''}"
-              data-action="nap-meters" data-meters="${m}"
-              aria-pressed="${_napPanelState.meters === m ? 'true' : 'false'}">${m} m</button>`).join('')}
+          ${NAP_RADIUS_OPTIONS.map((o) => {
+            const ext = o.meters >= NAP_EXTENDED_RADIUS_M;
+            const on = _napPanelState.meters === o.meters;
+            return `
+            <button type="button" class="nap-radius-btn${ext ? ' is-extended' : ''}${on ? ' is-active' : ''}"
+              data-action="nap-meters" data-meters="${o.meters}"
+              aria-label="${o.meters} metros, ${ext ? 'rango extendido, fuera del radio de instalación' : 'radio de instalación'}"
+              aria-pressed="${on ? 'true' : 'false'}">
+              <span class="nap-radius-m">${o.meters} m</span>
+              <span class="nap-radius-tag">${o.tag}</span>
+            </button>`;
+          }).join('')}
         </div>
         <div class="nap-radius-group">
           <label class="nap-rows-label" for="napMaxRows">Mostrar</label>
@@ -2234,6 +2304,8 @@ function renderNapPanel() {
           </select>
           <button type="button" class="add-row-btn nap-search-btn" data-action="nap-search">Buscar NAPs</button>
         </div>
+        <p class="nap-radius-help${_napPanelState.meters >= NAP_EXTENDED_RADIUS_M ? ' is-extended' : ''}" id="napRadiusHelp"
+          data-slot="nap-radius-help" aria-live="polite">${escapeHtml(_napRadiusOption(_napPanelState.meters).help)}</p>
       </div>
 
       <!-- 5) Mapa + tarjetas de NAPs -->

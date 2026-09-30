@@ -4227,3 +4227,60 @@ body.console-fullscreen-open { overflow: hidden; }
 /* Puerto del cliente en la grilla: marco morado, conserva su color de estado. */
 .port-cell.client-port { outline: 3px solid var(--brand-primary); outline-offset: 1px; }
 .port-legend .dot.client { background: transparent; border: 2px solid var(--brand-primary); }
+
+/* ---- Radios de NAP: 280 m instalación / 500 m extendido -----------------*/
+.nap-radius-btn {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  line-height: 1.15;
+}
+.nap-radius-m { font-size: 12px; }
+.nap-radius-tag {
+  font-size: 9px;
+  font-weight: 500;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+}
+.nap-radius-btn.is-extended { border-style: dashed; }
+.nap-radius-btn.is-extended.is-active {
+  background: var(--warn-bg);
+  border-color: var(--warn-text-strong);
+  color: var(--warn-text);
+}
+.nap-radius-help {
+  flex-basis: 100%;
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--text-secondary);
+}
+.nap-radius-help.is-extended { color: var(--warn-text); font-weight: 500; }
+.nap-radius-hint {
+  margin-bottom: 8px;
+  padding: 8px 10px;
+  border-radius: var(--radius-btn);
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-border);
+  color: var(--warn-text);
+  font-size: 12px;
+}
+/* NAP entre 280 y 500 m: marca aparte del color binario verde/rojo. */
+.nap-card.nap-out-of-radius { border-top-style: dashed; border-right-style: dashed; border-bottom-style: dashed; }
+.nap-out-radius-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  background: var(--warn-bg);
+  color: var(--warn-text);
+  border: 1px solid var(--warn-text-strong);
+  border-radius: var(--radius-pill);
+  padding: 2px 8px;
+  white-space: nowrap;
+}

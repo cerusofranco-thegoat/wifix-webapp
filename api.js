@@ -459,7 +459,8 @@
   }
   // Ocupación de las NAPs mock (índice = napId - MOCK_NAP_BASE_ID). Se comparte
   // entre el listado y el detalle de puertos para que los conteos cuadren.
-  // Casos de prueba dentro del radio por defecto (100 m):
+  // Casos de prueba dentro del radio de instalación (280 m, default); con el
+  // rango extendido (500 m) aparecen además 289/344/412 m (fuera de radio):
   //   [0] 8/8  → llena (roja), con clientes T (cancelado) al consultar estados
   //   [2] 7/8  → un puerto libre (verde)
   //   [3] 0/16 → vacía
@@ -472,7 +473,7 @@
     const lat = coords && isFinite(coords.latitude) ? coords.latitude : -0.1800;
     const lng = coords && isFinite(coords.longitude) ? coords.longitude : -78.4680;
     const o = opts || {};
-    const meters = isFinite(o.meters) ? Number(o.meters) : 100;
+    const meters = isFinite(o.meters) ? Number(o.meters) : 280;
     const maxRows = isFinite(o.maxRows) ? Number(o.maxRows) : 5;
     const offsets = [
       [20, 0.6], [47, 2.1], [61, 3.4], [73, 4.8], [92, 1.2], [113, 5.6],
