@@ -2111,6 +2111,259 @@ console.log('\n== Speedtest con dispositivo externo (simulado) ==');
     medido.downloadMbps > 0 && medido.uploadMbps > 0 && typeof medido.measuredAt === 'string' && Date.now() - t0 < 10000);
 }
 
+console.log('\n== Red Interna: módulos medidos (mock de navegador) ==');
+{
+  // Contexto propio con native.js (modo navegador → wrappers con datos
+  // simulados), además de api.js y app.js.
+  const rc = {
+    console: { log() {}, info() {}, warn() {}, error() {} },
+    setTimeout, clearTimeout,
+    fetch: async () => { throw new Error('sin red en el smoke test'); },
+    CSS: { escape: (s) => String(s) }, URL, navigator: { userAgent: 'node' }, alert() {},
+    btoa: (s) => Buffer.from(s, 'binary').toString('base64'),
+    MutationObserver: class { observe() {} disconnect() {} },
+    localStorage: windowStub.localStorage,
+    document: Object.assign({}, documentStub, { readyState: 'complete', body: fakeEl() }),
+    addEventListener() {}, dispatchEvent() {}, location: windowStub.location,
+  };
+  rc.window = rc; rc.globalThis = rc; rc.self = rc;
+  vm.createContext(rc);
+  for (const file of ['api.js', 'native.js', 'app.js']) {
+    vm.runInContext(readFileSync(base + file, 'utf8'), rc, { filename: file });
+  }
+  rc.WifixAPI.useRealApi = false;
+
+  // --- Lógica pura portada (datos de demo.js de Wifix Remote) ---------------
+  check('bandas y canales 2.4/5 GHz como el origen',
+    rc.bandFromFrequency(2437) === '2.4GHz' && rc.channelFromFrequency(2437) === 6 && rc.channelFromFrequency(2484) === 14
+    && rc.bandFromFrequency(5180) === '5GHz' && rc.channelFromFrequency(5180) === 36 && rc.channelFromFrequency(5885) === 177);
+  check('6 GHz soportado (corrección consciente del origen)',
+    rc.bandFromFrequency(6115) === '6GHz' && rc.channelFromFrequency(6115) === 33 && rc.channelFromFrequency(5935) === 2);
+  const crowded = rc.computeChannelSaturation({ frequencyMhz: 2437, bssid: 'own', channelWidthMhz: 20 },
+    [2437, 2437, 2442, 2412, 2462, 2432, 5180].map((f, i) => ({ frequencyMhz: f, bssid: 'b' + i, channelWidthMhz: 20 })));
+  check('saturación: mismo canal ×2 + solapadas, otras bandas fuera, sugeridos sin el propio',
+    crowded.sameChannelCount === 2 && crowded.overlappingCount === 4 && crowded.levelClass === 'bad'
+    && crowded.levelLabel === 'Alta' && JSON.stringify(crowded.suggested) === '[1,11]' && crowded.perChannel[6] === 2,
+    JSON.stringify(crowded));
+  check('saturación sin frecuencia propia → error del origen',
+    rc.computeChannelSaturation({}, []).error === 'No se pudo determinar la frecuencia de su red.');
+  const norm = rc.normalizeWifis([
+    { ssid: 'Casa', bssid: 'a', signalDbm: -70, frequencyMhz: 5180 },
+    { ssid: 'Casa', bssid: 'b', signalDbm: -50, frequencyMhz: 5180, isConnected: false },
+    { ssid: 'Casa', bssid: 'c', signalDbm: -60, frequencyMhz: 2412, isConnected: true },
+    { ssid: '', bssid: 'd', signalDbm: -40, frequencyMhz: 2412 },
+    { ssid: '\\x00', bssid: 'e', signalDbm: -40, frequencyMhz: 2412 },
+  ]);
+  check('normalizeWifis: SSID|banda, mayor señal, ocultos fuera, orden por señal',
+    norm.length === 2 && norm[0].bssid === 'b' && norm[0].bssidCount === 2 && norm[1].band === '2.4GHz' && norm[1].anyConnected === true);
+  check('seguridad desde capabilities (WPA3/WPA2/WPA/WEP/Abierta + WPS)',
+    ['[RSN-SAE-CCMP][ESS]', '[WPA2-PSK-CCMP][ESS][WPS]', '[WPA-PSK-TKIP]', '[WEP]', '[ESS]']
+      .map((x) => rc.wifiSecurity(x).label).join() === 'WPA3,WPA2,WPA,WEP,Abierta' && rc.wifiSecurity('[WPS]').wps === true);
+  const st = rc.statsFromRtts([10, 12, 14], 5);
+  check('statsFromRtts: forma stat del origen (pérdida, jitter poblacional, redondeo 0.1)',
+    st.avg === 12 && st.time === 12 && st.min === 10 && st.max === 14 && st.packetLoss === 40 && st.stddev === 1.6
+    && st.sent === 5 && st.received === 3 && st.samples.length === 3);
+  check('latencia: umbrales 30/80 ms',
+    rc.latencyLevel(30).cls === 'good' && rc.latencyLevel(80).cls === 'warn' && rc.latencyLevel(80.1).cls === 'bad'
+    && rc.latencyLevel(null).cls === 'bad');
+  check('tipos: nombre, puertos, banner y fabricante (literal del origen)',
+    rc.guessDeviceType('B866V2M-XTRIM') === 'Router' && rc.typeFromName('65" QLED') === 'AndroidTV'
+    && rc.guessTypeByPorts([9100, 445]) === 'Impresora' && rc.guessTypeByBanner({ server: 'GoAhead-Webs' }) === 'Router'
+    && rc.nameFromBanner({ title: '401 Unauthorized' }) === null && rc.typeFromVendor('Hikvision') === 'Cámara');
+  check('fabricante solo con MAC real y sin bit local (MAC aleatoria → null)',
+    rc.vendorFromMac('00:1b:21:aa:bb:cc') === 'Intel Corporate' && rc.vendorFromMac('02:00:00:00:00:00') === null
+    && rc.vendorFromMac('da:a1:19:00:00:01') === null);
+  const merged = rc.mergeDiscovery([{ ip: '192.168.1.5', name: null, deviceType: 'PC' }],
+    { '192.168.1.5': { name: 'Sala TV', type: 'AndroidTV' }, '192.168.1.9': { name: 'localhost', type: null }, '10.0.0.2': { name: 'X' } },
+    '192.168.1.20');
+  check('mergeDiscovery: nombre si falta, tipo de discover pisa, solo-discover de la /24, nombres basura fuera',
+    merged.length === 2 && merged[0].name === 'Sala TV' && merged[0].deviceType === 'AndroidTV' && merged[1].ip === '192.168.1.9'
+    && merged[1].name === null);
+
+  // --- UI: cuerpo de acordeón con slots persistentes ------------------------
+  function riBody() {
+    const slots = {};
+    const btn = fakeEl();
+    let onClick = null;
+    btn.addEventListener = (ev, fn) => { if (ev === 'click') onClick = fn; };
+    btn.disabled = false;
+    return {
+      slots, btn, click: () => onClick && onClick(),
+      querySelector(sel) {
+        if (sel === '[data-action="ri-run"]') return btn;
+        const m = /data-slot="([^"]+)"/.exec(sel);
+        if (m) { slots[m[1]] = slots[m[1]] || fakeEl(); return slots[m[1]]; }
+        return fakeEl();
+      },
+    };
+  }
+  vm.runInContext("accountInput.value = '35070291'", rc);
+  rc.openRedInterna();
+  const redHtml = vm.runInContext('redList.innerHTML', rc);
+  const posMed = redHtml.indexOf('Saturación de canal');
+  const posMock = redHtml.indexOf('mock-notice');
+  check('Red Interna: 4 módulos medidos arriba, en orden, y el aviso simulado debajo de ellos',
+    posMed > -1 && posMed < redHtml.indexOf('Dispositivos conectados') && redHtml.indexOf('Dispositivos conectados') < redHtml.indexOf('Redes cercanas')
+    && redHtml.indexOf('Redes cercanas') < redHtml.indexOf('>Latencia<') && redHtml.indexOf('>Latencia<') < posMock
+    && posMock < redHtml.indexOf('Cambiar SSID y contraseña'));
+  check('Red Interna: el ítem simulado "Equipos en la red local (DHCP)" ya no está; los demás siguen',
+    !redHtml.includes('Equipos en la red local') && redHtml.includes('Dispositivos WiFi por banda') && redHtml.includes('aria-expanded="false"'));
+  check('Red Interna: HTML balanceado', balanced(redHtml) === null, balanced(redHtml));
+
+  const satBody = riBody();
+  const sh = rc.riShellHtml('sat');
+  check('shell del módulo: progreso accesible (aria-live + progressbar) y botón con texto',
+    sh.includes('aria-live="polite"') && sh.includes('role="progressbar"') && sh.includes('Escanear canales') && balanced(sh) === null);
+  let scans = 0;
+  const realScan = rc.WifixNative.scanNetworks;
+  rc.WifixNative.scanNetworks = async () => { scans++; return realScan(); };
+  await rc.riMount('sat', satBody);
+  const satHtml = satBody.slots.result.innerHTML;
+  check('Saturación (mock): nivel, canal, KPIs, barras SVG con canal propio y sugeridos',
+    satHtml.includes('Saturación media') && satHtml.includes('status-tile warn') && satHtml.includes('ri-bar own')
+    && satHtml.includes('ri-chip') && satHtml.includes('role="img"') && satHtml.includes('mock-notice') && balanced(satHtml) === null,
+    balanced(satHtml));
+
+  const nearBody = riBody();
+  await rc.riMount('nearby', nearBody);
+  const nearHtml = nearBody.slots.result.innerHTML;
+  check('Saturación y Redes cercanas comparten UN solo escaneo', scans === 1, `escaneos: ${scans}`);
+  check('Redes cercanas (mock): agrupadas por banda, RSSI clasificado, seguridad, conectado, toggle accesible',
+    nearHtml.includes('2.4 GHz') && nearHtml.includes('6 GHz') && nearHtml.includes('ap-rssi rssi-') && nearHtml.includes('WPA3')
+    && nearHtml.includes('Conectado') && nearHtml.includes('aria-pressed="true"') && !nearHtml.includes('(red oculta)')
+    && balanced(nearHtml) === null, balanced(nearHtml));
+  vm.runInContext("_riState.nearbyMode = 'all'", rc);
+  vm.runInContext("riRender('nearby')", rc);
+  check('Redes cercanas: "Ver todos los BSSID" muestra cada BSSID (incluye la oculta)',
+    nearBody.slots.result.innerHTML.includes('(red oculta)') && nearBody.slots.result.innerHTML.includes('12</strong> BSSID'));
+  vm.runInContext("_riState.nearbyMode = 'grouped'", rc);
+
+  // fromCache y escaneo vacío → avisos.
+  rc.WifixNative.scanNetworks = async () => ({ simulated: true, fromCache: true, accessPoints: [] });
+  satBody.click();
+  await vm.runInContext('_riState.running.sat', rc);
+  const satCache = satBody.slots.result.innerHTML;
+  check('aviso de caché (4 escaneos / 2 min) y de ubicación apagada con scan vacío',
+    satCache.includes('4 escaneos cada 2 minutos') && satCache.includes('ubicación del sistema está apagada'));
+  check('re-escaneo de Saturación actualiza Redes cercanas con el mismo scan',
+    nearBody.slots.result.innerHTML.includes('ubicación del sistema está apagada'));
+  rc.WifixNative.scanNetworks = realScan;
+
+  const devBody = riBody();
+  const progresos = [];
+  const realSweep = rc.WifixNative.sweepSubnet;
+  rc.WifixNative.sweepSubnet = (o, cb) => realSweep(o, (p) => { progresos.push(p); cb(p); });
+  await rc.riMount('devices', devBody);
+  rc.WifixNative.sweepSubnet = realSweep;
+  const devHtml = devBody.slots.result.innerHTML;
+  check('Dispositivos: progreso del barrido (lanProgress) llega a la UI',
+    progresos.length > 3 && progresos[progresos.length - 1].done === 254);
+  check('Dispositivos (mock): Router primero, iconos por tipo, IP mono, fabricante/MAC, pastilla RTT, aviso de MAC',
+    devHtml.indexOf('B866V2M-XTRIM') < devHtml.indexOf('DESKTOP-DEMO') && devHtml.includes('ri-dev-icon')
+    && devHtml.includes('ri-ip') && devHtml.includes('Intel Corporate') && devHtml.includes('MAC 00:1B:21')
+    && devHtml.includes('ri-pill ri-good') && devHtml.includes('Android 10') && devHtml.includes('Chromecast Sala')
+    && !devHtml.includes('otra subred') && devHtml.includes('Este teléfono') && balanced(devHtml) === null, balanced(devHtml));
+
+  const latBody = riBody();
+  await rc.riMount('latency', latBody);
+  const latHtml = latBody.slots.result.innerHTML;
+  check('Latencia (mock): tiles Router/Google/ISP + Internet, min/máx/jitter/pérdida y gráfico de muestras',
+    latHtml.includes('>Router<') && latHtml.includes('>Google<') && latHtml.includes('>ISP<') && latHtml.includes('Internet (HTTP)')
+    && latHtml.includes('jitter') && latHtml.includes('pérdida') && latHtml.includes('chart-svg') && balanced(latHtml) === null,
+    balanced(latHtml));
+  check('Latencia simulada: no ofrece guardar en la visita', !latHtml.includes('ri-save-latency') && latHtml.includes('no se guardan'));
+
+  // Fallback ICMP → TCP cuando el ICMP pierde el 100 %.
+  const realIcmp = rc.WifixNative.icmpPing;
+  rc.WifixNative.icmpPing = async (host, o) => ({ transmitted: o.count, received: 0, samples: [] });
+  const fb = await rc.measureLatencyTarget('192.168.1.1', { icmpCount: 5, tcpPorts: [80, 443, 8080, 53, 22], tcpCount: 5, tcpTimeoutMs: 1500 });
+  rc.WifixNative.icmpPing = realIcmp;
+  check('ICMP sin respuesta → TCP-ping con el puerto que respondió', fb.method === 'TCP' && fb.port === 80 && fb.stat.avg > 0);
+
+  const res = await rc.runLatencyTest(() => {});
+  const pls = rc.buildLatencyPingPayloads(res);
+  check('payload de latencia = PingTestInput (un registro por destino, sin nulls)',
+    pls.length === 3 && pls.every((p) => p.target && p.packetsSent >= p.packetsReceived && p.notes.startsWith('Red Interna')
+      && Object.values(p).every((v) => v !== null && v !== undefined)));
+  const guardado = await rc.WifixAPI.createPingTest('35070291', pls[0]);
+  check('se guarda con el mecanismo existente (createPingTest)', guardado.accountNumber === '35070291' && guardado.target === pls[0].target);
+
+  // Reabrir Red Interna con la misma cuenta reutiliza el resultado reciente.
+  let barridos = 0;
+  rc.WifixNative.sweepSubnet = async () => { barridos++; return { alive: [] }; };
+  const devBody2 = riBody();
+  await rc.riMount('devices', devBody2);
+  check('reabrir: reutiliza el resultado reciente sin volver a barrer la red',
+    barridos === 0 && devBody2.slots.result.innerHTML.includes('B866V2M-XTRIM'));
+  rc.WifixNative.sweepSubnet = realSweep;
+
+  // Error de red (sin WiFi) → estado de error, no excepción.
+  const realNet = rc.WifixNative.getNetConfig;
+  rc.WifixNative.getNetConfig = async () => { throw new Error('No hay conexión WiFi activa: conéctese a la red del cliente y reintente.'); };
+  devBody2.click();
+  await vm.runInContext('_riState.running.devices', rc);
+  rc.WifixNative.getNetConfig = realNet;
+  check('sin WiFi: estado de error con el mensaje del plugin',
+    devBody2.slots.result.innerHTML.includes('detail-error') && devBody2.slots.result.innerHTML.includes('No hay conexión WiFi activa'));
+}
+
+console.log('\n== Red Interna: wrappers nativos (plugin NetworkTools falso) ==');
+{
+  const llamadas = [];
+  const listeners = {};
+  const removidos = [];
+  const plugin = {
+    async getNetConfig() { llamadas.push(['getNetConfig']); return { deviceIp: '10.1.1.5', gatewayIp: '10.1.1.1', prefixLength: 24, netmask: '255.255.255.0', dns: [], interfaceName: 'wlan0', source: 'LinkProperties' }; },
+    async tcpPing(o) { llamadas.push(['tcpPing', o]); return { avg: 4, min: 3, max: 5, time: 4, packetLoss: 0, stddev: 0.5, sent: 5, received: 5, samples: [3, 4, 5, 4, 4], stat: { avg: 4 }, respondsTcp: true, openPort: 443, openPorts: [443], host: o.host }; },
+    async sweepSubnet(o) {
+      llamadas.push(['sweepSubnet', o]);
+      (listeners.lanProgress || []).forEach((fn) => fn({ phase: 'sweep', done: 128, total: 254 }));
+      return { alive: [{ ip: '10.1.1.1', rttMs: 1.2, openPorts: [80], respondsTcp: true }], subnet: '10.1.1.0/24', durationMs: 9000 };
+    },
+    async probeHosts(o) {
+      llamadas.push(['probeHosts', o]);
+      (listeners.lanProgress || []).forEach((fn) => fn({ phase: 'probe', done: 1, total: 1 }));
+      return { results: [{ ip: '10.1.1.1', openPorts: [80], respondsTcp: true, stat: { avg: 1.5 }, mdnsName: null, netbiosName: null, netbiosMac: null, ptrName: null, banner: null }] };
+    },
+    async discoverNetwork(o) { llamadas.push(['discoverNetwork', o]); return { '10.1.1.7': { name: 'Sala', type: 'Chromecast', source: 'mdns', manufacturer: null, model: null } }; },
+    async addListener(ev, fn) { (listeners[ev] = listeners[ev] || []).push(fn); return { remove: async () => { removidos.push(ev); } }; },
+  };
+  const c = {
+    console: { log() {}, info() {}, warn() {}, error() {} },
+    setTimeout: () => 0, clearTimeout() {}, setInterval: () => 0, clearInterval() {},
+    navigator: { userAgent: 'node' },
+    document: { readyState: 'complete', body: { querySelectorAll: () => [] }, addEventListener() {}, createElement: () => fakeEl() },
+    MutationObserver: class { observe() {} disconnect() {} },
+    addEventListener() {},
+    Capacitor: { isNativePlatform: () => true, Plugins: { NetworkTools: plugin } },
+  };
+  c.window = c; c.globalThis = c;
+  vm.createContext(c);
+  vm.runInContext(readFileSync(base + 'native.js', 'utf8'), c, { filename: 'native.js' });
+  const N = c.WifixNative;
+  check('APK: netSimulated() es false con el plugin presente', N.netSimulated() === false);
+  const nc = await N.getNetConfig();
+  check('APK: getNetConfig va al plugin (sin marca simulated)', nc.gatewayIp === '10.1.1.1' && !nc.simulated);
+  const progreso = [];
+  const sw = await N.sweepSubnet({}, (p) => progreso.push(p));
+  const swArgs = llamadas.find((l) => l[0] === 'sweepSubnet')[1];
+  check('APK: sweepSubnet con los defaults del contrato y lanProgress reenviado; listener retirado',
+    sw.alive.length === 1 && swArgs.timeoutMs === 600 && swArgs.batchSize === 32 && swArgs.ports.includes(62078)
+    && progreso.length === 1 && progreso[0].done === 128 && removidos.includes('lanProgress'));
+  const pr = await N.probeHosts(['10.1.1.1'], '10.1.1.1', () => {});
+  check('APK: probeHosts desenvuelve {results:[...]} y manda gatewayIp',
+    Array.isArray(pr) && pr.length === 1 && llamadas.find((l) => l[0] === 'probeHosts')[1].gatewayIp === '10.1.1.1');
+  const tp = await N.tcpPing('8.8.8.8', { ports: [443], count: 6, timeoutMs: 2000 });
+  check('APK: tcpPing pasa {host, ports, count, timeoutMs} y conserva stat + openPort',
+    tp.avg === 4 && tp.openPort === 443 && JSON.stringify(llamadas.find((l) => l[0] === 'tcpPing')[1]) === JSON.stringify({ host: '8.8.8.8', ports: [443], count: 6, timeoutMs: 2000 }));
+  const disc = await N.discoverNetwork();
+  check('APK: discoverNetwork con mdnsMs/ssdpMs 6000 y mapa por IP',
+    disc['10.1.1.7'].type === 'Chromecast' && llamadas.find((l) => l[0] === 'discoverNetwork')[1].mdnsMs === 6000);
+  let msg = '';
+  try { await N.scanNetworks(); } catch (e) { msg = e.message; }
+  check('APK anterior al contrato: método ausente → mensaje para actualizar la app', /no incluye "scanAccessPoints"/.test(msg), msg);
+}
+
 console.log('\n== Prohibiciones del contrato ==');
 const fuentes =['api.js', 'app.js'].map((f) => readFileSync(new URL('../' + f, import.meta.url), 'utf8'));
 check('la webapp nunca envía withStatus',

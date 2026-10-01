@@ -140,6 +140,137 @@
       return plugin.scanAccessPoints();
     },
 
+    // ------------------------------------------------------------------------
+    // Red Interna (módulos portados de Wifix Remote). Contrato del plugin
+    // NetworkTools: scanAccessPoints ampliado, getNetConfig, tcpPing,
+    // sweepSubnet (+ evento 'lanProgress'), probeHosts y discoverNetwork.
+    //
+    // A diferencia de los wrappers de arriba, estos NO fallan en el navegador:
+    // devuelven datos simulados marcados con `simulated: true` para que la UI
+    // muestre el aviso de datos simulados (mockNotice). En el APK siempre van
+    // al plugin; si el APK es anterior al contrato, fallan con un mensaje claro.
+    // ------------------------------------------------------------------------
+
+    /** true si la Red Interna corre con datos simulados (fuera del APK). */
+    netSimulated() {
+      return !nativePlugin();
+    },
+
+    /** Escaneo de redes cercanas (scanAccessPoints) o mock en el navegador. */
+    async scanNetworks() {
+      const plugin = nativePlugin();
+      if (!plugin) return netMock.scan();
+      return callPlugin(plugin, 'scanAccessPoints', undefined);
+    },
+
+    /** Datos del enlace WiFi conectado (getWifiInfo) o mock en el navegador. */
+    async wifiLink() {
+      const plugin = nativePlugin();
+      if (!plugin) return netMock.wifiInfo();
+      return callPlugin(plugin, 'getWifiInfo', undefined);
+    },
+
+    /** { deviceIp, gatewayIp, prefixLength, netmask, dns[] } */
+    async getNetConfig() {
+      const plugin = nativePlugin();
+      if (!plugin) return netMock.netConfig();
+      return callPlugin(plugin, 'getNetConfig', undefined);
+    },
+
+    /** Ping ICMP (plugin.ping) o mock. Mismo shape que ping(). */
+    async icmpPing(host, opts) {
+      const plugin = nativePlugin();
+      const { count = 4, timeoutSec = 5 } = opts || {};
+      if (!plugin) return netMock.icmp(host, count);
+      return callPlugin(plugin, 'ping', { host, count, timeoutSec });
+    },
+
+    /**
+     * TCP-ping: { host, ports[], count, timeoutMs } → stat
+     * { avg, min, max, time, packetLoss, stddev, sent, received, samples[] }.
+     * Se tolera que el plugin devuelva el stat en la raíz o bajo `stat`.
+     */
+    async tcpPing(host, opts) {
+      const plugin = nativePlugin();
+      const { ports = [80, 443], count = 4, timeoutMs = 1500 } = opts || {};
+      if (!plugin) return netMock.tcp(host, ports, count);
+      const r = await callPlugin(plugin, 'tcpPing', { host, ports, count, timeoutMs });
+      return (r && r.stat && typeof r.stat === 'object') ? Object.assign({}, r, r.stat) : r;
+    },
+
+    /**
+     * Barrido TCP del /24 local. onProgress recibe {phase, done, total} del
+     * evento nativo 'lanProgress'. Devuelve { alive: [{ip, rttMs, openPorts, respondsTcp}] }.
+     */
+    async sweepSubnet(opts, onProgress) {
+      const plugin = nativePlugin();
+      const o = Object.assign({
+        ports: [80, 443, 22, 445, 139, 53, 8080, 7, 9100, 62078],
+        timeoutMs: 600,
+        batchSize: 32,
+      }, opts || {});
+      if (!plugin) return netMock.sweep(onProgress);
+      return withLanProgress(plugin, onProgress, () => callPlugin(plugin, 'sweepSubnet', o));
+    },
+
+    /**
+     * Identificación por IP (TCP-ping, mDNS, NetBIOS, PTR, banner HTTP).
+     * Devuelve SIEMPRE un array (Capacitor no resuelve arrays desnudos: se
+     * acepta {hosts|results|devices|items:[...]}).
+     */
+    async probeHosts(hosts, gatewayIp, onProgress) {
+      const plugin = nativePlugin();
+      const list = Array.isArray(hosts) ? hosts : [];
+      if (!plugin) return netMock.probe(list, gatewayIp);
+      const r = await withLanProgress(plugin, onProgress,
+        () => callPlugin(plugin, 'probeHosts', { hosts: list, gatewayIp: gatewayIp || null }));
+      return unwrapArray(r);
+    },
+
+    /**
+     * Descubrimiento mDNS + SSDP. Devuelve { [ip]: {name, type, source,
+     * manufacturer, model} } (se acepta también envuelto en {devices:{…}}).
+     */
+    async discoverNetwork(opts) {
+      const plugin = nativePlugin();
+      const { mdnsMs = 6000, ssdpMs = 6000 } = opts || {};
+      if (!plugin) return netMock.discover();
+      const r = await callPlugin(plugin, 'discoverNetwork', { mdnsMs, ssdpMs });
+      return unwrapIpMap(r);
+    },
+
+    /** Latencia HTTP (plugin.httpPing) o mock: {ok, avgMs, minMs, jitterMs, packetLossPercent}. */
+    async httpLatency(url, samples) {
+      const plugin = nativePlugin();
+      if (!plugin) return netMock.http();
+      return callPlugin(plugin, 'httpPing', { url, samples: samples || 5 });
+    },
+
+    /**
+     * IP pública (la del ISP) como en el origen: GET http://ip-api.com/json →
+     * `query`. En el APK va por CapacitorHttp (sin CORS); respaldo HTTPS en
+     * ipify si ip-api no responde. Devuelve { ip, isp } o lanza.
+     */
+    async getPublicIp() {
+      if (!nativePlugin()) return netMock.publicIp();
+      const Http = global.Capacitor && global.Capacitor.Plugins && global.Capacitor.Plugins.CapacitorHttp;
+      const get = async (url) => {
+        if (Http) {
+          const res = await Http.request({ url, method: 'GET', connectTimeout: 6000, readTimeout: 6000 });
+          return typeof res.data === 'string' ? JSON.parse(res.data) : res.data;
+        }
+        const res = await global.fetch(url);
+        return res.json();
+      };
+      try {
+        const d = await get('http://ip-api.com/json?fields=status,query,isp');
+        if (d && d.query) return { ip: d.query, isp: d.isp || null };
+      } catch (_) { /* respaldo */ }
+      const d2 = await get('https://api.ipify.org?format=json');
+      if (d2 && d2.ip) return { ip: d2.ip, isp: null };
+      throw new Error('No se pudo obtener la IP pública.');
+    },
+
     // Obtiene la posición GPS actual.
     // opts: { timeoutMs } — timeout en milisegundos (por defecto 10000).
     // Devuelve: { latitude, longitude, accuracy }
@@ -647,6 +778,211 @@
   }
 
   // --------------------------------------------------------------------------
+  // Red Interna: utilidades de los wrappers del plugin
+  // --------------------------------------------------------------------------
+  // Llama a un método del plugin; si el APK instalado es anterior al contrato
+  // (método ausente / UNIMPLEMENTED) falla con un mensaje accionable.
+  async function callPlugin(plugin, method, args) {
+    if (typeof plugin[method] !== 'function') {
+      throw new Error(`Esta versión del APK no incluye "${method}". Instala la versión más reciente de la app.`);
+    }
+    try {
+      return await (args === undefined ? plugin[method]() : plugin[method](args));
+    } catch (err) {
+      if (err && (err.code === 'UNIMPLEMENTED' || /not implemented/i.test(err.message || ''))) {
+        throw new Error(`Esta versión del APK no incluye "${method}". Instala la versión más reciente de la app.`);
+      }
+      throw err;
+    }
+  }
+
+  // Suscribe onProgress al evento nativo 'lanProgress' mientras dura `run`.
+  async function withLanProgress(plugin, onProgress, run) {
+    let sub = null;
+    if (typeof onProgress === 'function' && typeof plugin.addListener === 'function') {
+      try {
+        sub = await plugin.addListener('lanProgress', (p) => {
+          if (p && typeof p === 'object') onProgress(p);
+        });
+      } catch (_) { sub = null; }
+    }
+    try {
+      return await run();
+    } finally {
+      if (sub && typeof sub.remove === 'function') { try { await sub.remove(); } catch (_) {} }
+    }
+  }
+
+  function unwrapArray(r) {
+    if (Array.isArray(r)) return r;
+    if (!r || typeof r !== 'object') return [];
+    for (const k of ['hosts', 'results', 'devices', 'items']) {
+      if (Array.isArray(r[k])) return r[k];
+    }
+    return [];
+  }
+
+  const IPV4_RE = /^\d{1,3}(\.\d{1,3}){3}$/;
+  function unwrapIpMap(r) {
+    if (!r || typeof r !== 'object') return {};
+    const src = (r.devices && typeof r.devices === 'object' && !Array.isArray(r.devices)) ? r.devices : r;
+    const out = {};
+    Object.keys(src).forEach((k) => {
+      if (IPV4_RE.test(k) && src[k] && typeof src[k] === 'object') out[k] = src[k];
+    });
+    return out;
+  }
+
+  // --------------------------------------------------------------------------
+  // Red Interna: datos simulados para el navegador (fuera del APK).
+  // Inspirados en los demos de Wifix Remote (src/js/demo.js). Todo resultado
+  // lleva `simulated: true`. Van ANTES del return del modo navegador para que
+  // las constantes existan también en ese modo.
+  // --------------------------------------------------------------------------
+  const netMock = (function () {
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    // Pseudo-aleatorio determinista: resultados estables entre corridas.
+    let seed = 7;
+    const rnd = () => { seed = (seed * 9301 + 49297) % 233280; return seed / 233280; };
+    const r1 = (n) => Math.round(n * 10) / 10;
+
+    function samplesAround(base, count) {
+      const out = [];
+      for (let i = 0; i < count; i++) out.push(r1(base * (0.7 + rnd() * 0.6)));
+      return out;
+    }
+    function mockStat(samples, sent) {
+      const n = samples.length;
+      const stat = { avg: null, min: null, max: null, time: null, packetLoss: 100, stddev: null,
+        sent, received: n, samples: samples.slice() };
+      if (sent > 0) stat.packetLoss = r1((Math.max(0, sent - n) / sent) * 100);
+      if (n) {
+        const avg = samples.reduce((a, b) => a + b, 0) / n;
+        const varz = samples.reduce((a, b) => a + Math.pow(b - avg, 2), 0) / n;
+        Object.assign(stat, { avg: r1(avg), time: r1(avg), min: r1(Math.min.apply(null, samples)),
+          max: r1(Math.max.apply(null, samples)), stddev: r1(Math.sqrt(varz)) });
+      }
+      return stat;
+    }
+    const GW = '192.168.1.1';
+    const SELF = '192.168.1.20';
+    const BASE_RTT = { [GW]: 3, '8.8.8.8': 18, '203.0.113.45': 9 };
+
+    const AP = (ssid, bssid, signalDbm, frequencyMhz, channel, channelWidthMhz, capabilities, isConnected) => ({
+      ssid, bssid, signalDbm, frequencyMhz, channel, channelWidthMhz, capabilities,
+      isConnected: !!isConnected,
+      band: frequencyMhz >= 5925 ? '6GHz' : frequencyMhz >= 4900 ? '5GHz' : '2.4GHz',
+      centerFreq0: null, centerFreq1: null, timestampMs: Date.now(),
+    });
+
+    const HOSTS = {
+      '192.168.1.1':  { openPorts: [80, 443, 53], rtt: 3, ptrName: 'B866V2M-XTRIM',
+        banner: { server: 'Boa/0.94.14rc21', realm: null, title: 'B866V2M' } },
+      '192.168.1.12': { openPorts: [], rtt: 9 },
+      '192.168.1.20': { openPorts: [], rtt: 1 },
+      '192.168.1.21': { openPorts: [], rtt: 12, ptrName: 'Galaxy-S21' },
+      '192.168.1.30': { openPorts: [445, 139], rtt: 6, netbiosName: 'DESKTOP-DEMO', netbiosMac: '00:1B:21:3A:4F:05' },
+      '192.168.1.35': { openPorts: [62078], rtt: 11, mdnsName: 'iPhone-de-Ana.local' },
+      '192.168.1.40': { openPorts: [80, 9100], rtt: 15,
+        banner: { server: 'EPSON_Linux UPnP/1.0', realm: null, title: 'EPSON L3250 Series' } },
+    };
+
+    return {
+      async scan() {
+        await wait(500);
+        return {
+          simulated: true,
+          fromCache: false,
+          connectedBssid: 'a4:2b:b0:11:22:01',
+          connectedSsid: 'Xtrim_Cliente',
+          scannedAt: Date.now(),
+          accessPoints: [
+            AP('Xtrim_Cliente', 'a4:2b:b0:11:22:01', -52, 5180, 36, 80, '[WPA2-PSK-CCMP][RSN-PSK-CCMP][ESS][WPS]', true),
+            AP('Xtrim_Cliente', 'a4:2b:b0:11:22:00', -48, 2437, 6, 20, '[WPA2-PSK-CCMP][RSN-PSK-CCMP][ESS][WPS]'),
+            AP('Xtrim_Cliente', 'a4:2b:b0:11:22:09', -71, 5180, 36, 80, '[WPA2-PSK-CCMP][RSN-PSK-CCMP][ESS]'),
+            AP('Vecino-5G', 'ec:08:6b:aa:bb:01', -68, 5200, 40, 80, '[RSN-SAE-CCMP][ESS]'),
+            AP('Familia_Mora', '50:c7:bf:12:34:56', -74, 5180, 36, 40, '[WPA2-PSK-CCMP][ESS]'),
+            AP('NETLIFE-Torres', '48:46:fb:00:11:22', -80, 5745, 149, 80, '[WPA2-PSK-CCMP][ESS]'),
+            AP('Vecino-2.4G', 'ec:08:6b:aa:bb:cc', -71, 2437, 6, 20, '[WPA2-PSK-CCMP][ESS]'),
+            AP('XTRIM_Publico', '10:da:43:11:22:33', -63, 2412, 1, 20, '[ESS]'),
+            AP('CNT_Gonzalez', '00:19:c6:77:88:99', -77, 2462, 11, 40, '[WPA-PSK-TKIP][ESS]'),
+            AP('DIRECT-4F-HP LaserJet', '3c:d9:2b:01:02:03', -82, 2437, 6, 20, '[WPA2-PSK-CCMP][ESS][WPS]'),
+            AP('', 'f4:f2:6d:00:00:01', -70, 2412, 1, 20, '[WPA2-PSK-CCMP][ESS]'),
+            AP('Oficina6E', '24:a4:3c:6e:6e:01', -79, 6115, 33, 160, '[RSN-SAE-CCMP][ESS]'),
+          ],
+        };
+      },
+      async wifiInfo() {
+        await wait(80);
+        return { simulated: true, ssid: 'Xtrim_Cliente', bssid: 'a4:2b:b0:11:22:01', frequencyMhz: 5180,
+          band: '5GHz', rssiDbm: -52, linkSpeedMbps: 866, wifiStandardName: '802.11ac', ipAddress: SELF };
+      },
+      async netConfig() {
+        await wait(80);
+        return { simulated: true, deviceIp: SELF, gatewayIp: GW, prefixLength: 24,
+          netmask: '255.255.255.0', dns: [GW, '8.8.8.8'] };
+      },
+      async icmp(host, count) {
+        await wait(350);
+        const s = samplesAround(BASE_RTT[host] || 20, count);
+        const st = mockStat(s, count);
+        return { simulated: true, host, transmitted: count, received: s.length, packetLossPct: 0,
+          rttMinMs: st.min, rttAvgMs: st.avg, rttMaxMs: st.max, rttMdevMs: st.stddev, samples: s };
+      },
+      async tcp(host, ports, count) {
+        await wait(350);
+        return Object.assign(mockStat(samplesAround(BASE_RTT[host] || 20, count), count),
+          { simulated: true, respondsTcp: true, openPort: ports[0], openPorts: [ports[0]] });
+      },
+      async sweep(onProgress) {
+        const total = 254;
+        for (let done = 0; done < total; done += 32) {
+          if (typeof onProgress === 'function') onProgress({ phase: 'sweep', done, total });
+          await wait(120);
+        }
+        if (typeof onProgress === 'function') onProgress({ phase: 'sweep', done: total, total });
+        return {
+          simulated: true,
+          alive: Object.keys(HOSTS).map((ip) => ({ ip, rttMs: HOSTS[ip].rtt,
+            openPorts: HOSTS[ip].openPorts.slice(), respondsTcp: true })),
+        };
+      },
+      async probe(hosts, gatewayIp) {
+        await wait(600);
+        return hosts.map((ip) => {
+          const h = HOSTS[ip] || { openPorts: [], rtt: 20 };
+          return {
+            simulated: true, ip, openPorts: h.openPorts.slice(), respondsTcp: true,
+            stat: mockStat(samplesAround(h.rtt, 4), 4),
+            mdnsName: h.mdnsName || null, netbiosName: h.netbiosName || null,
+            netbiosMac: h.netbiosMac || null, ptrName: h.ptrName || null,
+            banner: h.banner || null, gateway: ip === gatewayIp,
+          };
+        });
+      },
+      async discover() {
+        await wait(400);
+        return {
+          '192.168.1.12': { name: 'Samsung 65" QLED', type: 'AndroidTV', source: 'ssdp',
+            manufacturer: 'Samsung Electronics', model: 'QN65Q60' },
+          '192.168.1.50': { name: 'Chromecast Sala', type: 'Chromecast', source: 'mdns',
+            manufacturer: 'Google', model: 'Chromecast' },
+          // Otra subred: mergeDiscovery la descarta (no es el /24 local).
+          '10.0.0.5': { name: 'Equipo de otra subred', type: 'PC', source: 'mdns' },
+        };
+      },
+      async http() {
+        await wait(300);
+        return { simulated: true, ok: true, avgMs: 21.3, minMs: 17.4, jitterMs: 2.1, packetLossPercent: 0 };
+      },
+      async publicIp() {
+        await wait(150);
+        return { simulated: true, ip: '203.0.113.45', isp: 'ISP simulado' };
+      },
+    };
+  })();
+
+  // --------------------------------------------------------------------------
   // serialScanner — escaneo de serial vía ML Kit (barcode + OCR)
   // La lógica de negocio (filtrado, validación de patrón) queda en el frontend;
   // este wrapper sólo devuelve datos crudos.
@@ -824,6 +1160,11 @@
       return null;
     }
   };
+
+  // Clasificación RSSI única para toda la app (Medición de señal y Red
+  // Interna). Declaraciones de función: se elevan aunque estén tras el return
+  // del modo navegador.
+  WifixNative.classifyRssi = classifyRssi;
 
   global.WifixNative = WifixNative;
 

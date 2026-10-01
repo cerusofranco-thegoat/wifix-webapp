@@ -1198,11 +1198,11 @@ function profileDegradedNote(profile) {
 // Red Interna (campos 19-21) y Daños en la red de acceso (campo 14) todavía se
 // alimentan de datos simulados porque la integración con la operadora no existe.
 // Aviso discreto (chip), nunca un banner que tape la pantalla.
-function mockNotice(extraClass = '') {
+function mockNotice(extraClass = '', text = 'Datos simulados — integración pendiente') {
   const cls = extraClass ? ` ${extraClass}` : '';
   return `<span class="mock-notice${cls}" role="note"` +
-    ` title="Estos datos no vienen de la operadora todavía">` +
-    `Datos simulados — integración pendiente</span>`;
+    ` title="Estos datos no son una medición real">` +
+    `${escapeHtml(text)}</span>`;
 }
 
 function renderClientProfile(profile, cuenta) {
@@ -5887,16 +5887,1411 @@ function wireNapPortsButtons(scope) {
 }
 
 // ============================================================================
-// Red Interna (campos 19-21) — LAN, WiFi devices y cambio de SSID/contraseña
+// Red Interna — módulos medidos (portados de Wifix Remote / wifi-monitor)
+// ----------------------------------------------------------------------------
+// Saturación de canal, Dispositivos conectados, Redes cercanas y Latencia.
+// La lógica pura se porta LITERAL del origen (cada función cita su fuente);
+// solo cambian los nombres de campo al contrato del plugin de Wifix
+// Certificate (frequencyMhz, bssid, channelWidthMhz, signalDbm…). Lo que el
+// origen hacía con net.Socket/dgram en Node lo hace el plugin nativo
+// NetworkTools (WifixNative.*). Fuera del APK los wrappers devuelven datos
+// simulados (simulated:true) y la UI lo avisa con mockNotice.
 // ============================================================================
-function renderLanDevices(devices) {
-  if (!devices || devices.length === 0) return `<div class="detail-empty">No hay dispositivos en la red local.</div>`;
-  return devices.map(d => `
-    <div class="mini-row">
-      <span class="mr-label">${escapeHtml(d.hostname || '—')}</span>
-      <span class="mr-value mono">${escapeHtml(d.ipAddress)} · ${escapeHtml(d.macAddress)}</span>
-    </div>`).join('');
+
+// ---- Módulo 1: Saturación de canal -----------------------------------------
+// Origen: AfterScan.vue:1826-1854 (banda/canal/ancho) y 1941-2019
+// (computeChannelSaturation).
+
+// Banda a partir de la frecuencia (MHz).
+// CORRECCIÓN CONSCIENTE DEL ORIGEN (bug 6 GHz): el origen no reconocía 6 GHz
+// (bandFromFrequency devolvía null y channelFromFrequency también), así que
+// una red 6 GHz quedaba sin canal y su saturación se comparaba contra TODAS
+// las bandas. Aquí 5925-7125 MHz → '6GHz' con su numeración de canales.
+function bandFromFrequency(freq) {
+  const f = parseInt(freq, 10);
+  if (isNaN(f)) return null;
+  if (f >= 2400 && f <= 2500) return '2.4GHz';
+  if (f >= 4900 && f <= 5900) return '5GHz';
+  if (f >= 5925 && f <= 7125) return '6GHz';
+  return null;
 }
+
+// Canal a partir de la frecuencia (MHz).
+//   2.4GHz: canal = (freq - 2412) / 5 + 1   (canal 14 = 2484, caso especial)
+//   5GHz:   canal = (freq - 5000) / 5        (hasta 5885 = canal 177)
+//   6GHz:   canal = (freq - 5950) / 5        (5935 = canal 2, caso especial) [nuevo]
+function channelFromFrequency(freq) {
+  const f = parseInt(freq, 10);
+  if (isNaN(f)) return null;
+  if (f === 2484) return 14;
+  if (f >= 2412 && f <= 2472) return Math.round((f - 2412) / 5) + 1;
+  if (f >= 5000 && f <= 5900) return Math.round((f - 5000) / 5);
+  if (f === 5935) return 2;
+  if (f >= 5955 && f <= 7115) return Math.round((f - 5950) / 5);
+  return null;
+}
+
+// Ancho de canal en MHz. El plugin nuevo ya entrega el número
+// (channelWidthMhz); se conserva el parseo de texto del origen ("20MHZ",
+// "80MHZ_PLUS_MHZ"…) por robustez, más 320 MHz (WiFi 7). Default 20.
+function channelWidthMhz(channelWidth) {
+  if (channelWidth == null) return 20;
+  if (typeof channelWidth === 'number') return channelWidth > 0 ? channelWidth : 20;
+  const s = String(channelWidth).toUpperCase();
+  if (s.indexOf('320') !== -1) return 320;
+  if (s.indexOf('160') !== -1) return 160;
+  if (s.indexOf('80') !== -1) return 80;
+  if (s.indexOf('40') !== -1) return 40;
+  if (s.indexOf('20') !== -1) return 20;
+  return 20;
+}
+
+// Canales candidatos a sugerir por banda. 2.4GHz: 1/6/11 (no solapados);
+// 5GHz: los comunes del origen; 6GHz (nuevo): canales PSC.
+const SATURATION_CANDIDATES = Object.freeze({
+  '2.4GHz': [1, 6, 11],
+  '5GHz': [36, 40, 44, 48, 149, 153, 157, 161],
+  '6GHz': [5, 21, 37, 53, 69, 85, 101, 117, 133, 149, 165, 181, 197, 213, 229],
+});
+
+// Saturación del canal propio frente a las redes vecinas de la MISMA banda.
+//   connInfo = { frequencyMhz, bssid, channelWidthMhz } de la red conectada
+//   wifis    = lista normalizada (normalizeWifis)
+// Devuelve { band, channel, channelWidth, sameChannelCount, overlappingCount,
+// suggested, levelClass, levelLabel, perChannel } o { error }.
+// perChannel se expone (el origen lo calculaba sin devolverlo) para el gráfico.
+function computeChannelSaturation(connInfo, wifis) {
+  try {
+    const ci = connInfo || {};
+    const ownFreq = ci.frequencyMhz != null ? parseInt(ci.frequencyMhz, 10) : null;
+    if (ownFreq == null || isNaN(ownFreq)) {
+      return { error: 'No se pudo determinar la frecuencia de su red.' };
+    }
+    const band = bandFromFrequency(ownFreq);
+    const ownChannel = channelFromFrequency(ownFreq);
+    const ownWidth = channelWidthMhz(ci.channelWidthMhz);
+    const list = Array.isArray(wifis) ? wifis : [];
+
+    // Dos redes solapan si la distancia entre centros es menor que la
+    // semisuma de sus anchos. La propia (mismo BSSID) no se cuenta.
+    const ownBssid = ci.bssid ? String(ci.bssid).toLowerCase() : null;
+    let sameChannelCount = 0;
+    let overlappingCount = 0;
+    const perChannel = {};
+
+    for (let i = 0; i < list.length; i++) {
+      const w = list[i] || {};
+      if (w.frequencyMhz == null) continue;
+      const wFreq = parseInt(w.frequencyMhz, 10);
+      if (isNaN(wFreq)) continue;
+      const wBand = bandFromFrequency(wFreq);
+      if (band && wBand && wBand !== band) continue; // distinta banda: no compite
+      if (ownBssid && w.bssid && String(w.bssid).toLowerCase() === ownBssid) continue;
+
+      const wChannel = channelFromFrequency(wFreq);
+      if (wChannel != null) {
+        perChannel[wChannel] = (perChannel[wChannel] || 0) + 1;
+      }
+      if (wChannel != null && ownChannel != null && wChannel === ownChannel) {
+        sameChannelCount++;
+      }
+      const wWidth = channelWidthMhz(w.channelWidthMhz);
+      const minGap = (ownWidth + wWidth) / 2;
+      if (Math.abs(wFreq - ownFreq) < minGap) {
+        overlappingCount++;
+      }
+    }
+
+    const candidates = SATURATION_CANDIDATES[band] || SATURATION_CANDIDATES['2.4GHz'];
+    const ranked = candidates.map((ch) => ({ ch, count: perChannel[ch] || 0 }))
+      .sort((a, b) => a.count - b.count);
+    const suggested = ranked
+      .filter((r) => r.ch !== ownChannel)
+      .slice(0, 3)
+      .map((r) => r.ch);
+
+    // Severidad: redes en el mismo canal pesan doble que los solapamientos.
+    const score = sameChannelCount * 2 + overlappingCount;
+    let levelClass, levelLabel;
+    if (score <= 1) { levelClass = 'good'; levelLabel = 'Baja'; }
+    else if (score <= 4) { levelClass = 'warn'; levelLabel = 'Media'; }
+    else { levelClass = 'bad'; levelLabel = 'Alta'; }
+
+    return {
+      band,
+      channel: ownChannel,
+      channelWidth: ownWidth,
+      sameChannelCount,
+      overlappingCount,
+      suggested,
+      levelClass,
+      levelLabel,
+      perChannel,
+      score,
+    };
+  } catch (e) {
+    console.warn('[computeChannelSaturation] ignorado: ' + (e && (e.message || e)));
+    return { error: 'No se pudo calcular la saturación de canal.' };
+  }
+}
+
+// Datos de la red propia para la saturación (port de enrichConnectionInfo,
+// AfterScan.vue:1862+): frecuencia de getWifiInfo y ancho de canal del AP
+// conectado cruzando el BSSID con el scan. Desvío: se cruza con el scan CRUDO
+// (no con la lista normalizada), porque la normalización puede descartar el
+// BSSID propio si un repetidor del mismo SSID se oye más fuerte.
+function ownConnInfo(wifiInfo, scan) {
+  const wi = wifiInfo || {};
+  const aps = (scan && Array.isArray(scan.accessPoints)) ? scan.accessPoints : [];
+  // Sin permiso de ubicación Android entrega 02:00:00:00:00:00 y "<unknown ssid>".
+  const realBssid = (v) => (v && String(v).toLowerCase() !== '02:00:00:00:00:00' ? v : null);
+  const realSsid = (v) => (v && String(v).replace(/^"|"$/g, '') !== '<unknown ssid>' ? String(v).replace(/^"|"$/g, '') : null);
+  const bssid = realBssid(wi.bssid) || realBssid(scan && scan.connectedBssid) || null;
+  const low = bssid ? String(bssid).toLowerCase() : null;
+  const own = aps.find((a) => a && a.bssid && low && String(a.bssid).toLowerCase() === low)
+    || aps.find((a) => a && a.isConnected) || null;
+  const freq = wi.frequencyMhz != null ? wi.frequencyMhz : (own ? own.frequencyMhz : null);
+  return {
+    frequencyMhz: freq,
+    bssid: bssid || (own ? own.bssid : null),
+    channelWidthMhz: own ? own.channelWidthMhz : null,
+    ssid: realSsid(wi.ssid) || realSsid(scan && scan.connectedSsid) || (own ? own.ssid : null),
+  };
+}
+
+// ---- Módulo 3: Redes cercanas ----------------------------------------------
+// Origen: normalizeWifis AfterScan.vue:2088-2143.
+
+// SSID oculto: vacío, '<hidden>' o el '\x00' textual que entrega Android (el
+// origen compara contra el literal de 4 caracteres '\\x00'); también se
+// descartan SSID compuestos solo por caracteres NUL reales.
+function isHiddenSsid(ssid) {
+  const s = ssid != null ? String(ssid).trim() : '';
+  return !s || s === '<hidden>' || s === '\\x00' || /^\u0000+$/.test(s);
+}
+
+// Seguridad a partir de capabilities ("[WPA2-PSK-CCMP][RSN-SAE-CCMP][ESS][WPS]").
+function wifiSecurity(capabilities) {
+  const c = String(capabilities || '').toUpperCase();
+  const wps = c.indexOf('WPS') !== -1;
+  let label;
+  // OWE (Enhanced Open) va antes que RSN: Android lo anuncia como [RSN-OWE-…].
+  if (c.indexOf('SAE') !== -1) label = 'WPA3';
+  else if (c.indexOf('OWE') !== -1) label = 'OWE';
+  else if (c.indexOf('RSN') !== -1 || c.indexOf('WPA2') !== -1) label = 'WPA2';
+  else if (c.indexOf('WPA') !== -1) label = 'WPA';
+  else if (c.indexOf('WEP') !== -1) label = 'WEP';
+  else label = 'Abierta';
+  return { label, wps };
+}
+
+// Entrada uniforme a partir de un AP del plugin (scanAccessPoints).
+function toWifiEntry(ap) {
+  const w = ap || {};
+  const freq = w.frequencyMhz != null ? parseInt(w.frequencyMhz, 10) : null;
+  const sec = wifiSecurity(w.capabilities);
+  return {
+    ssid: w.ssid != null ? String(w.ssid).trim() : '',
+    bssid: w.bssid != null ? w.bssid : null,
+    signalDbm: w.signalDbm != null ? parseInt(w.signalDbm, 10) : null,
+    frequencyMhz: freq,
+    channel: w.channel != null ? w.channel : channelFromFrequency(freq),
+    channelWidthMhz: channelWidthMhz(w.channelWidthMhz),
+    band: bandFromFrequency(freq),
+    security: sec.label,
+    wps: sec.wps,
+    capabilities: w.capabilities != null ? w.capabilities : null,
+    isConnected: w.isConnected === true,
+  };
+}
+
+// Normaliza/deduplica el scan: agrupa por SSID+banda y conserva la entrada de
+// señal más fuerte. Descarta SSID ocultos. Orden: señal más fuerte primero.
+// Extra (no cambia el algoritmo): bssidCount = BSSID agrupados y
+// anyConnected = el teléfono está conectado a alguno de ellos.
+function normalizeWifis(rawAps) {
+  if (!Array.isArray(rawAps)) return [];
+  try {
+    const groups = {};
+    for (let i = 0; i < rawAps.length; i++) {
+      const raw = rawAps[i] || {};
+      if (isHiddenSsid(raw.ssid)) continue;
+      const entry = toWifiEntry(raw);
+      // Sin banda clasificable se usa la frecuencia como clave para no
+      // fusionar redes distintas por error.
+      const key = entry.ssid + '|' + (entry.band || ('f' + entry.frequencyMhz));
+      const prev = groups[key];
+      if (!prev) {
+        entry.bssidCount = 1;
+        entry.anyConnected = entry.isConnected;
+        groups[key] = entry;
+      } else {
+        const prevLvl = prev.signalDbm == null ? -Infinity : prev.signalDbm;
+        const curLvl = entry.signalDbm == null ? -Infinity : entry.signalDbm;
+        const count = prev.bssidCount + 1;
+        const anyConnected = prev.anyConnected || entry.isConnected;
+        const keep = curLvl > prevLvl ? entry : prev;
+        keep.bssidCount = count;
+        keep.anyConnected = anyConnected;
+        groups[key] = keep;
+      }
+    }
+    const result = Object.keys(groups).map((k) => groups[k]);
+    result.sort((a, b) => {
+      const la = a.signalDbm == null ? -Infinity : a.signalDbm;
+      const lb = b.signalDbm == null ? -Infinity : b.signalDbm;
+      return lb - la;
+    });
+    return result;
+  } catch (e) {
+    console.warn('[normalizeWifis] excepcion: ' + (e && (e.message || e)));
+    return [];
+  }
+}
+
+// Vista "Ver todos los BSSID": cada AP por separado (incluye ocultos).
+function listAllBssids(rawAps) {
+  if (!Array.isArray(rawAps)) return [];
+  return rawAps.map((ap) => {
+    const e = toWifiEntry(ap);
+    e.hidden = isHiddenSsid(ap && ap.ssid);
+    e.anyConnected = e.isConnected;
+    e.bssidCount = 1;
+    return e;
+  }).sort((a, b) => (b.signalDbm == null ? -Infinity : b.signalDbm) - (a.signalDbm == null ? -Infinity : a.signalDbm));
+}
+
+// ---- Estadísticas de ping (forma `stat`) -----------------------------------
+// Origen: emptyPingStat AfterScan.vue:1274; statsFromRtts netprobe.js:88-118.
+function emptyPingStat() {
+  return { avg: null, min: null, max: null, time: null, packetLoss: null, stddev: null };
+}
+
+// { avg, min, max, time(=avg), packetLoss, stddev (poblacional = jitter),
+//   sent, received, samples[] } redondeados a 0.1.
+function statsFromRtts(rtts, attempts) {
+  const stat = { avg: null, min: null, max: null, time: null, packetLoss: null, stddev: null };
+  const list = Array.isArray(rtts) ? rtts.filter((v) => typeof v === 'number' && isFinite(v)) : [];
+  stat.sent = attempts;
+  stat.received = list.length;
+  stat.samples = list.map((v) => Math.round(v * 10) / 10);
+  if (attempts > 0) {
+    const lost = attempts - list.length;
+    stat.packetLoss = Math.round((Math.max(0, lost) / attempts) * 1000) / 10;
+  }
+  if (list.length > 0) {
+    let sum = 0, min = Infinity, max = -Infinity;
+    for (let i = 0; i < list.length; i++) {
+      sum += list[i];
+      if (list[i] < min) min = list[i];
+      if (list[i] > max) max = list[i];
+    }
+    const avg = sum / list.length;
+    let variance = 0;
+    for (let j = 0; j < list.length; j++) variance += Math.pow(list[j] - avg, 2);
+    variance = variance / list.length;
+    const r1 = (n) => Math.round(n * 10) / 10;
+    stat.min = r1(min);
+    stat.max = r1(max);
+    stat.avg = r1(avg);
+    stat.time = r1(avg);
+    stat.stddev = r1(Math.sqrt(variance));
+  }
+  return stat;
+}
+
+// Resultado de plugin.ping (ICMP: transmitted/received/rtt*/samples) → stat.
+function statFromIcmp(res, count) {
+  const r = res || {};
+  const sent = Number.isFinite(Number(r.transmitted)) ? Number(r.transmitted) : count;
+  const samples = Array.isArray(r.samples) ? r.samples.map(Number).filter(isFinite) : [];
+  if (samples.length) return statsFromRtts(samples, sent);
+  const stat = statsFromRtts([], sent);
+  const received = Number(r.received);
+  if (Number.isFinite(received) && received > 0 && r.rttAvgMs != null) {
+    // Sin muestras sueltas: se usa el resumen de ping (mdev ≈ desviación).
+    const r1 = (n) => (n == null || !isFinite(n) ? null : Math.round(Number(n) * 10) / 10);
+    Object.assign(stat, {
+      received,
+      packetLoss: sent > 0 ? Math.round((Math.max(0, sent - received) / sent) * 1000) / 10 : null,
+      avg: r1(r.rttAvgMs), time: r1(r.rttAvgMs), min: r1(r.rttMinMs), max: r1(r.rttMaxMs),
+      stddev: r1(r.rttMdevMs),
+    });
+  }
+  return stat;
+}
+
+// Stat válida del plugin tcpPing (o null): se normaliza y se completa.
+function normalizeStat(s) {
+  if (!s || typeof s !== 'object') return emptyPingStat();
+  const out = Object.assign(emptyPingStat(), {
+    avg: s.avg ?? null, min: s.min ?? null, max: s.max ?? null, time: s.time ?? s.avg ?? null,
+    packetLoss: s.packetLoss ?? null, stddev: s.stddev ?? null,
+  });
+  if (s.sent != null) out.sent = s.sent;
+  if (s.received != null) out.received = s.received;
+  out.samples = Array.isArray(s.samples) ? s.samples.slice() : [];
+  return out;
+}
+
+// Umbrales de latencia (portal propio de Wifix Remote): ≤30 bueno, ≤80 aviso.
+const LATENCY_GOOD_MS = 30;
+const LATENCY_WARN_MS = 80;
+function latencyLevel(avg) {
+  if (avg == null || !isFinite(avg)) return { cls: 'bad', label: 'Sin respuesta' };
+  if (avg <= LATENCY_GOOD_MS) return { cls: 'good', label: 'Buena' };
+  if (avg <= LATENCY_WARN_MS) return { cls: 'warn', label: 'Aceptable' };
+  return { cls: 'bad', label: 'Alta' };
+}
+
+// ---- Módulo 2: Dispositivos conectados -------------------------------------
+// Origen: AfterScan.vue:893-1060 (pipeline), MyLayout.vue:2287-2456
+// (isJunkDeviceName, sameSubnet24, mergeDiscovery, typeFromName,
+// typeFromVendor, getVendorByOUI), netprobe.js:544-602 y 626-720
+// (guessDeviceType, guessTypeByPorts, probeDevice), discovery.js:719-744
+// (guessTypeByBanner, nameFromBanner).
+
+const JUNK_DEVICE_NAMES = ['localhost', 'local', 'unknown', 'generic', 'android', '(none)', 'localhost.localdomain'];
+
+// true si 'name' es un nombre "basura" (vacío, solo guiones, placeholder).
+function isJunkDeviceName(name) {
+  try {
+    const n = String(name).trim().toLowerCase();
+    if (n === '' || /^[-\s]+$/.test(n)) return true;
+    return JUNK_DEVICE_NAMES.indexOf(n) !== -1;
+  } catch (e) {
+    return false;
+  }
+}
+
+// true si a y b son IPv4 válidas de la misma /24.
+function sameSubnet24(a, b) {
+  try {
+    if (typeof a !== 'string' || typeof b !== 'string') return false;
+    const pa = a.trim().split('.');
+    const pb = b.trim().split('.');
+    if (pa.length !== 4 || pb.length !== 4) return false;
+    for (let i = 0; i < 4; i++) {
+      const na = Number(pa[i]); const nb = Number(pb[i]);
+      if (!Number.isInteger(na) || na < 0 || na > 255) return false;
+      if (!Number.isInteger(nb) || nb < 0 || nb > 255) return false;
+    }
+    return pa[0] === pb[0] && pa[1] === pb[1] && pa[2] === pb[2];
+  } catch (e) {
+    return false;
+  }
+}
+
+// Tipo por nombre anunciado (mDNS/SSDP/NetBIOS/PTR). LITERAL de
+// guessDeviceType (netprobe.js:544-582) = typeFromName (MyLayout.vue:2413-2437).
+function guessDeviceType(name) {
+  if (!name || typeof name !== 'string') return null;
+  const n = name.toLowerCase();
+  if (/chromecast|google-?home|google-?nest|nest-?(mini|hub|audio)/.test(n)) return 'Chromecast';
+  if (/android-?tv|shield|mi-?box|fire-?tv|firestick|bravia|aquos|qled|oled|neo.?qled|nano.?cell|crystal|smart.?tv/.test(n)) return 'AndroidTV';
+  if (/apple-?tv|appletv/.test(n)) return 'AppleTV';
+  if (/\b(printer|impresora|epson|canon|brother|officejet|deskjet|laserjet|hp[a-z0-9]*print|zebra|citizen)\b/.test(n)) return 'Impresora';
+  if (/iphone|ipad|ipod/.test(n)) return 'Móvil';
+  if (/android|galaxy|redmi|huawei|xiaomi|oppo|vivo|moto-?g|pixel/.test(n)) return 'Móvil';
+  if (/macbook|imac|mac-?mini|mac-?pro/.test(n)) return 'PC';
+  if (/desktop|laptop|pc-|win-|windows|\bpc\b/.test(n)) return 'PC';
+  if (/nas|synology|qnap|diskstation/.test(n)) return 'NAS';
+  if (/router|gateway|tplink|tp-link|huawei-?hg|zte|mikrotik|ubnt|unifi/.test(n)) return 'Router';
+  if (/xtrim|\bb\d{3,}|\bhg\d{2,}|\beg\d{2,}|zxhn|\bf\d{3,}|\bont\b|\bonu\b|arris|technicolor|commscope|mitrastar|askey|nokia.*gateway|cable\s?modem|cablemodem/.test(n)) return 'Router';
+  if (/echo|alexa|sonos|homepod/.test(n)) return 'Parlante';
+  if (/cam|camera|camara|hikvision|dahua|reolink|tapo/.test(n)) return 'Cámara';
+  if (/\bdeco\b|decodificador|set-?top|\bstb\b|roku|\btcl\b|hisense|webos|tizen|lg.*tv|samsung.*tv|vizio|\buhd\b|\bled\b.*\btv\b/.test(n)) return 'AndroidTV';
+  if (/\btv\b/.test(n)) return 'AndroidTV';
+  return null;
+}
+// En el origen typeFromName es una copia idéntica de guessDeviceType.
+function typeFromName(name) {
+  return guessDeviceType(name);
+}
+
+// Tipo por puertos TCP abiertos (netprobe.js:592-602). Orden = prioridad.
+function guessTypeByPorts(openPorts) {
+  if (!Array.isArray(openPorts) || openPorts.length === 0) return null;
+  const has = (p) => openPorts.indexOf(p) !== -1;
+  if (has(9100) || has(515) || has(631)) return 'Impresora';
+  if (has(445) || has(139)) return 'PC';
+  if (has(62078)) return 'Móvil';
+  if (has(554) || has(8554)) return 'Cámara';
+  if (has(22)) return 'PC';
+  if (has(1883) || has(8883)) return 'IoT';
+  return null;
+}
+
+// Tipo por banner HTTP { server, realm, title } (discovery.js:719-729).
+function guessTypeByBanner(banner) {
+  if (!banner) return null;
+  const hay = [banner.server, banner.realm, banner.title].filter(Boolean).join(' ').toLowerCase();
+  if (!hay) return null;
+  if (/boa|goahead|rompager|lighttpd|mini_httpd|routeros|dd-wrt|openwrt|tp-link|mikrotik|router|gateway/.test(hay)) return 'Router';
+  if (/hikvision|dahua|ip\s?camera|ipcam|webcam|reolink|tapo|camera/.test(hay)) return 'Cámara';
+  if (/laserjet|officejet|deskjet|\bhp\b.*print|brother|epson|canon|printer|impresora/.test(hay)) return 'Impresora';
+  if (/synology|diskstation|qnap|\bnas\b|truenas/.test(hay)) return 'NAS';
+  return null;
+}
+
+// Nombre legible desde el <title> del banner, si no es genérico (discovery.js:731-744).
+function nameFromBanner(banner) {
+  if (!banner || !banner.title) return null;
+  const t = String(banner.title).trim();
+  const low = t.toLowerCase();
+  if (!t || low === 'index' || low === 'login' || low === 'home' ||
+      low === 'document' || low === 'untitled' || low === 'welcome' ||
+      low === 'error' || /^\d+$/.test(t)) return null;
+  if (/^(\d{3}\s|forbidden|unauthorized|not found|bad request|access denied|service unavailable|internal server error)/i.test(low)) return null;
+  if (/forbidden|unauthorized|not found|bad request|access denied/i.test(low)) return null;
+  return t;
+}
+
+// Tipo por fabricante, último recurso (MyLayout.vue:2441-2456).
+function typeFromVendor(vendor) {
+  if (!vendor || typeof vendor !== 'string') return null;
+  const v = vendor.toLowerCase();
+  if (v.indexOf('tapo') !== -1) return 'Cámara';
+  if (/hikvision|dahua|reolink|ezviz/.test(v)) return 'Cámara';
+  if (/epson|canon|brother|hp inc|lexmark|zebra|citizen/.test(v)) return 'Impresora';
+  if (/synology|qnap|western digital|seagate/.test(v)) return 'NAS';
+  if (/sonos|bose|harman|sonance/.test(v)) return 'Parlante';
+  if (v.indexOf('google') !== -1) return 'Chromecast';
+  if (/roku|tcl|hisense|vizio/.test(v)) return 'AndroidTV';
+  if (/apple|samsung|xiaomi|huawei|oppo|vivo|oneplus|motorola|realme/.test(v)) return 'Móvil';
+  if (/intel|dell|lenovo|asus|micro-star|gigabyte|asustek/.test(v)) return 'PC';
+  if (/espressif|tuya|sonoff|shelly/.test(v)) return 'IoT';
+  if (/tp-link|zte|mikrotik|ubiquiti|netgear|d-link|cisco|technicolor|arris/.test(v)) return 'Router';
+  return null;
+}
+
+// Tabla OUI local y pequeña (fabricantes comunes en hogares). Reemplaza la
+// consulta a macvendors del origen: sin red, sin rate-limit y sin mandar
+// MACs a terceros. Lo que no está aquí queda sin fabricante (no se inventa).
+const OUI_VENDORS = Object.freeze({
+  '00:03:93': 'Apple', '00:0a:95': 'Apple', '00:1e:c2': 'Apple', '3c:22:fb': 'Apple',
+  'a4:83:e7': 'Apple', 'f0:18:98': 'Apple',
+  '00:12:fb': 'Samsung Electronics', '00:16:32': 'Samsung Electronics',
+  '8c:77:12': 'Samsung Electronics', 'f0:25:b7': 'Samsung Electronics',
+  '00:e0:fc': 'Huawei Technologies', '00:18:82': 'Huawei Technologies',
+  '28:6e:d4': 'Huawei Technologies', '48:46:fb': 'Huawei Technologies',
+  '00:19:c6': 'ZTE Corporation', '00:15:eb': 'ZTE Corporation', '34:4b:50': 'ZTE Corporation',
+  '50:c7:bf': 'TP-Link', '14:cc:20': 'TP-Link', 'f4:f2:6d': 'TP-Link',
+  '00:1b:21': 'Intel Corporate', '00:13:e8': 'Intel Corporate',
+  '00:14:22': 'Dell', 'b8:ca:3a': 'Dell',
+  '24:0a:c4': 'Espressif', '30:ae:a4': 'Espressif', '5c:cf:7f': 'Espressif',
+  'f4:f5:d8': 'Google', '54:60:09': 'Google',
+  '00:00:48': 'Seiko Epson', '64:eb:8c': 'Seiko Epson',
+  '3c:d9:2b': 'HP Inc.', '00:17:a4': 'HP Inc.',
+  '00:00:85': 'Canon', '00:1e:8f': 'Canon',
+  '00:1b:a9': 'Brother Industries',
+  '44:19:b6': 'Hikvision',
+  '64:09:80': 'Xiaomi', 'f8:a4:5f': 'Xiaomi',
+  '00:0e:58': 'Sonos', '5c:aa:fd': 'Sonos',
+  'b8:27:eb': 'Raspberry Pi Foundation',
+  '24:a4:3c': 'Ubiquiti', '04:18:d6': 'Ubiquiti',
+  '4c:5e:0c': 'MikroTik', 'd4:ca:6d': 'MikroTik',
+  '00:11:32': 'Synology',
+  '00:14:6c': 'Netgear', '20:4e:7f': 'Netgear',
+  '00:00:0c': 'Cisco',
+  '00:05:5d': 'D-Link', '1c:7e:e5': 'D-Link',
+  'b0:a7:37': 'Roku', 'dc:3a:5e': 'Roku',
+});
+
+// Placeholders de MAC que Android/NetBIOS entregan cuando no hay MAC real.
+function realMacOrNull(mac) {
+  if (!mac || typeof mac !== 'string') return null;
+  const clean = mac.trim().toLowerCase();
+  if (!clean || clean === '02:00:00:00:00:00' || clean === '00:00:00:00:00:00' || clean === '00:00:00:00') return null;
+  return mac.trim().toUpperCase();
+}
+
+// Fabricante por OUI (port de getVendorByOUI sin red). Solo MAC real y sin el
+// bit "locally administered" (MAC aleatoria/privada → sin fabricante).
+function vendorFromMac(mac) {
+  try {
+    const real = realMacOrNull(mac);
+    if (!real) return null;
+    const octets = real.toLowerCase().replace(/-/g, ':').split(':');
+    if (octets.length < 3) return null;
+    const firstByte = parseInt(octets[0], 16);
+    if (!isNaN(firstByte) && (firstByte & 0x02)) return null;
+    const oui = octets.slice(0, 3).join(':');
+    return Object.prototype.hasOwnProperty.call(OUI_VENDORS, oui) ? OUI_VENDORS[oui] : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+// Fusiona el descubrimiento mDNS/SSDP sobre los equipos sondeados. LITERAL de
+// mergeDiscovery (MyLayout.vue:2332-2368):
+//  - nombre: si discover trae name y el probe NO lo tiene, usa el de discover.
+//  - tipo:   discover.type tiene prioridad sobre probe.deviceType.
+//  - agrega IPs que SOLO vio discover, filtradas al /24 de localIp.
+function mergeDiscovery(probed, discoverMap, localIp) {
+  try {
+    const list = Array.isArray(probed) ? probed.slice() : [];
+    const map = (discoverMap && typeof discoverMap === 'object') ? discoverMap : {};
+    const seen = {};
+    for (let i = 0; i < list.length; i++) {
+      const d = list[i];
+      if (!d || !d.ip) continue;
+      seen[d.ip] = true;
+      const disc = map[d.ip];
+      if (!disc) continue;
+      if ((d.name == null || d.name === '') && disc.name && !isJunkDeviceName(disc.name)) d.name = disc.name;
+      if (disc.type) d.deviceType = disc.type;
+    }
+    const filterSubnet = (typeof localIp === 'string' && localIp.trim() !== '');
+    for (const ip in map) {
+      if (!Object.prototype.hasOwnProperty.call(map, ip)) continue;
+      if (seen[ip]) continue;
+      if (filterSubnet && !sameSubnet24(ip, localIp)) continue;
+      const only = map[ip];
+      list.push({
+        ip,
+        mac: null,
+        hostname: null,
+        name: (only && only.name && !isJunkDeviceName(only.name)) ? only.name : null,
+        deviceType: (only && only.type) ? only.type : null,
+        respondsTcp: false,
+        ping: { stat: emptyPingStat() },
+      });
+    }
+    return list;
+  } catch (e) {
+    return Array.isArray(probed) ? probed : [];
+  }
+}
+
+// Un resultado de probeHosts → dispositivo (port de la parte JS de
+// probeDevice, netprobe.js:626-720: nombre, MAC, tipo por nombre/puertos/
+// banner y gateway = Router). `swept` = entrada del barrido de esa IP.
+function deviceFromProbe(r, gatewayIp, swept) {
+  const p = r || {};
+  const ip = p.ip;
+  let name = p.mdnsName || p.netbiosName || p.ptrName || null;
+  // mDNS suele llegar como "nombre.local": se recorta el sufijo.
+  if (name) name = String(name).trim().replace(/\.local\.?$/i, '');
+  try {
+    if (name != null) {
+      const norm = String(name).trim().toLowerCase();
+      if (norm === '' || /^[-\s]+$/.test(norm) || JUNK_DEVICE_NAMES.indexOf(norm) !== -1 ||
+          norm === String(ip).trim().toLowerCase()) {
+        name = null;
+      }
+    }
+  } catch (e) { name = null; }
+  const mac = realMacOrNull(p.netbiosMac);
+  const openPorts = Array.isArray(p.openPorts) ? p.openPorts
+    : (swept && Array.isArray(swept.openPorts) ? swept.openPorts : []);
+  let deviceType = guessDeviceType(name) || guessTypeByPorts(openPorts) || null;
+  if ((deviceType == null || name == null) && p.banner) {
+    if (deviceType == null) deviceType = guessTypeByBanner(p.banner) || null;
+    if (name == null) name = nameFromBanner(p.banner) || null;
+  }
+  if (gatewayIp && ip === gatewayIp) deviceType = 'Router';
+
+  let stat = p.stat ? normalizeStat(p.stat) : null;
+  if (!stat || stat.avg == null) {
+    // Sin estadística del probe: el RTT del barrido vale como una muestra.
+    stat = (swept && swept.rttMs != null) ? statsFromRtts([Number(swept.rttMs)], 1) : (stat || emptyPingStat());
+  }
+  const respondsTcp = p.respondsTcp === true || !!(swept && swept.respondsTcp);
+  return { ip, mac, hostname: null, name, deviceType, respondsTcp, openPorts, ping: { stat } };
+}
+
+function ipToNumber(ip) {
+  const p = String(ip || '').split('.').map(Number);
+  if (p.length !== 4 || p.some((n) => !Number.isInteger(n))) return Number.MAX_SAFE_INTEGER;
+  return ((p[0] * 256 + p[1]) * 256 + p[2]) * 256 + p[3];
+}
+
+// Arma la lista final de equipos (forma del contrato):
+//   { ip, mac|null, name, deviceType, vendor, respondsTcp, ping:{stat} }
+// + isSelf (la IP del teléfono). Router primero; luego por IP.
+function buildLanDevices({ netConfig, swept, probed, discoverMap }) {
+  const nc = netConfig || {};
+  const gatewayIp = nc.gatewayIp || null;
+  const deviceIp = nc.deviceIp || null;
+  const sweptByIp = {};
+  (swept || []).forEach((s) => { if (s && s.ip) sweptByIp[s.ip] = s; });
+  const probedByIp = {};
+  (probed || []).forEach((r) => { if (r && r.ip) probedByIp[r.ip] = r; });
+  // Toda IP viva (barrido o probe) entra, aunque el probe no la haya devuelto.
+  const ips = Array.from(new Set(Object.keys(sweptByIp).concat(Object.keys(probedByIp))));
+  let devices = ips.map((ip) => deviceFromProbe(probedByIp[ip] || { ip }, gatewayIp, sweptByIp[ip]));
+  devices = mergeDiscovery(devices, discoverMap, deviceIp);
+
+  const out = devices.map((d) => {
+    const vendor = vendorFromMac(d.mac);
+    let name = (d.name != null && d.name !== '') ? d.name : null;
+    if (name && (isJunkDeviceName(name) || name === d.ip)) name = null;
+    return {
+      ip: d.ip,
+      mac: d.mac != null ? d.mac : null,
+      name,
+      deviceType: (d.ip === gatewayIp) ? 'Router'
+        : (d.deviceType || typeFromName(name) || typeFromVendor(vendor) || null),
+      vendor,
+      respondsTcp: d.respondsTcp === true,
+      ping: (d.ping && d.ping.stat) ? { stat: d.ping.stat } : { stat: emptyPingStat() },
+      isSelf: !!deviceIp && d.ip === deviceIp,
+    };
+  });
+  out.sort((a, b) => {
+    if (a.deviceType === 'Router' && a.ip === gatewayIp) return -1;
+    if (b.deviceType === 'Router' && b.ip === gatewayIp) return 1;
+    return ipToNumber(a.ip) - ipToNumber(b.ip);
+  });
+  return out;
+}
+
+function withTimeout(promise, ms, fallback) {
+  let timer = null;
+  return Promise.race([
+    Promise.resolve(promise).catch(() => fallback),
+    new Promise((resolve) => { timer = setTimeout(() => resolve(fallback), ms); }),
+  ]).finally(() => clearTimeout(timer));
+}
+
+// Pipeline completo (AfterScan.getDevicesConnected): getNetConfig → en
+// paralelo barrido+probe y descubrimiento (8 s máx.) → fusión → lista final.
+// onProgress({ text, done, total }) para la UI.
+async function scanLanDevices(onProgress) {
+  const progress = typeof onProgress === 'function' ? onProgress : () => {};
+  const t0 = Date.now();
+  progress({ text: 'Leyendo la configuración de la red…' });
+  const netConfig = await WifixNative.getNetConfig();
+  if (!netConfig || !netConfig.gatewayIp || !netConfig.deviceIp) {
+    throw new Error('El teléfono no está conectado a una red WiFi: conéctalo a la red del cliente y vuelve a escanear.');
+  }
+  const simulated = !!netConfig.simulated;
+  const discoverP = withTimeout(WifixNative.discoverNetwork({ mdnsMs: 6000, ssdpMs: 6000 }), 8000, {});
+
+  const probeP = (async () => {
+    const sweep = await WifixNative.sweepSubnet({}, (p) => {
+      const total = Number(p.total) || 254;
+      const done = Math.min(total, Number(p.done) || 0);
+      progress({ text: `Buscando equipos en la red: ${done} de ${total} direcciones`, done, total });
+    });
+    const alive = (sweep && Array.isArray(sweep.alive)) ? sweep.alive : [];
+    const ips = alive.map((a) => a && a.ip).filter(Boolean);
+    if (ips.indexOf(netConfig.gatewayIp) === -1) ips.unshift(netConfig.gatewayIp);
+    progress({ text: `Identificando ${ips.length} equipos (nombre, tipo y latencia)…` });
+    const probed = await WifixNative.probeHosts(ips, netConfig.gatewayIp, (p) => {
+      const total = Number(p.total) || ips.length;
+      const done = Math.min(total, Number(p.done) || 0);
+      progress({ text: `Identificando equipos: ${done} de ${total}`, done, total });
+    });
+    return { alive, probed };
+  })();
+
+  const [{ alive, probed }, discoverMap] = await Promise.all([probeP, discoverP]);
+  const devices = buildLanDevices({ netConfig, swept: alive, probed, discoverMap });
+  return { devices, netConfig, simulated, durationMs: Date.now() - t0 };
+}
+
+// ---- Módulo 4: Latencia -----------------------------------------------------
+// Origen: AfterScan.vue:1171-1273 y MyLayout.vue:1520-1540. Secuencial:
+// Router (gateway), Google (8.8.8.8) e ISP (IP pública). ICMP primero; si
+// pierde el 100 % se cae a TCP-ping (el ICMP suele estar bloqueado).
+const LATENCY_GATEWAY_PORTS = [80, 443, 8080, 53, 22];
+
+async function measureLatencyTarget(host, o) {
+  let icmpErr = null;
+  try {
+    const res = await WifixNative.icmpPing(host, { count: o.icmpCount, timeoutSec: 5 });
+    const stat = statFromIcmp(res, o.icmpCount);
+    if (stat.packetLoss !== 100 && stat.avg != null) {
+      return { host, method: 'ICMP', stat, simulated: !!(res && res.simulated) };
+    }
+  } catch (err) {
+    icmpErr = err;
+  }
+  try {
+    const r = await WifixNative.tcpPing(host, { ports: o.tcpPorts, count: o.tcpCount, timeoutMs: o.tcpTimeoutMs });
+    const stat = normalizeStat(r);
+    if (stat.packetLoss == null && stat.avg == null) stat.packetLoss = 100;
+    const port = r ? (r.openPort != null ? r.openPort : (r.port != null ? r.port : null)) : null;
+    return { host, method: 'TCP', port, stat, simulated: !!(r && r.simulated) };
+  } catch (err) {
+    const stat = emptyPingStat();
+    stat.packetLoss = 100;
+    return { host, method: 'TCP', stat, error: (err && err.message) || (icmpErr && icmpErr.message) || 'Sin respuesta' };
+  }
+}
+
+async function runLatencyTest(onProgress) {
+  const progress = typeof onProgress === 'function' ? onProgress : () => {};
+  const targets = [];
+  progress({ text: 'Midiendo latencia al router…', done: 0, total: 4 });
+  let netConfig = null;
+  try { netConfig = await WifixNative.getNetConfig(); } catch (_) { netConfig = null; }
+  const gw = netConfig && netConfig.gatewayIp;
+  if (gw) {
+    targets.push(Object.assign({ key: 'router', label: 'Router' },
+      await measureLatencyTarget(gw, { icmpCount: 5, tcpPorts: LATENCY_GATEWAY_PORTS, tcpCount: 5, tcpTimeoutMs: 1500 })));
+  } else {
+    targets.push({ key: 'router', label: 'Router', host: null, method: null, stat: emptyPingStat(),
+      error: 'Sin gateway: el teléfono no está en una red WiFi.' });
+  }
+
+  progress({ text: 'Midiendo latencia a Google (8.8.8.8)…', done: 1, total: 4 });
+  targets.push(Object.assign({ key: 'google', label: 'Google' },
+    await measureLatencyTarget('8.8.8.8', { icmpCount: 6, tcpPorts: [443], tcpCount: 6, tcpTimeoutMs: 2000 })));
+
+  progress({ text: 'Midiendo latencia al ISP (IP pública)…', done: 2, total: 4 });
+  let isp = null;
+  try { isp = await WifixNative.getPublicIp(); } catch (_) { isp = null; }
+  if (isp && isp.ip) {
+    targets.push(Object.assign({ key: 'isp', label: 'ISP', isp: isp.isp || null },
+      await measureLatencyTarget(isp.ip, { icmpCount: 5, tcpPorts: LATENCY_GATEWAY_PORTS, tcpCount: 5, tcpTimeoutMs: 1500 })));
+  } else {
+    targets.push({ key: 'isp', label: 'ISP', host: null, method: null, stat: emptyPingStat(),
+      error: 'No se pudo obtener la IP pública.' });
+  }
+
+  // Latencia HTTP a Internet (opcional, como el origen): mínimo de 7 muestras.
+  progress({ text: 'Midiendo latencia HTTP a Internet…', done: 3, total: 4 });
+  let internet = null;
+  try {
+    const h = await WifixNative.httpLatency('https://speed.cloudflare.com/__down?bytes=0', 7);
+    if (h && h.minMs != null) internet = { minMs: h.minMs, avgMs: h.avgMs ?? null, jitterMs: h.jitterMs ?? null };
+  } catch (_) { internet = null; }
+
+  const simulated = !!((netConfig && netConfig.simulated) || targets.some((t) => t.simulated));
+  return { targets, internet, simulated, measuredAt: new Date().toISOString() };
+}
+
+const LATENCY_TARGET_NOTES = Object.freeze({
+  router: 'Red Interna · Latencia al router',
+  google: 'Red Interna · Latencia a Google',
+  isp: 'Red Interna · Latencia al ISP (IP pública)',
+});
+
+// Un registro POST /ping-tests por destino medido (contrato PingTestInput).
+// Los null se OMITEN (el backend valida números ≥ 0).
+function buildLatencyPingPayloads(result) {
+  const out = [];
+  ((result && result.targets) || []).forEach((t) => {
+    if (!t || !t.host) return;
+    const s = t.stat || {};
+    const p = { target: t.host, continuous: false, measuredAt: result.measuredAt || new Date().toISOString() };
+    const sent = Number(s.sent);
+    const recv = Number(s.received);
+    if (Number.isInteger(sent) && sent >= 0) p.packetsSent = sent;
+    if (Number.isInteger(recv) && recv >= 0 && (p.packetsSent === undefined || recv <= p.packetsSent)) p.packetsReceived = recv;
+    if (s.packetLoss != null && isFinite(s.packetLoss)) p.packetLossPercent = Math.min(100, Math.max(0, s.packetLoss));
+    if (s.min != null && isFinite(s.min)) p.minLatencyMs = Math.max(0, s.min);
+    if (s.avg != null && isFinite(s.avg)) p.avgLatencyMs = Math.max(0, s.avg);
+    if (s.max != null && isFinite(s.max)) p.maxLatencyMs = Math.max(0, s.max);
+    const metodo = t.method === 'TCP' ? `TCP${t.port ? ' :' + t.port : ''}` : (t.method || '');
+    const jitter = s.stddev != null ? ` · jitter ${s.stddev} ms` : '';
+    p.notes = `${LATENCY_TARGET_NOTES[t.key] || 'Red Interna · Latencia'}${metodo ? ' (' + metodo + ')' : ''}${jitter}`;
+    out.push(p);
+  });
+  return out;
+}
+
+// ============================================================================
+// Red Interna — UI de los módulos medidos
+// ============================================================================
+
+const RI_SCAN_TTL_MS = 60 * 1000;          // scan WiFi compartido Saturación/Redes
+const RI_RESULT_TTL_MS = 10 * 60 * 1000;   // resultado reutilizable al reabrir
+
+const _riState = {
+  account: null,
+  scan: null,          // { at, scan, wifiInfo, simulated }
+  scanPromise: null,
+  results: {},         // id → { at, data, error }
+  running: {},         // id → Promise
+  mounted: {},         // id → body (el más reciente)
+  nearbyMode: 'grouped',
+};
+
+function riResetForAccount(cuenta) {
+  if (_riState.account === cuenta) return;
+  _riState.account = cuenta;
+  _riState.results = {};
+  _riState.mounted = {};
+}
+
+// Un único escaneo WiFi para Saturación y Redes cercanas (con timestamp):
+// Android limita a 4 escaneos cada 2 minutos, no se escanea dos veces.
+function riGetWifiScan(force) {
+  const c = _riState.scan;
+  if (!force && c && Date.now() - c.at < RI_SCAN_TTL_MS) return Promise.resolve(c);
+  if (_riState.scanPromise) return _riState.scanPromise;
+  _riState.scanPromise = (async () => {
+    const [scan, wifiInfo] = await Promise.all([
+      WifixNative.scanNetworks(),
+      WifixNative.wifiLink().catch(() => null),
+    ]);
+    const entry = { at: Date.now(), scan: scan || { accessPoints: [] }, wifiInfo, simulated: !!(scan && scan.simulated) };
+    _riState.scan = entry;
+    return entry;
+  })().finally(() => { _riState.scanPromise = null; });
+  return _riState.scanPromise;
+}
+
+function saturationFromScan(entry) {
+  const aps = (entry.scan && Array.isArray(entry.scan.accessPoints)) ? entry.scan.accessPoints : [];
+  const conn = ownConnInfo(entry.wifiInfo, entry.scan);
+  const wifis = normalizeWifis(aps);
+  return { sat: computeChannelSaturation(conn, wifis), conn, scanEntry: entry, apCount: aps.length };
+}
+
+function nearbyFromScan(entry) {
+  const aps = (entry.scan && Array.isArray(entry.scan.accessPoints)) ? entry.scan.accessPoints : [];
+  return { grouped: normalizeWifis(aps), all: listAllBssids(aps), scanEntry: entry };
+}
+
+const RI_MODULES = {
+  sat: {
+    runLabel: 'Escanear canales',
+    startText: 'Escaneando redes WiFi cercanas…',
+    shared: 'scan',
+    run: async ({ force }) => saturationFromScan(await riGetWifiScan(force)),
+    fromScan: saturationFromScan,
+    render: renderSaturationResult,
+  },
+  devices: {
+    runLabel: 'Buscar dispositivos',
+    startText: 'Preparando el barrido de la red…',
+    run: ({ progress }) => scanLanDevices(progress),
+    render: renderDevicesResult,
+  },
+  nearby: {
+    runLabel: 'Escanear redes',
+    startText: 'Escaneando redes WiFi cercanas…',
+    shared: 'scan',
+    run: async ({ force }) => nearbyFromScan(await riGetWifiScan(force)),
+    fromScan: nearbyFromScan,
+    render: renderNearbyResult,
+    after: wireNearbyToggle,
+  },
+  latency: {
+    runLabel: 'Medir latencia',
+    startText: 'Midiendo latencia…',
+    run: ({ progress }) => runLatencyTest(progress),
+    render: renderLatencyResult,
+    after: wireLatencySave,
+  },
+};
+
+function riShellHtml(id) {
+  const mod = RI_MODULES[id];
+  return `
+    <div class="ri-module" data-ri="${id}">
+      <div class="ri-toolbar">
+        <button type="button" class="save-btn ri-run-btn" data-action="ri-run">${escapeHtml(mod.runLabel)}</button>
+        <span class="ri-stamp" data-slot="stamp"></span>
+      </div>
+      <div class="ri-progress" data-slot="progress" hidden>
+        <div class="ri-progress-track" data-slot="track" role="progressbar" aria-label="Progreso del escaneo"
+          aria-valuemin="0" aria-valuemax="100">
+          <div class="ri-progress-bar" data-slot="bar"></div>
+        </div>
+        <div class="ri-progress-text" data-slot="ptext" role="status" aria-live="polite"></div>
+      </div>
+      <div data-slot="result"><div class="detail-empty">Toca “${escapeHtml(mod.runLabel)}” para medir.</div></div>
+    </div>`;
+}
+
+function riSlot(id, name) {
+  const body = _riState.mounted[id];
+  return body ? body.querySelector(`[data-slot="${name}"]`) : null;
+}
+
+function riSetProgress(id, p) {
+  const box = riSlot(id, 'progress');
+  if (!box) return;
+  if (!p) { box.hidden = true; return; }
+  box.hidden = false;
+  const text = riSlot(id, 'ptext');
+  const bar = riSlot(id, 'bar');
+  const track = riSlot(id, 'track');
+  if (text) text.textContent = p.text || '';
+  const determinate = Number.isFinite(p.done) && Number.isFinite(p.total) && p.total > 0;
+  const pct = determinate ? Math.round((p.done / p.total) * 100) : null;
+  if (bar) {
+    bar.classList.toggle('indeterminate', !determinate);
+    bar.style.width = determinate ? `${pct}%` : '';
+  }
+  if (track) {
+    if (determinate) track.setAttribute('aria-valuenow', String(pct));
+    else track.removeAttribute('aria-valuenow');
+  }
+}
+
+function riSetBusy(id, busy) {
+  const body = _riState.mounted[id];
+  if (!body) return;
+  const btn = body.querySelector('[data-action="ri-run"]');
+  if (!btn) return;
+  btn.disabled = busy;
+  const mod = RI_MODULES[id];
+  const has = !!_riState.results[id];
+  btn.textContent = busy ? 'Midiendo…' : (has ? 'Volver a escanear' : mod.runLabel);
+  btn.setAttribute('aria-busy', busy ? 'true' : 'false');
+}
+
+function riRender(id) {
+  const body = _riState.mounted[id];
+  if (!body) return;
+  const slot = body.querySelector('[data-slot="result"]');
+  const stamp = body.querySelector('[data-slot="stamp"]');
+  const res = _riState.results[id];
+  if (!slot) return;
+  if (!res) return;
+  if (stamp) stamp.textContent = res.at ? `Medido a las ${fmtTimeEc(new Date(res.at).toISOString())}` : '';
+  if (res.error) {
+    slot.innerHTML = `<div class="detail-error" role="alert">${escapeHtml(res.error)}</div>`;
+    return;
+  }
+  const mod = RI_MODULES[id];
+  slot.innerHTML = mod.render(res.data);
+  if (mod.after) mod.after(slot, res.data, id);
+}
+
+// Tras un escaneo WiFi nuevo, el otro módulo que comparte el scan se
+// recalcula con el mismo resultado (sin escanear de nuevo).
+function riSyncSharedScan(fromId) {
+  Object.keys(RI_MODULES).forEach((other) => {
+    const mod = RI_MODULES[other];
+    if (other === fromId || mod.shared !== 'scan' || !_riState.results[other] || !_riState.scan) return;
+    if (_riState.running[other]) return;
+    _riState.results[other] = { at: _riState.scan.at, data: mod.fromScan(_riState.scan), error: null };
+    riRender(other);
+  });
+}
+
+function riRun(id, force) {
+  if (_riState.running[id]) return _riState.running[id];
+  const mod = RI_MODULES[id];
+  riSetBusy(id, true);
+  riSetProgress(id, { text: mod.startText });
+  const p = (async () => {
+    try {
+      const data = await mod.run({ force: !!force, progress: (pp) => riSetProgress(id, pp) });
+      const at = (mod.shared === 'scan' && data && data.scanEntry) ? data.scanEntry.at : Date.now();
+      _riState.results[id] = { at, data, error: null };
+      if (mod.shared === 'scan') riSyncSharedScan(id);
+    } catch (err) {
+      console.error('[Wifix] red-interna', id, err);
+      _riState.results[id] = { at: Date.now(), data: null, error: (err && err.message) || 'No se pudo completar la medición.' };
+    } finally {
+      _riState.running[id] = null;
+      riSetProgress(id, null);
+      riSetBusy(id, false);
+      riRender(id);
+    }
+  })();
+  _riState.running[id] = p;
+  return p;
+}
+
+// Monta el módulo en su acordeón: reutiliza un resultado reciente o mide.
+function riMount(id, body) {
+  _riState.mounted[id] = body;
+  const btn = body.querySelector('[data-action="ri-run"]');
+  if (btn) btn.addEventListener('click', () => riRun(id, true));
+  if (_riState.running[id]) {
+    riSetBusy(id, true);
+    riSetProgress(id, { text: RI_MODULES[id].startText });
+    return _riState.running[id];
+  }
+  const res = _riState.results[id];
+  if (res && Date.now() - res.at < RI_RESULT_TTL_MS) {
+    riSetBusy(id, false);
+    riRender(id);
+    return Promise.resolve();
+  }
+  return riRun(id, false);
+}
+
+// ---- Avisos comunes ---------------------------------------------------------
+function riSimNotice() {
+  return mockNotice('', 'Datos simulados — la medición real solo funciona en el APK');
+}
+
+function riScanNotices(entry, apCount) {
+  const out = [];
+  if (entry && entry.simulated) out.push(riSimNotice());
+  if (entry && entry.scan && entry.scan.fromCache) {
+    out.push('<div class="detail-warning" role="status">Android limita a 4 escaneos cada 2 minutos: se muestran los últimos resultados disponibles (en caché). Espera un momento y vuelve a escanear.</div>');
+  }
+  if (!apCount) {
+    out.push('<div class="detail-warning" role="status">El escaneo no devolvió redes. Si la ubicación del sistema está apagada, Android entrega el escaneo vacío: actívala y vuelve a escanear.</div>');
+  }
+  return out.join('');
+}
+
+const RI_LEVEL_BADGE = Object.freeze({ good: 'badge-resolved', warn: 'badge-pending', bad: 'badge-fail' });
+const RI_LEVEL_TILE = Object.freeze({ good: 'ok', warn: 'warn', bad: 'fail' });
+
+function riBandLabel(band) {
+  return band ? String(band).replace('GHz', ' GHz') : '—';
+}
+
+// ---- Render: Saturación de canal -------------------------------------------
+
+// Barras SVG de redes vecinas por canal (mismo estilo que renderLineChart).
+// Colores por clase CSS (tokens), no inline.
+function renderChannelBars(perChannel, band, ownChannel, suggested) {
+  const counts = perChannel || {};
+  let channels;
+  if (band === '2.4GHz') {
+    channels = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
+    if (counts[14]) channels.push(14);
+  } else {
+    const set = new Set((SATURATION_CANDIDATES[band] || []).filter((c) => band !== '6GHz' || counts[c] || (suggested || []).includes(c)));
+    Object.keys(counts).forEach((k) => set.add(Number(k)));
+    if (ownChannel != null) set.add(ownChannel);
+    channels = Array.from(set).filter(Number.isFinite).sort((a, b) => a - b);
+  }
+  if (channels.length === 0) return '<div class="detail-empty">Sin redes vecinas en esta banda.</div>';
+
+  const W = 320, H = 130;
+  const padL = 24, padR = 8, padT = 16, padB = 22;
+  const plotW = W - padL - padR;
+  const plotH = H - padT - padB;
+  const maxCount = Math.max(1, ...channels.map((c) => counts[c] || 0));
+  const slot = plotW / channels.length;
+  const barW = Math.max(4, Math.min(22, slot * 0.62));
+  const y = (v) => padT + plotH - (v / maxCount) * plotH;
+  const sugg = new Set(suggested || []);
+
+  const grid = [0, 0.5, 1].map((f) => {
+    const gy = padT + plotH * f;
+    const v = Math.round(maxCount * (1 - f));
+    return `<line x1="${padL}" y1="${gy.toFixed(1)}" x2="${W - padR}" y2="${gy.toFixed(1)}" class="chart-grid"/>` +
+      `<text x="${padL - 5}" y="${(gy + 3).toFixed(1)}" class="chart-axis" text-anchor="end">${v}</text>`;
+  }).join('');
+
+  const bars = channels.map((ch, i) => {
+    const cx = padL + slot * i + slot / 2;
+    const c = counts[ch] || 0;
+    const own = ch === ownChannel;
+    const top = y(c);
+    const bg = own
+      ? `<rect x="${(cx - slot / 2 + 1).toFixed(1)}" y="${padT}" width="${(slot - 2).toFixed(1)}" height="${plotH}" class="ri-bar-own-bg" rx="3"/>`
+      : '';
+    const bar = c > 0
+      ? `<rect x="${(cx - barW / 2).toFixed(1)}" y="${top.toFixed(1)}" width="${barW.toFixed(1)}" height="${(padT + plotH - top).toFixed(1)}" rx="2" class="ri-bar${own ? ' own' : ''}"/>` +
+        `<text x="${cx.toFixed(1)}" y="${(top - 3).toFixed(1)}" class="chart-axis ri-bar-value" text-anchor="middle">${c}</text>`
+      : '';
+    const labelCls = own ? 'chart-axis ri-axis-own' : sugg.has(ch) ? 'chart-axis ri-axis-suggested' : 'chart-axis';
+    const label = `<text x="${cx.toFixed(1)}" y="${H - 8}" class="${labelCls}" text-anchor="middle">${ch}</text>`;
+    return bg + bar + label;
+  }).join('');
+
+  const resumen = channels.filter((ch) => counts[ch]).map((ch) => `canal ${ch}: ${counts[ch]}`).join(', ') || 'sin redes vecinas';
+  const aria = `Redes vecinas por canal en ${riBandLabel(band)}. Tu canal: ${ownChannel ?? 'desconocido'}. ${resumen}.`;
+  return `
+    <div class="chart-block ri-channel-chart">
+      <div class="chart-unit">redes</div>
+      <svg class="chart-svg" viewBox="0 0 ${W} ${H}" role="img" aria-label="${escapeHtml(aria)}">
+        ${grid}${bars}
+      </svg>
+      <div class="chart-legend">
+        <span class="chart-legend-item"><span class="chart-legend-dot ri-dot-own"></span>Tu canal</span>
+        <span class="chart-legend-item"><span class="chart-legend-dot ri-dot-other"></span>Redes vecinas</span>
+        <span class="chart-legend-item"><span class="chart-legend-dot ri-dot-suggested"></span>Canal sugerido</span>
+      </div>
+    </div>`;
+}
+
+function renderSaturationResult(data) {
+  const { sat, conn, scanEntry, apCount } = data;
+  const notices = riScanNotices(scanEntry, apCount);
+  if (!sat || sat.error) {
+    return `${notices}<div class="detail-error" role="alert">${escapeHtml((sat && sat.error) || 'No se pudo calcular la saturación.')}
+      Verifica que el teléfono esté conectado a la red WiFi del cliente.</div>`;
+  }
+  const badge = RI_LEVEL_BADGE[sat.levelClass] || 'badge-neutral';
+  const tile = RI_LEVEL_TILE[sat.levelClass] || '';
+  const chips = sat.suggested.length
+    ? sat.suggested.map((c) => `<span class="ri-chip">Canal ${escapeHtml(String(c))}</span>`).join('')
+    : '<span class="ri-chip-empty">Sin alternativas en esta banda.</span>';
+  return `
+    ${notices}
+    <div class="ri-summary">
+      <span class="event-badge ${badge}">Saturación ${escapeHtml(sat.levelLabel.toLowerCase())}</span>
+      <span class="ri-summary-text">${escapeHtml(conn.ssid || 'Red conectada')} · canal ${escapeHtml(String(sat.channel ?? '—'))}</span>
+    </div>
+    <div class="status-grid">
+      <div class="status-tile ${tile}">
+        <span class="st-label">Saturación</span>
+        <span class="st-value">${escapeHtml(sat.levelLabel)}</span>
+        <span class="st-sub">Puntaje ${sat.score} (2 × mismo canal + solapadas)</span>
+      </div>
+      <div class="status-tile">
+        <span class="st-label">Canal actual</span>
+        <span class="st-value">${escapeHtml(String(sat.channel ?? '—'))}</span>
+        <span class="st-sub">${escapeHtml(riBandLabel(sat.band))} · ${escapeHtml(String(sat.channelWidth))} MHz</span>
+      </div>
+      <div class="status-tile">
+        <span class="st-label">Mismo canal</span>
+        <span class="st-value">${sat.sameChannelCount}</span>
+        <span class="st-sub">redes vecinas en el canal ${escapeHtml(String(sat.channel ?? '—'))}</span>
+      </div>
+      <div class="status-tile">
+        <span class="st-label">Solapadas</span>
+        <span class="st-value">${sat.overlappingCount}</span>
+        <span class="st-sub">redes que pisan tu ancho de canal</span>
+      </div>
+    </div>
+    <h4 class="band-title ri-subtitle">Redes por canal · ${escapeHtml(riBandLabel(sat.band))}</h4>
+    ${renderChannelBars(sat.perChannel, sat.band, sat.channel, sat.suggested)}
+    <div class="ri-chips" role="group" aria-label="Canales sugeridos">
+      <span class="ri-chips-label">Canales sugeridos</span>
+      ${chips}
+    </div>`;
+}
+
+// ---- Render: Redes cercanas -------------------------------------------------
+function riRssi(dbm) {
+  const fn = typeof WifixNative !== 'undefined' && WifixNative && WifixNative.classifyRssi;
+  return fn ? fn(dbm) : { label: '—', cls: 'rssi-na' };
+}
+
+function renderWifiRow(w, mode) {
+  const rssi = riRssi(w.signalDbm);
+  const ssid = w.hidden ? '<span class="ri-hidden-ssid">(red oculta)</span>' : escapeHtml(w.ssid || '—');
+  const conectada = w.anyConnected ? ' <span class="ap-connected">Conectado</span>' : '';
+  const secCls = w.security === 'Abierta' || w.security === 'WEP' ? 'ap-band-badge ri-sec-weak' : 'ap-band-badge';
+  const extra = mode === 'grouped' && w.bssidCount > 1
+    ? `<span class="ap-meta">${w.bssidCount} BSSID</span>` : '';
+  return `
+    <div class="ap-row">
+      <div class="ap-row-head">
+        <span class="ap-ssid">${ssid}${conectada}</span>
+        <span class="ap-rssi ${rssi.cls}" title="${escapeHtml(rssi.label)}">${w.signalDbm != null ? escapeHtml(String(w.signalDbm)) + ' dBm' : '—'}</span>
+        <span class="ap-meta">Canal ${escapeHtml(String(w.channel ?? '—'))} · ${escapeHtml(String(w.channelWidthMhz))} MHz</span>
+        <span class="${secCls}">${escapeHtml(w.security)}</span>
+        ${w.wps ? '<span class="ap-band-badge">WPS</span>' : ''}
+      </div>
+      <div class="ap-row-foot">
+        <span class="ap-meta-mono">${escapeHtml(w.bssid || '—')}</span>
+        <span class="ap-meta">${escapeHtml(rssi.label)}</span>
+        ${extra}
+      </div>
+    </div>`;
+}
+
+const RI_BAND_ORDER = ['2.4GHz', '5GHz', '6GHz'];
+
+function renderNearbyResult(data) {
+  const mode = _riState.nearbyMode === 'all' ? 'all' : 'grouped';
+  const list = mode === 'all' ? data.all : data.grouped;
+  const apCount = data.all.length;
+  const notices = riScanNotices(data.scanEntry, apCount);
+  const byBand = {};
+  list.forEach((w) => { const b = w.band || 'Otra'; (byBand[b] = byBand[b] || []).push(w); });
+  const bands = RI_BAND_ORDER.filter((b) => byBand[b]).concat(Object.keys(byBand).filter((b) => !RI_BAND_ORDER.includes(b)));
+  const resumen = bands.map((b) => `${riBandLabel(b)}: ${byBand[b].length}`).join(' · ');
+  const toggle = `
+    <div class="ri-toggle" role="group" aria-label="Vista de las redes">
+      <button type="button" class="ri-toggle-btn" data-mode="grouped" aria-pressed="${mode === 'grouped'}">Agrupar por SSID</button>
+      <button type="button" class="ri-toggle-btn" data-mode="all" aria-pressed="${mode === 'all'}">Ver todos los BSSID</button>
+    </div>`;
+  if (!list.length) {
+    return `${notices}${apCount ? toggle : ''}<div class="detail-empty">No se encontraron redes visibles.</div>`;
+  }
+  return `
+    ${notices}
+    <div class="ri-summary"><span class="ri-summary-text"><strong>${list.length}</strong> ${mode === 'all' ? 'BSSID' : 'redes'} · ${escapeHtml(resumen)}</span></div>
+    ${toggle}
+    ${bands.map((b) => `
+      <div class="band-section">
+        <h4 class="band-title">${escapeHtml(riBandLabel(b))} · ${byBand[b].length}</h4>
+        <div class="ap-list">${byBand[b].map((w) => renderWifiRow(w, mode)).join('')}</div>
+      </div>`).join('')}`;
+}
+
+function wireNearbyToggle(slot, data, id) {
+  slot.querySelectorAll('.ri-toggle-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const mode = btn.dataset.mode === 'all' ? 'all' : 'grouped';
+      if (mode === _riState.nearbyMode) return;
+      _riState.nearbyMode = mode;
+      riRender(id);
+      const again = slot.querySelector(`.ri-toggle-btn[data-mode="${mode}"]`);
+      if (again) again.focus();
+    });
+  });
+}
+
+// ---- Render: Dispositivos conectados ---------------------------------------
+const RI_DEVICE_TYPE_LABELS = Object.freeze({
+  Router: 'Router', 'Móvil': 'Móvil', PC: 'Computadora', AndroidTV: 'Smart TV', AppleTV: 'Apple TV',
+  Chromecast: 'Chromecast', Impresora: 'Impresora', NAS: 'Almacenamiento (NAS)', Parlante: 'Parlante',
+  'Cámara': 'Cámara', IoT: 'Dispositivo IoT',
+});
+
+const _RI_SVG = (paths) => `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${paths}</svg>`;
+const RI_DEVICE_ICONS = Object.freeze({
+  Router: _RI_SVG('<rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 16.5h.01M11 16.5h.01"/><path d="M8 9.5a6 6 0 0 1 8 0M5.5 7a9.5 9.5 0 0 1 13 0"/>'),
+  'Móvil': _RI_SVG('<rect x="7" y="2.5" width="10" height="19" rx="2"/><path d="M11 18h2"/>'),
+  PC: _RI_SVG('<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/>'),
+  AndroidTV: _RI_SVG('<rect x="2.5" y="5" width="19" height="12" rx="2"/><path d="M8 21h8"/>'),
+  AppleTV: _RI_SVG('<rect x="2.5" y="5" width="19" height="12" rx="2"/><path d="M8 21h8"/>'),
+  Chromecast: _RI_SVG('<path d="M3 17a4 4 0 0 1 4 4M3 13a8 8 0 0 1 8 8M3 9.5V7a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-4"/>'),
+  Impresora: _RI_SVG('<path d="M7 9V3h10v6"/><rect x="3" y="9" width="18" height="8" rx="2"/><rect x="7" y="14" width="10" height="7"/>'),
+  NAS: _RI_SVG('<rect x="4" y="3" width="16" height="18" rx="2"/><path d="M4 9h16M4 15h16M8 6h.01M8 12h.01M8 18h.01"/>'),
+  Parlante: _RI_SVG('<rect x="5" y="2.5" width="14" height="19" rx="2"/><circle cx="12" cy="14" r="3.5"/><path d="M12 6.5h.01"/>'),
+  'Cámara': _RI_SVG('<path d="M15 10l5-3v10l-5-3"/><rect x="3" y="6" width="12" height="12" rx="2"/>'),
+  IoT: _RI_SVG('<rect x="7" y="7" width="10" height="10" rx="1.5"/><path d="M10 3v4M14 3v4M10 17v4M14 17v4M3 10h4M3 14h4M17 10h4M17 14h4"/>'),
+  unknown: _RI_SVG('<rect x="4" y="4" width="16" height="16" rx="3"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .8-1 1.5V14M12 17h.01"/>'),
+});
+
+function riRttPill(stat) {
+  const avg = stat && stat.avg;
+  const lvl = latencyLevel(avg);
+  const txt = avg != null ? `${_fmtNum(avg, 1)} ms` : 'sin respuesta';
+  return `<span class="ri-pill ri-${lvl.cls}" title="Latencia ${escapeHtml(lvl.label.toLowerCase())}">${escapeHtml(txt)}</span>`;
+}
+
+function renderDeviceRow(d) {
+  const type = d.deviceType;
+  const icon = RI_DEVICE_ICONS[type] || RI_DEVICE_ICONS.unknown;
+  const typeLabel = type ? (RI_DEVICE_TYPE_LABELS[type] || type) : 'Tipo desconocido';
+  const title = d.name || (type ? typeLabel : 'Equipo sin identificar');
+  const meta = [
+    `<span class="ap-meta-mono ri-ip">${escapeHtml(d.ip)}</span>`,
+    escapeHtml(typeLabel),
+    d.vendor ? escapeHtml(d.vendor) : '',
+  ].filter(Boolean).join(' · ');
+  return `
+    <div class="ap-row ri-dev">
+      <div class="ri-dev-icon">${icon}</div>
+      <div class="ri-dev-body">
+        <div class="ri-dev-head">
+          <span class="ap-ssid">${escapeHtml(title)}</span>
+          ${d.isSelf ? '<span class="ap-connected">Este teléfono</span>' : ''}
+        </div>
+        <div class="ri-dev-meta">${meta}</div>
+        ${d.mac ? `<div class="ap-meta-mono">MAC ${escapeHtml(d.mac)}</div>` : ''}
+      </div>
+      ${riRttPill(d.ping && d.ping.stat)}
+    </div>`;
+}
+
+function renderDevicesResult(data) {
+  const devs = data.devices || [];
+  const nc = data.netConfig || {};
+  const identified = devs.filter((d) => d.name || d.deviceType).length;
+  const macNote = '<p class="form-note">Android 10 o superior no permite leer la MAC de otros equipos: solo se muestra cuando el equipo la publica (NetBIOS, típicamente PCs con Windows).</p>';
+  if (!devs.length) {
+    return `${data.simulated ? riSimNotice() : ''}${macNote}<div class="detail-empty">No se encontraron equipos en la red. Verifica que el teléfono esté en la red WiFi del cliente y vuelve a escanear.</div>`;
+  }
+  return `
+    ${data.simulated ? riSimNotice() : ''}
+    <div class="status-grid">
+      <div class="status-tile"><span class="st-label">Equipos</span><span class="st-value">${devs.length}</span>
+        <span class="st-sub">${data.durationMs ? 'en ' + escapeHtml(fmtDuration(data.durationMs)) : ''}</span></div>
+      <div class="status-tile"><span class="st-label">Identificados</span><span class="st-value">${identified} de ${devs.length}</span>
+        <span class="st-sub">con nombre o tipo</span></div>
+      <div class="status-tile"><span class="st-label">Router</span><span class="st-value ri-mono">${escapeHtml(nc.gatewayIp || '—')}</span></div>
+      <div class="status-tile"><span class="st-label">Este teléfono</span><span class="st-value ri-mono">${escapeHtml(nc.deviceIp || '—')}</span></div>
+    </div>
+    <div class="ap-list ri-dev-list">${devs.map(renderDeviceRow).join('')}</div>
+    ${macNote}`;
+}
+
+// ---- Render: Latencia --------------------------------------------------------
+function renderLatencyTile(t) {
+  const s = t.stat || emptyPingStat();
+  const lvl = latencyLevel(s.avg);
+  const metodo = t.method === 'TCP' ? `TCP${t.port ? ' :' + t.port : ''}` : (t.method || '');
+  const destino = [t.host, metodo].filter(Boolean).join(' · ');
+  const value = s.avg != null ? `${_fmtNum(s.avg, 1)} ms` : 'Sin respuesta';
+  return `
+    <div class="status-tile ${RI_LEVEL_TILE[lvl.cls]}">
+      <span class="st-label">${escapeHtml(t.label)}</span>
+      <span class="st-value">${escapeHtml(value)}</span>
+      <span class="st-sub ri-mono">${escapeHtml(destino || '—')}</span>
+      ${s.avg != null ? `<span class="st-sub">mín ${escapeHtml(_fmtNum(s.min, 1))} · máx ${escapeHtml(_fmtNum(s.max, 1))} ms</span>
+      <span class="st-sub">jitter ${escapeHtml(_fmtNum(s.stddev, 1))} ms · pérdida ${escapeHtml(_fmtNum(s.packetLoss, 1))} %</span>` : ''}
+      ${t.error && s.avg == null ? `<span class="st-sub">${escapeHtml(t.error)}</span>` : ''}
+    </div>`;
+}
+
+function renderLatencyResult(data) {
+  const targets = data.targets || [];
+  const internet = data.internet;
+  const internetTile = `
+    <div class="status-tile ${internet ? RI_LEVEL_TILE[latencyLevel(internet.minMs).cls] : 'fail'}">
+      <span class="st-label">Internet (HTTP)</span>
+      <span class="st-value">${internet ? escapeHtml(_fmtNum(internet.minMs, 1)) + ' ms' : 'Sin respuesta'}</span>
+      <span class="st-sub">mínimo de 7 muestras a Cloudflare</span>
+    </div>`;
+  const series = targets
+    .filter((t) => t.stat && Array.isArray(t.stat.samples) && t.stat.samples.length)
+    .map((t, i) => ({ label: `${t.label} (${t.method || '—'})`, color: _ISP_COLORS[i % _ISP_COLORS.length],
+      points: t.stat.samples.map((v) => ({ t: null, v: Number(v) })) }));
+  const chart = series.length
+    ? renderLineChart(series, { unit: 'ms', minZero: true, ariaLabel: 'Latencia de cada muestra por destino, en milisegundos' })
+    : '<div class="detail-empty">Sin muestras para graficar.</div>';
+  const saveBtn = data.simulated
+    ? '<p class="form-note">Datos simulados: no se guardan en la visita.</p>'
+    : '<button type="button" class="save-btn" data-action="ri-save-latency">Guardar en la visita</button><div class="ri-save-status" data-slot="save-status" role="status" aria-live="polite"></div>';
+  return `
+    ${data.simulated ? riSimNotice() : ''}
+    <div class="status-grid">${targets.map(renderLatencyTile).join('')}${internetTile}</div>
+    <h4 class="band-title ri-subtitle">Muestras por destino</h4>
+    ${chart}
+    <p class="form-note">Promedio ≤ ${LATENCY_GOOD_MS} ms: buena · ≤ ${LATENCY_WARN_MS} ms: aceptable · más: alta. Jitter = desviación de las muestras. Si el ICMP no responde se mide por TCP.</p>
+    ${saveBtn}`;
+}
+
+function wireLatencySave(slot, data) {
+  const btn = slot.querySelector('[data-action="ri-save-latency"]');
+  const status = slot.querySelector('[data-slot="save-status"]');
+  if (!btn) return;
+  // Registros ya guardados de este resultado: un reintento tras una falla
+  // parcial no duplica los que sí entraron (los registros son append-only).
+  let saved = 0;
+  btn.addEventListener('click', async () => {
+    const cuenta = currentAccount();
+    if (!cuenta) {
+      if (status) status.textContent = 'Falta el número de cuenta: confírmala antes de guardar.';
+      return;
+    }
+    const payloads = buildLatencyPingPayloads(data);
+    if (!payloads.length) {
+      if (status) status.textContent = 'No hay destinos medidos para guardar.';
+      return;
+    }
+    btn.disabled = true;
+    btn.textContent = 'Guardando…';
+    try {
+      // Mismo mecanismo que el resto de pruebas: POST /ping-tests con el
+      // taskId de la visita en curso (withVisitContext lo resuelve).
+      while (saved < payloads.length) {
+        await WifixAPI.createPingTest(cuenta, payloads[saved]);
+        saved++;
+      }
+      btn.textContent = 'Guardado';
+      btn.classList.add('ok');
+      if (status) status.textContent = `${payloads.length} mediciones guardadas en la cuenta ${cuenta}.`;
+    } catch (err) {
+      console.error('[Wifix] red-interna latencia (guardar):', err);
+      btn.disabled = false;
+      btn.textContent = 'Reintentar guardado';
+      if (status) status.textContent = `No se pudo guardar: ${(err && err.message) || 'error desconocido'}.`;
+    }
+  });
+}
+
+// ============================================================================
+// Red Interna (campos 20-21) — dispositivos WiFi y cambio de SSID/contraseña
+// (simulados: integración con el router pendiente). El campo 19 (equipos LAN
+// por DHCP simulado) se reemplazó por el módulo medido Dispositivos conectados.
+// ============================================================================
 
 function renderWifiDevices(devices) {
   if (!devices || devices.length === 0) return `<div class="detail-empty">No hay dispositivos WiFi conectados.</div>`;
@@ -5947,9 +7342,17 @@ function readWifiBand(formEl, band) {
   return out;
 }
 
+// `measured: true` = módulo medido desde el teléfono (Wifix Remote); el resto
+// sigue simulado y va bajo el aviso de datos simulados.
 const RED_ITEMS = [
-  { id: 'lan',  icon: SERVICIO_ICONS.lan,  title: 'Equipos en la red local (DHCP)',
-    load: (cuenta) => WifixAPI.getLanDevices(cuenta).then(renderLanDevices) },
+  { id: 'ri-sat', measured: true, icon: SERVICIO_ICONS.metrics, title: 'Saturación de canal',
+    load: async () => riShellHtml('sat'), onMount: (body) => { riMount('sat', body); } },
+  { id: 'ri-devices', measured: true, icon: SERVICIO_ICONS.lan, title: 'Dispositivos conectados',
+    load: async () => riShellHtml('devices'), onMount: (body) => { riMount('devices', body); } },
+  { id: 'ri-nearby', measured: true, icon: SERVICIO_ICONS.wifi, title: 'Redes cercanas',
+    load: async () => riShellHtml('nearby'), onMount: (body) => { riMount('nearby', body); } },
+  { id: 'ri-latency', measured: true, icon: TOOL_ICONS.ping, title: 'Latencia',
+    load: async () => riShellHtml('latency'), onMount: (body) => { riMount('latency', body); } },
   { id: 'wifi', icon: SERVICIO_ICONS.wifi, title: 'Dispositivos WiFi por banda',
     load: (cuenta) => WifixAPI.getWifiDevices(cuenta).then(renderWifiDevices) },
   { id: 'config', icon: SERVICIO_ICONS.key, title: 'Cambiar SSID y contraseña',
@@ -5989,20 +7392,28 @@ function openRedInterna() {
     return;
   }
   redChip.textContent = cuenta;
+  // Los resultados medidos son de la visita: al cambiar de cuenta se descartan.
+  riResetForAccount(cuenta);
 
-  // Campos 19-21: equipos LAN, dispositivos WiFi y cambio de SSID todavía se
-  // sirven de datos simulados. Un solo aviso por pantalla, arriba de la lista.
-  redList.innerHTML = mockNotice() + RED_ITEMS.map(item => `
+  // Arriba, los 4 módulos medidos desde el teléfono (reales en el APK). Abajo,
+  // los campos 20-21 (dispositivos WiFi y cambio de SSID), que siguen
+  // simulados: un solo aviso, justo encima de ellos.
+  const itemHtml = (item) => `
     <div class="servicio-item" data-id="${item.id}">
-      <button class="servicio-head" type="button">
+      <button class="servicio-head" type="button" aria-expanded="false" aria-controls="red-body-${item.id}">
         <div class="servicio-icon">${item.icon}</div>
         <div class="servicio-title">${escapeHtml(item.title)}</div>
         <div class="servicio-chev">${SERVICIO_ICONS.chev}</div>
       </button>
-      <div class="servicio-body">
+      <div class="servicio-body" id="red-body-${item.id}">
         <div class="servicio-body-inner" data-slot="body"><div class="detail-loading">Toca para cargar…</div></div>
       </div>
-    </div>`).join('');
+    </div>`;
+  const medidos = RED_ITEMS.filter(item => item.measured);
+  const simulados = RED_ITEMS.filter(item => !item.measured);
+  redList.innerHTML =
+    `<h3 class="ri-group-title">Diagnóstico de la red del cliente</h3>` + medidos.map(itemHtml).join('') +
+    `<h3 class="ri-group-title ri-group-sep">Configuración del router</h3>` + mockNotice() + simulados.map(itemHtml).join('');
 
   redList.querySelectorAll('.servicio-item').forEach(node => {
     const id = node.dataset.id;
@@ -6013,6 +7424,7 @@ function openRedInterna() {
     head.addEventListener('click', async () => {
       const wasOpen = node.classList.contains('open');
       node.classList.toggle('open');
+      head.setAttribute('aria-expanded', wasOpen ? 'false' : 'true');
       if (!wasOpen && !body.dataset.loaded) {
         body.innerHTML = `<div class="detail-loading">Cargando…</div>`;
         try {

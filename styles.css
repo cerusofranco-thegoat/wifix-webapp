@@ -4690,3 +4690,213 @@ ul.nap-map-legend li { display: inline-flex; align-items: center; }
   cursor: pointer;
 }
 .link-btn:focus-visible { outline: 2px solid var(--brand-primary); outline-offset: 2px; border-radius: 4px; }
+
+/* ==========================================================================
+ * Red Interna — módulos medidos (Saturación, Dispositivos, Redes, Latencia)
+ * Portados de Wifix Remote con el sistema de diseño de Wifix Certificate.
+ * Solo tokens: ningún color nuevo fuera de :root.
+ * ========================================================================*/
+.ri-group-title {
+  margin: 4px 2px 0;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--brand-primary);
+}
+.ri-group-sep {
+  margin-top: 10px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-lavender);
+}
+.ri-module { padding-top: 10px; }
+.ri-toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+.ri-run-btn { width: 100%; }
+.ri-stamp {
+  font-size: 10.5px;
+  color: var(--text-secondary);
+  min-height: 14px;
+}
+.ri-stamp:empty { display: none; }
+
+/* Progreso (incluye el barrido de la LAN, 20-40 s) */
+.ri-progress { margin: 4px 0 10px; }
+.ri-progress[hidden] { display: none; }
+.ri-progress-track {
+  height: 8px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-tint);
+  overflow: hidden;
+  position: relative;
+}
+.ri-progress-bar {
+  height: 100%;
+  width: 0%;
+  background: var(--brand-primary);
+  transition: width 0.2s linear;
+}
+.ri-progress-bar.indeterminate {
+  width: 35%;
+  animation: ri-indeterminate 1.3s ease-in-out infinite;
+}
+@keyframes ri-indeterminate {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(290%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ri-progress-bar.indeterminate { animation: none; width: 100%; opacity: 0.5; }
+}
+.ri-progress-text {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  min-height: 16px;
+}
+
+/* Resumen + subtítulos */
+.ri-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  margin: 2px 0 8px;
+}
+.ri-summary .event-badge { margin-bottom: 0; }
+.ri-summary-text { font-size: 12px; color: var(--text-primary); }
+.ri-subtitle { margin: 14px 0 6px; }
+.ri-mono { font-family: var(--font-mono); letter-spacing: 0.2px; overflow-wrap: anywhere; }
+
+/* Gráfico de barras por canal */
+.ri-channel-chart { margin-top: 2px; }
+.ri-bar { fill: var(--chart-line-2); opacity: 0.55; }
+.ri-bar.own { fill: var(--brand-primary); opacity: 1; }
+.ri-bar-own-bg { fill: var(--surface-tint); }
+.ri-bar-value { font-weight: 700; fill: var(--text-primary); }
+.ri-axis-own { fill: var(--brand-primary); font-weight: 700; }
+.ri-axis-suggested { fill: var(--success-text); font-weight: 700; }
+.chart-legend-dot.ri-dot-own { background: var(--brand-primary); }
+.chart-legend-dot.ri-dot-other { background: var(--chart-line-2); opacity: 0.55; }
+.chart-legend-dot.ri-dot-suggested { background: var(--success-text); }
+
+/* Canales sugeridos */
+.ri-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+}
+.ri-chips-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  margin-right: 2px;
+}
+.ri-chip {
+  padding: 4px 10px;
+  border-radius: var(--radius-pill);
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--success-text);
+  background: var(--success-bg);
+  border: 1px solid var(--success-border);
+}
+.ri-chip-empty { font-size: 11.5px; color: var(--text-secondary); }
+
+/* Toggle Agrupar por SSID / Ver todos los BSSID */
+.ri-toggle {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0;
+  margin: 4px 0 10px;
+  border: 1px solid var(--brand-primary);
+  border-radius: var(--radius-btn);
+  overflow: hidden;
+}
+.ri-toggle-btn {
+  min-height: 44px;
+  padding: 6px 8px;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  color: var(--brand-primary);
+  background: var(--surface-card);
+  border: 0;
+  cursor: pointer;
+}
+.ri-toggle-btn + .ri-toggle-btn { border-left: 1px solid var(--brand-primary); }
+.ri-toggle-btn[aria-pressed="true"] {
+  color: var(--text-on-brand);
+  background: var(--brand-primary);
+}
+.ri-toggle-btn:focus-visible { outline: 2px solid var(--brand-dark); outline-offset: -3px; }
+.ri-hidden-ssid { font-style: italic; color: var(--text-secondary); font-weight: 500; }
+.ap-band-badge.ri-sec-weak {
+  color: var(--warn-text);
+  background: var(--warn-bg);
+  border-color: var(--warn-border);
+}
+
+/* Dispositivos conectados */
+.ri-dev-list { margin-top: 10px; }
+.ri-dev {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.ri-dev-icon {
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-btn);
+  color: var(--brand-primary);
+  background: var(--surface-tint);
+  border: 1px solid var(--border-lavender);
+}
+.ri-dev-body { flex: 1; min-width: 0; }
+.ri-dev-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+}
+.ri-dev-head .ap-ssid { flex: 0 1 auto; overflow-wrap: anywhere; }
+.ri-dev-meta {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+.ri-ip { font-size: 11px; color: var(--text-primary); }
+
+/* Pastilla RTT / nivel de latencia (≤30 / ≤80 / más) */
+.ri-pill {
+  flex-shrink: 0;
+  padding: 3px 8px;
+  border-radius: var(--radius-pill);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.ri-pill.ri-good { color: var(--success-text); background: var(--success-bg); border: 1px solid var(--success-border); }
+.ri-pill.ri-warn { color: var(--warn-text); background: var(--warn-bg); border: 1px solid var(--warn-border); }
+.ri-pill.ri-bad  { color: var(--error-text); background: var(--error-bg); border: 1px solid var(--error-border); }
+
+/* Latencia */
+.ri-module .status-tile .st-sub + .st-sub { margin-top: 1px; }
+.ri-module [data-action="ri-save-latency"] { width: 100%; margin-top: 12px; }
+.ri-save-status { margin-top: 6px; font-size: 12px; color: var(--text-secondary); min-height: 16px; }
+.ri-save-status:empty { display: none; }
