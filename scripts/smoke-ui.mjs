@@ -659,6 +659,22 @@ console.log('\n== NAP del cliente (visita técnica) y mapa ==');
   check('visita: muestra UNA sola tarjeta "NAP del cliente"', tarjetas === 1 && visitaHtml.includes('nap-card nap-current'), `tarjetas=${tarjetas}`);
   check('visita: puerto del cliente resaltado, status y equipo',
     visitaHtml.includes('Puerto 07') && visitaHtml.includes('Activo') && visitaHtml.includes('ZTEGD434832'));
+  {
+    const portsReal = WifixAPI.getNapPorts;
+    const pedidasV = [];
+    WifixAPI.getNapPorts = async function (ref) { pedidasV.push(String(ref)); return portsReal.call(this, ref); };
+    const panelV = { querySelector: () => null, querySelectorAll: () => [], addEventListener() {} };
+    ctx._bootNapPanel({ querySelector: (sel) => (sel === '[data-panel="nap-gpon"]' ? panelV : null), isConnected: true });
+    await new Promise((r) => setTimeout(r, 400));
+    const refV = ctx._napRef(vm.runInContext('_napPanelState.currentNap.nap', ctx));
+    check('visita: puertos de la NAP del cliente se piden solos al abrir (una vez) y quedan en caché',
+      pedidasV.length === 1 && pedidasV[0] === refV && !!panelV._napPortsCache[refV]
+      && panelV._napPortsState[refV].state === 'ok', `pedidas=${pedidasV.join(',')}`);
+    check('visita: la tarjeta trae hueco de estado de puertos y aviso de reutilizables',
+      visitaHtml.includes('data-slot="nap-ports-status"') && visitaHtml.includes('data-slot="nap-occ"')
+      && visitaHtml.includes('data-slot="nap-reuse"'));
+    WifixAPI.getNapPorts = portsReal;
+  }
   check('visita: "Cómo llegar" y "Ver puertos" en la tarjeta del cliente',
     visitaHtml.includes('data-action="nap-directions"') && visitaHtml.includes('data-action="view-ports"'));
   check('visita: sin buscador por radio ni "Cambiar NAP"',
@@ -874,6 +890,78 @@ console.log('\n== NAP del cliente (visita técnica) y mapa ==');
   check('popup del mapa: código, "x/y ocupados · n libres" y Cómo llegar',
     popup.includes('NAP-1') && popup.includes('7/8 ocupados · 1 libre') && popup.includes('nap-directions'));
   check('constante de tiles OSM', vm.runInContext('NAP_MAP_TILE_URL', ctx) === 'https://tile.openstreetmap.org/{z}/{x}/{y}.png');
+
+  // --- Carga automática de puertos (lista de Instalaciones) ----------------
+  {
+    // La búsqueda anterior (instScope) dejó su carga de puertos en segundo plano.
+    await new Promise((r) => setTimeout(r, 400));
+    const portsReal = WifixAPI.getNapPorts;
+    const pedidas = [];
+    let enVuelo = 0;
+    let maxVuelo = 0;
+    WifixAPI.getNapPorts = async function (ref) {
+      pedidas.push(String(ref));
+      enVuelo++;
+      maxVuelo = Math.max(maxVuelo, enVuelo);
+      try {
+        await new Promise((r) => setTimeout(r, 5));
+        return await portsReal.call(this, ref);
+      } finally { enVuelo--; }
+    };
+    const autoSlots = {
+      '[data-slot="nap-cards"]': fakeEl(),
+      '[data-slot="nap-map"]': fakeEl(),
+      '[data-slot="nap-degraded"]': fakeEl(),
+      '[data-slot="nap-ports-progress"]': fakeEl(),
+    };
+    const autoScope = { querySelector: (sel) => autoSlots[sel] || null, querySelectorAll: () => [] };
+    vm.runInContext('_napPanelState.coords = { latitude: -2.247946, longitude: -79.904161, accuracy: 5 }; _napPanelState.meters = 280; _napPanelState.maxRows = 5;', ctx);
+    await ctx._napFetchAndRender(autoScope);
+    const listaAuto = vm.runInContext('_napPanelState.naps', ctx);
+    const elegibles = ctx._napSortByDistance(listaAuto).filter(ctx._napPortsEligible).map((n) => ctx._napRef(n));
+    // Espera a que termine la carga en segundo plano.
+    for (let k = 0; k < 200 && (pedidas.length < elegibles.length || enVuelo > 0); k++) await new Promise((r) => setTimeout(r, 5));
+    check('puertos automáticos: una consulta por NAP, sin tocar el botón',
+      elegibles.length > 0 && pedidas.length === elegibles.length && new Set(pedidas).size === pedidas.length,
+      `pedidas=${pedidas.length} elegibles=${elegibles.length}`);
+    check('puertos automáticos: concurrencia limitada (≤ NAP_PORTS_AUTO_CONCURRENCY)',
+      maxVuelo <= vm.runInContext('NAP_PORTS_AUTO_CONCURRENCY', ctx) && maxVuelo >= 1, `max=${maxVuelo}`);
+    check('puertos automáticos: empiezan por la NAP más cercana',
+      pedidas.slice(0, 2).every((r) => elegibles.slice(0, 2).includes(r)));
+    check('puertos automáticos: estado ok por NAP y progreso final anunciado',
+      elegibles.every((r) => (autoScope._napPortsState[r] || {}).state === 'ok')
+      && /Puertos actualizados en \d+ NAP/.test(autoSlots['[data-slot="nap-ports-progress"]'].textContent));
+    check('puertos automáticos: la ocupación de la tarjeta sale de la respuesta de puertos',
+      listaAuto.filter(ctx._napPortsEligible).every((n) => {
+        const d = autoScope._napPortsCache[ctx._napRef(n)];
+        return d.detailAvailable === false || (n.occupiedPorts === d.occupiedPorts && n.totalPorts === d.totalPorts
+          && n.freePorts === Math.max(0, d.totalPorts - d.occupiedPorts));
+      }));
+    const antes = pedidas.length;
+    await ctx._napFetchAndRender(autoScope);
+    await new Promise((r) => setTimeout(r, 30));
+    check('puertos automáticos: repetir la búsqueda no vuelve a pedir NAPs ya consultadas (caché del panel)',
+      pedidas.length === antes, `nuevas=${pedidas.length - antes}`);
+    check('Ver puertos abre lo precargado (sale de la caché, sin llamada)',
+      await (async () => {
+        const r = elegibles[0];
+        const n0 = pedidas.length;
+        const d = await ctx._napPortsCached(autoScope, r);
+        return d === autoScope._napPortsCache[r] && pedidas.length === n0;
+      })());
+    check('NAP simulada de la lista: no es elegible para /naps/{ref}/ports',
+      !ctx._napPortsEligible({ napId: null, napCode: 'SIM-1', simulated: true })
+      && !ctx._napPortsEligible({ napId: 5, source: 'SIMULATED' }) && !ctx._napPortsEligible({ napId: null, napCode: '' }));
+    // Error por tarjeta: no tumba la lista y ofrece Reintentar.
+    const errScope = { querySelector: () => null, querySelectorAll: () => [] };
+    WifixAPI.getNapPorts = async () => { throw Object.assign(new Error('FSM no responde'), { code: 'UPSTREAM' }); };
+    await ctx._napAutoLoadPorts(errScope, [{ napId: 901, napCode: 'E-1', totalPorts: 8, occupiedPorts: 2 }]);
+    check('puertos automáticos: error por tarjeta con "Reintentar"',
+      errScope._napPortsState['901'].state === 'error'
+      && ctx._napPortsStatusHtml(errScope, '901').includes('data-action="nap-ports-retry"')
+      && ctx._napPortsStatusHtml(errScope, '901').includes('FSM no responde'));
+    WifixAPI.getNapPorts = portsReal;
+  }
   vm.runInContext('_napPanelState.coords = null; _napPanelState.currentNap = null; _napPanelState.currentNapError = null; _napPanelState.naps = [];', ctx);
   ctx.selectModule(catPrevia);
 }

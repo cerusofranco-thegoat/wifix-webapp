@@ -1441,16 +1441,231 @@ function _napRef(nap) {
   return nap.napId !== null && nap.napId !== undefined ? String(nap.napId) : String(nap.napCode || '');
 }
 
-// Caché de puertos por panel: expandir la NAP y luego seleccionarla para GPON
-// son dos gestos distintos sobre la MISMA NAP. Sin caché serían dos llamadas a
-// la operadora por lo mismo. Se limpia en cada búsqueda nueva de NAPs.
+// Caché de puertos por panel (scope): la carga automática, "Ver puertos" y
+// la selección GPON leen la MISMA respuesta. Vive mientras dure la pantalla
+// (cada apertura del panel crea un scope nuevo), así que repetir la búsqueda
+// con otro radio no vuelve a pedir las NAPs ya consultadas. Las consultas en
+// curso también se comparten (_napPortsInflight): tocar "Ver puertos"
+// mientras la carga automática espera no duplica la llamada.
 async function _napPortsCached(scope, napRef) {
   if (!scope._napPortsCache) scope._napPortsCache = {};
+  if (!scope._napPortsInflight) scope._napPortsInflight = {};
   if (scope._napPortsCache[napRef]) return scope._napPortsCache[napRef];
-  const data = await WifixAPI.getNapPorts(napRef);
-  _napMarkClientPort(napRef, data);
-  scope._napPortsCache[napRef] = data;
-  return data;
+  if (scope._napPortsInflight[napRef]) return scope._napPortsInflight[napRef];
+  const p = WifixAPI.getNapPorts(napRef).then((data) => {
+    _napMarkClientPort(napRef, data);
+    scope._napPortsCache[napRef] = data;
+    return data;
+  });
+  scope._napPortsInflight[napRef] = p;
+  try {
+    return await p;
+  } finally {
+    delete scope._napPortsInflight[napRef];
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Carga AUTOMÁTICA de puertos (paso 1 del campo 8: GET /naps/{ref}/ports)
+// ---------------------------------------------------------------------------
+// Al pintar la lista de NAPs (Instalaciones) o la tarjeta "NAP del cliente"
+// (Visita técnica / Migración) se piden los puertos en segundo plano, de a
+// pocas NAPs a la vez y empezando por la más cercana. Cada tarjeta se
+// actualiza sola (ocupación, color binario, reutilizables) con su propio
+// estado de carga/error; la lista nunca se bloquea.
+// No existe endpoint de lote de puertos: es una llamada por NAP.
+// Los ESTADOS de los clientes (status-batch) NO se piden aquí: la operadora
+// pidió que solo se consulten por un gesto explícito del técnico.
+const NAP_PORTS_AUTO_CONCURRENCY = 2;
+
+// ¿Se pueden pedir los puertos de esta NAP de la lista? Una NAP simulada
+// (o sin referencia) nunca llama a /naps/{ref}/ports.
+function _napPortsEligible(nap) {
+  if (!nap || !_napRef(nap)) return false;
+  return !(nap.simulated === true || nap.source === 'SIMULATED');
+}
+
+// Ordena por distancia ascendente (sin distancia, al final). Misma regla que
+// las tarjetas: la carga automática empieza por la NAP más cercana.
+function _napSortByDistance(naps) {
+  return [...(naps || [])].sort((a, b) => {
+    const da = _napDistanceToNap(a);
+    const db = _napDistanceToNap(b);
+    if (da === null && db === null) return 0;
+    if (da === null) return 1;
+    if (db === null) return -1;
+    return da - db;
+  });
+}
+
+// Vuelca el conteo de la respuesta de puertos sobre el objeto NAP (es el dato
+// más fresco). Si la operadora no da detalle por puerto (camino TEC,
+// detailAvailable:false) se respeta el conteo del listado.
+function _napApplyPortsCounts(nap, data) {
+  if (!nap || !data || data.detailAvailable === false) return;
+  const total = Number(data.totalPorts);
+  if (!Number.isFinite(total) || total <= 0) return;
+  let occ = Number(data.occupiedPorts);
+  if (!Number.isFinite(occ) && Array.isArray(data.ports)) occ = data.ports.filter(p => p && p.occupied).length;
+  if (!Number.isFinite(occ)) return;
+  nap.totalPorts = total;
+  nap.occupiedPorts = occ;
+  nap.freePorts = Math.max(0, total - occ);
+}
+
+// Estado de la carga por NAP: 'queued' | 'loading' | 'ok' | 'error'.
+function _napPortsStateOf(scope, napRef) {
+  const st = scope && scope._napPortsState ? scope._napPortsState[napRef] : null;
+  return st || null;
+}
+
+// Línea de estado de puertos de una tarjeta (cargando / en cola / error).
+function _napPortsStatusHtml(scope, napRef) {
+  const st = _napPortsStateOf(scope, napRef);
+  if (!st) return '';
+  if (st.state === 'queued') return '<span class="nap-ports-auto is-loading">Puertos en cola…</span>';
+  if (st.state === 'loading') return '<span class="nap-ports-auto is-loading">Consultando puertos…</span>';
+  if (st.state === 'error') {
+    const msg = st.error && st.error.message ? `: ${st.error.message}` : '';
+    return `<span class="nap-ports-auto is-error">No se pudieron consultar los puertos${escapeHtml(msg)}.</span>
+      <button type="button" class="link-btn nap-ports-retry" data-action="nap-ports-retry" data-nap="${escapeHtml(napRef)}"
+        aria-label="Reintentar la consulta de puertos de la NAP">Reintentar</button>`;
+  }
+  return '';
+}
+
+function _napSetPortsState(scope, napRef, state, error) {
+  if (!scope._napPortsState) scope._napPortsState = {};
+  scope._napPortsState[napRef] = { state, error: error || null };
+}
+
+// Actualiza en el lugar la(s) tarjeta(s) de una NAP: color, badge, barra de
+// ocupación, reutilizables y estado de la carga. No regenera la tarjeta (no
+// se pierde la grilla abierta ni el foco).
+function _napUpdateCardPorts(scope, napRef, nap) {
+  if (!scope || !scope.querySelectorAll) return;
+  const st = _napPortsStateOf(scope, napRef);
+  const cargando = !!st && (st.state === 'loading' || st.state === 'queued');
+  const color = _napColorClass(nap);
+  const n = _napReusablePorts(scope, napRef).length;
+  scope.querySelectorAll('.nap-card').forEach((card) => {
+    if (!card.dataset || card.dataset.nap !== napRef) return;
+    if (card.classList) {
+      ['free', 'full', 'unknown'].forEach(c => card.classList.remove('nap-state-' + c));
+      card.classList.add('nap-state-' + color);
+    }
+    if (cargando) card.setAttribute('aria-busy', 'true');
+    else card.removeAttribute('aria-busy');
+    const badge = card.querySelector('.nap-state-badge');
+    if (badge) {
+      badge.className = 'nap-state-badge ' + color;
+      badge.textContent = _napColorLabel(nap);
+    }
+    const occ = card.querySelector('[data-slot="nap-occ"]');
+    if (occ) occ.innerHTML = _napOccupancyBar(nap);
+    const note = card.querySelector('[data-slot="nap-reuse"]');
+    if (note) {
+      note.textContent = _napReuseText(n);
+      note.hidden = n === 0;
+    }
+    const status = card.querySelector('[data-slot="nap-ports-status"]');
+    if (status) status.innerHTML = _napPortsStatusHtml(scope, napRef);
+  });
+}
+
+// Pide (o toma de la caché) los puertos de UNA NAP y actualiza su tarjeta.
+// gen: generación de la búsqueda; si el técnico lanzó otra, no se pinta.
+async function _napLoadPortsForCard(scope, nap, gen) {
+  const ref = _napRef(nap);
+  _napSetPortsState(scope, ref, 'loading');
+  _napUpdateCardPorts(scope, ref, nap);
+  try {
+    const data = await _napPortsCached(scope, ref);
+    if (scope._napPortsGen !== gen) return false;
+    _napApplyPortsCounts(nap, data);
+    _napSetPortsState(scope, ref, 'ok');
+    _napUpdateCardPorts(scope, ref, nap);
+    if (_napPanelState.selectedNap === ref) _renderGponSummary(scope);
+    return true;
+  } catch (err) {
+    if (scope._napPortsGen !== gen) return false;
+    console.error('[Wifix] puertos NAP (automático)', ref, err);
+    _napSetPortsState(scope, ref, 'error', err);
+    _napUpdateCardPorts(scope, ref, nap);
+    return false;
+  }
+}
+
+// Texto del progreso (una sola región aria-live para toda la lista: evita
+// que el lector de pantalla anuncie cada tarjeta por separado).
+function _napPortsProgress(scope, txt) {
+  const el = scope && scope.querySelector ? scope.querySelector('[data-slot="nap-ports-progress"]') : null;
+  if (!el) return;
+  el.textContent = txt || '';
+  el.hidden = !txt;
+}
+
+// Lanza la carga automática de puertos de una lista de NAPs con concurrencia
+// limitada. Las ya consultadas salen de la caché sin llamar. Devuelve una
+// promesa que nunca rechaza (corre en segundo plano).
+async function _napAutoLoadPorts(scope, naps, opts = {}) {
+  if (!scope) return;
+  const gen = (scope._napPortsGen || 0) + 1;
+  scope._napPortsGen = gen;
+  const cache = scope._napPortsCache || {};
+  const elegibles = _napSortByDistance(naps).filter(_napPortsEligible);
+  // Las ya cacheadas se aplican al instante (sin llamada).
+  elegibles.forEach((n) => {
+    const ref = _napRef(n);
+    if (!cache[ref]) return;
+    _napApplyPortsCounts(n, cache[ref]);
+    _napSetPortsState(scope, ref, 'ok');
+    _napUpdateCardPorts(scope, ref, n);
+  });
+  const cola = elegibles.filter(n => !cache[_napRef(n)]);
+  if (cola.length === 0) {
+    _napPortsProgress(scope, '');
+    if (opts.onDone) opts.onDone();
+    return;
+  }
+  cola.forEach((n) => {
+    _napSetPortsState(scope, _napRef(n), 'queued');
+    _napUpdateCardPorts(scope, _napRef(n), n);
+  });
+  let hechas = 0;
+  let fallidas = 0;
+  const total = cola.length;
+  _napPortsProgress(scope, `Consultando puertos de ${total} NAP${total === 1 ? '' : 's'}…`);
+  let i = 0;
+  const worker = async () => {
+    while (i < cola.length) {
+      if (scope._napPortsGen !== gen) return;
+      const nap = cola[i++];
+      const ok = await _napLoadPortsForCard(scope, nap, gen);
+      if (scope._napPortsGen !== gen) return;
+      hechas++;
+      if (!ok) fallidas++;
+      if (hechas < total) _napPortsProgress(scope, `Consultando puertos… ${hechas}/${total}`);
+    }
+  };
+  const n = Math.min(NAP_PORTS_AUTO_CONCURRENCY, cola.length);
+  await Promise.all(Array.from({ length: n }, worker));
+  if (scope._napPortsGen !== gen) return;
+  _napPortsProgress(scope, fallidas > 0
+    ? `Puertos actualizados: ${total - fallidas} de ${total} NAP${total === 1 ? '' : 's'}; ${fallidas} con error (puedes reintentar en la tarjeta).`
+    : `Puertos actualizados en ${total} NAP${total === 1 ? '' : 's'}.`);
+  if (opts.onDone) opts.onDone();
+}
+
+// "Reintentar" de una tarjeta: vuelve a pedir SOLO esa NAP.
+async function _napRetryPorts(scope, napRef, onDone) {
+  const naps = _napUsesContractedNap()
+    ? (_napHasClientNap() ? [_napPanelState.currentNap.nap] : [])
+    : (_napPanelState.naps || []);
+  const nap = naps.find(n => _napRef(n) === napRef);
+  if (!nap || !_napPortsEligible(nap)) return;
+  const ok = await _napLoadPortsForCard(scope, nap, scope._napPortsGen);
+  if (ok && onDone) onDone();
 }
 
 // Marca en los datos de puertos cuál es el puerto del cliente de la visita
@@ -1632,14 +1847,7 @@ function _napDirectionsBtnHtml(nap) {
 function _renderNapCards(naps, scope) {
   // Orden por distancia ascendente. La API ya las devuelve ordenadas, pero se
   // reordena por si la distancia se calculó localmente (Haversine).
-  const sorted = [...naps].sort((a, b) => {
-    const da = _napDistanceToNap(a);
-    const db = _napDistanceToNap(b);
-    if (da === null && db === null) return 0;
-    if (da === null) return 1;
-    if (db === null) return -1;
-    return da - db;
-  });
+  const sorted = _napSortByDistance(naps);
 
   const slot = scope.querySelector('[data-slot="nap-cards"]');
   if (!slot) return;
@@ -1654,8 +1862,10 @@ function _renderNapCards(naps, scope) {
       : '';
     const esDelCliente = !!ref && ref === _napCurrentRef();
     const fueraRadio = _napIsOutOfInstallRadius(n);
+    const pst = _napPortsStateOf(scope, ref);
+    const ocupada = !!pst && (pst.state === 'loading' || pst.state === 'queued');
     return `
-      <div class="nap-card nap-state-${color}${isSelected ? ' nap-selected' : ''}${fueraRadio ? ' nap-out-of-radius' : ''}" data-nap="${escapeHtml(ref)}">
+      <div class="nap-card nap-state-${color}${isSelected ? ' nap-selected' : ''}${fueraRadio ? ' nap-out-of-radius' : ''}" data-nap="${escapeHtml(ref)}"${ocupada ? ' aria-busy="true"' : ''}>
         <div class="nap-head">
           ${_napNameHtml(n, ref)}
           <span class="nap-badges">
@@ -1667,7 +1877,8 @@ function _renderNapCards(naps, scope) {
         </div>
         <span class="nap-distance">${_napDistanceText(n)}</span>
         ${red}
-        ${_napOccupancyBar(n)}
+        <div class="nap-occ" data-slot="nap-occ">${_napOccupancyBar(n)}</div>
+        <div class="nap-ports-auto-slot" data-slot="nap-ports-status">${_napPortsStatusHtml(scope, ref)}</div>
         <div class="nap-reuse-note" data-slot="nap-reuse" role="status"${reutilizables ? '' : ' hidden'}>${escapeHtml(_napReuseText(reutilizables))}</div>
         <div class="nap-actions">
           <button class="add-row-btn nap-ports-btn" type="button" data-action="view-ports" data-nap="${escapeHtml(ref)}">Ver puertos</button>
@@ -1858,6 +2069,10 @@ async function _napFetchAndRender(scope) {
   const coords = _napPanelState.coords;
 
   _napRenderDegradedNote(scope, null);
+  // Búsqueda nueva: la carga automática de puertos de la anterior deja de
+  // pintar (lo que ya trajo queda en la caché del panel).
+  scope._napPortsGen = (scope._napPortsGen || 0) + 1;
+  _napPortsProgress(scope, '');
 
   if (!coords) {
     slot.innerHTML = `<div class="detail-empty">Captura tu ubicación (GPS o lat/lng manual) para buscar las NAPs del sector.</div>`;
@@ -1866,7 +2081,6 @@ async function _napFetchAndRender(scope) {
   }
 
   slot.innerHTML = `<div class="detail-loading">Buscando NAPs cercanas…</div>`;
-  scope._napPortsCache = {};
   try {
     const res = await WifixAPI.getNearbyNaps(coords, {
       meters: _napPanelState.meters,
@@ -1897,6 +2111,15 @@ async function _napFetchAndRender(scope) {
     _napRenderAllFullHint(scope);
     _wireNapCardButtons(scope, _napPanelState.naps);
     _napRenderMap(scope);
+    // Puertos de cada NAP en segundo plano (no se espera: la lista ya está).
+    const lista = _napPanelState.naps;
+    _napAutoLoadPorts(scope, lista, {
+      onDone: () => {
+        if (_napPanelState.naps !== lista) return;
+        _napRenderAllFullHint(scope);
+        _napRenderMap(scope);
+      },
+    }).catch((err) => console.error('[Wifix] carga automática de puertos', err));
   } catch (err) {
     console.error('[Wifix] NAPs cercanas', err);
     slot.innerHTML = renderPanelError(err, 'No se pudieron consultar las NAPs.');
@@ -1917,7 +2140,11 @@ function _napEmptyText() {
 // sugiere el rango extendido. Se antepone a las tarjetas (no las oculta).
 function _napRenderAllFullHint(scope) {
   const slot = scope.querySelector('[data-slot="nap-cards"]');
-  if (!slot || _napPanelState.meters >= NAP_EXTENDED_RADIUS_M) return;
+  if (!slot) return;
+  // Se recalcula tras la carga de puertos: primero se quita el aviso previo.
+  const previo = slot.querySelector ? slot.querySelector('.nap-radius-hint') : null;
+  if (previo && previo.remove) previo.remove();
+  if (_napPanelState.meters >= NAP_EXTENDED_RADIUS_M) return;
   const naps = _napPanelState.naps || [];
   if (!naps.length || !naps.every(n => _napColorClass(n) === 'full')) return;
   slot.insertAdjacentHTML('afterbegin',
@@ -2055,6 +2282,15 @@ function _wireNapPanel(scope) {
     const foco = t.closest('[data-action="nap-focus"]');
     if (foco) {
       _napMapFocus(foco.dataset.nap, true);
+      return;
+    }
+    const retryPorts = t.closest('[data-action="nap-ports-retry"]');
+    if (retryPorts) {
+      ev.stopPropagation();
+      _napRetryPorts(scope, retryPorts.dataset.nap, () => {
+        _napRenderAllFullHint(scope);
+        _napRenderMap(scope);
+      });
       return;
     }
     // Tap en la zona "neutra" de la tarjeta (no en botones ni en la grilla).
@@ -2210,7 +2446,9 @@ function _renderCurrentNapCard() {
         </span>
       </div>
       ${red}
-      ${_napOccupancyBar(n)}
+      <div class="nap-occ" data-slot="nap-occ">${_napOccupancyBar(n)}</div>
+      ${_napCanLoadPorts(cur) ? `<div class="nap-ports-auto-slot" data-slot="nap-ports-status"></div>
+      <div class="nap-reuse-note" data-slot="nap-reuse" role="status" hidden></div>` : ''}
       ${puerto}
       <div class="nap-client-meta">
         <span class="nap-client-status ${escapeHtml(grupo.tile)}">
@@ -3067,6 +3305,7 @@ function renderNapPanel() {
       <div class="nap-section-title">NAP del cliente</div>
       <p class="nap-contracted-hint">NAP contratada asignada al cliente: no hace falta buscar NAPs cercanas.</p>
       <div data-slot="nap-map" class="nap-map-slot"></div>
+      <p class="nap-ports-progress" data-slot="nap-ports-progress" role="status" aria-live="polite" hidden></p>
       <div data-slot="nap-current">${_renderCurrentNapCard()}</div>
     </div>`;
   }
@@ -3156,6 +3395,7 @@ function renderNapPanel() {
       <div data-slot="nap-map" class="nap-map-slot"></div>
       <div class="nap-section-title">NAPs disponibles en el sector</div>
       <div data-slot="nap-degraded" hidden></div>
+      <p class="nap-ports-progress" data-slot="nap-ports-progress" role="status" aria-live="polite" hidden></p>
       <div data-slot="nap-cards">
         <div class="detail-empty">${usandoDomicilio
           ? 'Toca «Buscar NAPs» para consultar el sector de la coordenada del domicilio.'
@@ -3248,6 +3488,12 @@ function _bootNapPanel(body) {
   if (_napUsesContractedNap()) {
     _wireNapContractedPanel(panel, body);
     _napRenderMap(panel);
+    // Puertos de la NAP del cliente en segundo plano. NAP simulada: nada que
+    // pedir (ya muestra usados/total simulados en la tarjeta).
+    if (_napHasClientNap() && _napCanLoadPorts(_napPanelState.currentNap)) {
+      _napAutoLoadPorts(panel, [_napPanelState.currentNap.nap], { onDone: () => _napRenderMap(panel) })
+        .catch((err) => console.error('[Wifix] carga automática de puertos', err));
+    }
     return;
   }
   _wireNapPanel(panel);
@@ -3278,6 +3524,12 @@ function _wireNapContractedPanel(panel, body) {
     const retry = t.closest('[data-action="nap-current-retry"]');
     if (retry) {
       _napRetryCurrent(body, retry);
+      return;
+    }
+    const retryPorts = t.closest('[data-action="nap-ports-retry"]');
+    if (retryPorts) {
+      ev.stopPropagation();
+      _napRetryPorts(panel, retryPorts.dataset.nap, () => _napRenderMap(panel));
       return;
     }
     const foco = t.closest('[data-action="nap-focus"]');

@@ -3151,6 +3151,45 @@ body.console-fullscreen-open { overflow: hidden; }
 }
 .nap-reuse-note[hidden] { display: none; }
 
+/* ---- Carga automática de puertos (estado por tarjeta + progreso) --------*/
+.nap-ports-auto-slot:empty { display: none; }
+.nap-ports-auto-slot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 2px 0 4px;
+}
+.nap-ports-auto {
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--text-secondary);
+}
+.nap-ports-auto.is-loading::before {
+  content: '';
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  margin-right: 6px;
+  vertical-align: -1px;
+  border: 2px solid var(--gray-200);
+  border-top-color: var(--brand-primary);
+  border-radius: 50%;
+  animation: nap-ports-spin 0.9s linear infinite;
+}
+.nap-ports-auto.is-error { color: var(--error-text); font-weight: 600; }
+.nap-ports-retry { min-height: 44px; padding: 0 6px; font-size: 12px; }
+@keyframes nap-ports-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .nap-ports-auto.is-loading::before { animation: none; }
+}
+.nap-ports-progress {
+  margin: 0 0 6px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+.nap-ports-progress[hidden] { display: none; }
+
 /* ---- Selector de puerto para GPON (libres + cancelados) ----------------*/
 .nap-port-picker {
   border: 0;
