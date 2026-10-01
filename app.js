@@ -43,8 +43,9 @@ const backFromRed = document.getElementById('backFromRed');
 //   null = todos. Si la tarjeta 'servicio' no está en cards, no se usa.
 // Instalaciones y Migraciones comparten secciones: en la migración el técnico
 // instala lo nuevo y retira el equipo anterior (Equipos Retirados es clave).
+// 'equipo' = Equipo a instalar (validación de capacidad vs plan contratado).
 const INSTALL_SECTIONS = Object.freeze({
-  cards: Object.freeze(['personales', 'servicio', 'herramientas', 'retirados']),
+  cards: Object.freeze(['personales', 'servicio', 'equipo', 'herramientas', 'retirados']),
   servicio: Object.freeze(['naps', 'events']),
 });
 
@@ -59,7 +60,7 @@ const MODULES = {
   },
   visitas: {
     eyebrow: 'Categoría', title: 'Visitas técnicas', label: 'Visita técnica',
-    cards: ['personales', 'servicio', 'red', 'herramientas', 'retirados'],
+    cards: ['personales', 'servicio', 'equipo', 'red', 'herramientas', 'retirados'],
     servicio: null,
   },
   cancelaciones: {
@@ -340,6 +341,9 @@ function invalidateAccountCache() {
   clearWhitelistLine();
   accountInput.removeAttribute('aria-invalid');
   accountInput.removeAttribute('aria-describedby');
+  // Sin cuenta confirmada no se muestra estado de equipo (el estado por
+  // cuenta se conserva: al reconfirmar la misma cuenta el bloqueo vuelve).
+  devRefreshIndicators();
 }
 
 function clearWhitelistLine() {
@@ -629,6 +633,9 @@ async function confirmAccountFlow() {
       const subGrid = subscreen.querySelector('.sub-grid');
       if (subGrid) subGrid.classList.add('account-confirmed');
       enableSubCards();
+      devRefreshIndicators();
+      // Bloqueo vigente del servidor (no se esquiva reconfirmando ni recargando).
+      devSyncFromServer(cuenta, category);
 
       confirmAccountFeedback.textContent = `Cuenta confirmada — ${profileDisplayName(profile)}`;
       confirmAccountFeedback.className = 'confirm-account-feedback success';
@@ -821,6 +828,8 @@ function confirmAccountInLimitedMode(cuenta, err) {
     subGrid.classList.add('account-limited');
   }
   enableSubCards();
+  devRefreshIndicators();
+  devSyncFromServer(cuenta, currentCategory);
 
   confirmAccountFeedback.textContent =
     `Cuenta ${cuenta} — modo limitado: los datos de la operadora no están disponibles.`;
@@ -841,6 +850,7 @@ subCards.forEach(card => {
     if (!moduleHasCard(sub)) return;
     if (sub === 'personales') openDatosPersonales();
     if (sub === 'servicio') openDatosServicio();
+    if (sub === 'equipo') openEquipo();
     if (sub === 'red') openRedInterna();
     if (sub === 'herramientas') openHerramientas();
     if (sub === 'retirados') openRetirados();
@@ -5272,15 +5282,7 @@ function _bootIspPanel(body, cuenta) {
         photoBtn.disabled = true;
         setFeedback('');
         try {
-          const base64 = await new Promise((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onload = () => {
-              const result = reader.result;
-              resolve(typeof result === 'string' ? result.split(',').pop() : '');
-            };
-            reader.onerror = reject;
-            reader.readAsDataURL(file);
-          });
+          const base64 = await readFileAsBase64(file);
           await readLabelFromBase64(base64);
         } catch (err) {
           console.error('[Wifix] isp OCR desde archivo', err);
@@ -5513,6 +5515,28 @@ function _recRetiredHtml(e) {
     </li>`;
 }
 
+const _REC_DEVICE_RESULT = Object.freeze({
+  ok: { cls: 'badge-resolved', text: 'Apto' },
+  blocked: { cls: 'badge-fail', text: 'Bloqueado' },
+  unknown_plan: { cls: 'badge-pending', text: 'Sin plan' },
+});
+
+/** Validación de equipo vs plan (registro por visita `deviceValidations`). */
+function _recDeviceValidationHtml(v) {
+  const r = _REC_DEVICE_RESULT[v.result] || { cls: 'badge-neutral', text: v.result || '—' };
+  const modelo = v.device ? (v.device.displayName || v.device.model) : v.model;
+  const plan = v.planMbps ? `plan ${escapeHtml(String(v.planMbps))} Mbps${v.planSource === 'simulated' ? ' (simulado)' : ''}` : 'plan sin dato';
+  const tecnico = v.technician && (v.technician.name || v.technician.email);
+  return `
+    <li class="rec-item">
+      <div class="rec-head"><span class="rec-title">Validación de equipo</span>
+        <span class="event-badge ${r.cls}">${escapeHtml(r.text)}</span></div>
+      <div class="rec-values">${modelo ? escapeHtml(modelo) + ' · ' : ''}Serial <strong class="mono">${escapeHtml(v.serial || '—')}</strong> · ${plan}</div>
+      ${v.result === 'blocked' && v.message ? `<div class="rec-values">${escapeHtml(v.message)}</div>` : ''}
+      <div class="rec-meta">${_recordWhen(v, 'createdAt')}${tecnico ? ` · ${escapeHtml(tecnico)}` : ''}${_recordLinkHint(v)}</div>
+    </li>`;
+}
+
 /** Checklist (✓/✗ con texto, incluye 'clientLocation') + los datos de cada prueba. */
 function renderVisitRecords(records) {
   if (!records) return '';
@@ -5532,6 +5556,7 @@ function renderVisitRecords(records) {
     ...arr('distanceMeasurements').map(_recDistanceHtml),
     ...arr('clientLocations').map(_recClientLocationHtml),
     ...arr('retiredEquipment').map(_recRetiredHtml),
+    ...arr('deviceValidations').map(_recDeviceValidationHtml),
   ].join('');
   const vinculo = VISIT_LINKED_BY_TEXT[records.linkedBy] || '';
   return `
@@ -8603,16 +8628,7 @@ async function openRetirados() {
         ocrBtn.textContent = 'Procesando foto...';
 
         try {
-          const base64 = await new Promise((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onload = () => {
-              // Quitar prefijo "data:image/...;base64," si lo hay
-              const result = reader.result;
-              resolve(typeof result === 'string' ? result.split(',').pop() : '');
-            };
-            reader.onerror = reject;
-            reader.readAsDataURL(file);
-          });
+          const base64 = await readFileAsBase64(file);
 
           const lines = await window.WifixNative.serialScanner.ocrFromImageBase64(base64);
           if (!lines || lines.length === 0) {
@@ -8703,4 +8719,932 @@ async function openRetirados() {
 
   detailRetirados.classList.add('open');
   detailRetirados.setAttribute('aria-hidden', 'false');
+}
+
+// ============================================================================
+// Equipo a instalar — Validación de capacidad vs plan contratado
+// ----------------------------------------------------------------------------
+// Instalaciones, Migraciones y Visita técnica. El técnico escanea la etiqueta
+// del equipo que va a instalar (mismo escáner que Equipos Retirados: ML Kit
+// barcode + OCR, serial editable), confirma el modelo exacto del catálogo y se
+// compara el plan contratado con la capacidad Ethernet/WiFi del equipo.
+//
+//   ok           → verde, módulo completado.
+//   unknown_plan → ámbar, no bloquea (el backend deja la alerta "sin plan").
+//   blocked      → alerta roja con el mensaje del servidor. El flujo de la
+//                  categoría queda BLOQUEADO para esa cuenta: ningún registro
+//                  de la visita se guarda (guardia en WifixAPI, ver
+//                  deviceRecordGuard) hasta validar otro equipo apto. Única
+//                  acción en el módulo: "Escanear otro equipo".
+//
+// La regla vive una sola vez en api.js (WifixAPI.evaluateDeviceCapacity) y se
+// usa acá solo como vista previa: el veredicto del servidor manda.
+// ============================================================================
+
+const DEVICE_MODULES = Object.freeze(['instalaciones', 'migraciones', 'visitas']);
+/** Una validación del servidor más vieja que esto no condiciona la visita de hoy. */
+const DEVICE_SYNC_MAX_AGE_MS = 12 * 3600000;
+const DEVICE_CATALOG_TTL_MS = 15 * 60 * 1000;
+const DEVICE_OTHER_MODEL = '__other__';
+/** Mensaje corto de la guardia: se muestra en el botón de guardar que se intentó usar. */
+const DEVICE_BLOCK_GUARD_MSG = 'Bloqueado: el equipo a instalar no soporta el plan. Escanea otro equipo en «Equipo a instalar».';
+
+/**
+ * Prefijos de serial que el contrato da como pista de marca, además de los del
+ * catálogo. Las ONT Huawei a veces traen el serial en hex: 48575443 = "HWTC".
+ */
+const DEVICE_SERIAL_PREFIX_ALIASES = Object.freeze({ '48575443': 'HWTC' });
+
+const detailEquipo = document.getElementById('detailEquipo');
+const equipoChip = document.getElementById('equipoChip');
+const equipoBody = document.getElementById('equipoBody');
+const backFromEquipo = document.getElementById('backFromEquipo');
+
+/** Estado de la validación por categoría+cuenta: { status, validation, at }. */
+const _devStates = new Map();
+let _devCatalog = { items: null, at: 0, promise: null };
+/** Borrador de la pantalla abierta (serial, modelo, plan, envío). */
+let _dev = null;
+
+function devUsesModule(category = currentCategory) {
+  return DEVICE_MODULES.includes(category);
+}
+
+function devKey(account, category) {
+  return `${category}|${String(account || '').trim()}`;
+}
+
+function devStateFor(account, category = currentCategory) {
+  return _devStates.get(devKey(account, category)) || null;
+}
+
+function devStatusFromResult(result) {
+  if (result === 'ok') return 'ok';
+  if (result === 'blocked') return 'blocked';
+  if (result === 'unknown_plan') return 'unknown_plan';
+  return null;
+}
+
+/** Guarda el veredicto (respuesta del POST o del historial) y repinta indicadores. */
+function devApplyValidation(account, category, validation) {
+  const status = devStatusFromResult(validation && validation.result);
+  if (!status || !account) return null;
+  const at = Date.parse(validation.createdAt) || Date.now();
+  const st = { status, validation, at };
+  _devStates.set(devKey(account, category), st);
+  devRefreshIndicators();
+  return st;
+}
+
+/**
+ * Guardia de registros de la visita (WifixAPI.setRecordGuard). Devuelve el
+ * mensaje de bloqueo o null. Se evalúa con la categoría abierta: en
+ * Cancelaciones no hay equipo a instalar y nunca bloquea.
+ */
+function deviceRecordGuard(accountNumber) {
+  if (!devUsesModule()) return null;
+  const st = devStateFor(accountNumber);
+  return st && st.status === 'blocked' ? DEVICE_BLOCK_GUARD_MSG : null;
+}
+WifixAPI.setRecordGuard(deviceRecordGuard);
+
+/**
+ * Última validación vigente de la categoría en el historial de la cuenta.
+ * Pura. Si el item no trae `category` se acepta (supuesto: el backend la
+ * devuelve; si no, manda la más reciente). Solo cuenta lo de las últimas 12 h.
+ */
+function devLatestFromHistory(items, category, now = Date.now()) {
+  const list = (Array.isArray(items) ? items : [])
+    .filter((v) => v && devStatusFromResult(v.result))
+    .filter((v) => !v.category || v.category === category)
+    .map((v) => ({ v, t: Date.parse(v.createdAt) }))
+    .filter((x) => Number.isFinite(x.t) && now - x.t <= DEVICE_SYNC_MAX_AGE_MS)
+    .sort((a, b) => b.t - a.t);
+  return list.length ? list[0].v : null;
+}
+
+/**
+ * Trae del servidor el estado vigente: un bloqueo no se esquiva recargando la
+ * app ni reconfirmando la cuenta. No pisa un veredicto local más reciente.
+ */
+async function devSyncFromServer(account, category = currentCategory) {
+  if (!account || !devUsesModule(category)) return null;
+  let res;
+  try {
+    res = await WifixAPI.listDeviceValidations(account);
+  } catch (err) {
+    console.warn('[Wifix] historial de validación de equipo:', err);
+    return null;
+  }
+  const latest = devLatestFromHistory(res && res.items, category);
+  if (!latest) return null;
+  const local = devStateFor(account, category);
+  const t = Date.parse(latest.createdAt) || 0;
+  if (local && local.at >= t) return local;
+  const st = devApplyValidation(account, category, latest);
+  if (_dev && _dev.account === account && _dev.category === category && detailEquipo &&
+      detailEquipo.classList.contains('open')) {
+    devRender();
+  }
+  return st;
+}
+
+// --- Catálogo -----------------------------------------------------------------
+function devLoadCatalog(force) {
+  const c = _devCatalog;
+  if (!force && c.items && Date.now() - c.at < DEVICE_CATALOG_TTL_MS) return Promise.resolve(c.items);
+  if (!force && c.promise) return c.promise;
+  const promise = WifixAPI.getDeviceCatalog()
+    .then((r) => {
+      const items = r && Array.isArray(r.items) ? r.items.filter((d) => d && d.model) : [];
+      _devCatalog = { items, at: Date.now(), promise: null };
+      return items;
+    })
+    .catch((err) => {
+      _devCatalog = Object.assign({}, _devCatalog, { promise: null });
+      throw err;
+    });
+  _devCatalog = Object.assign({}, c, { promise });
+  return promise;
+}
+
+// --- Lógica pura: serial, marca y modelo ---------------------------------------
+function devNormalize(s) {
+  return String(s ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+}
+
+/**
+ * Códigos que identifican el modelo en la etiqueta: tokens con letras y
+ * dígitos ('F670L', 'HG8145X6', 'F8605P', 'B2000', 'AX3') más el par
+ * adyacente ('ZXHNF670L', 'HUR2001'). Se descartan versiones ('V9') y
+ * genéricos ('WIFI 6').
+ */
+function devModelTokens(item) {
+  const raw = `${item.model || ''} ${item.displayName || ''}`.toUpperCase()
+    .split(/[\s\-()/,.]+/).filter(Boolean);
+  const useful = (t) => t.length >= 3 && /[A-Z]/.test(t) && /\d/.test(t) && !/^V\d+$/.test(t) && !/^WIFI\d*$/.test(t);
+  const out = new Set();
+  raw.forEach((t, i) => {
+    const n = devNormalize(t);
+    if (useful(n)) out.add(n);
+    if (i + 1 < raw.length) {
+      const pair = devNormalize(t + raw[i + 1]);
+      if (pair.length >= 5 && useful(pair) && !/^WIFI/.test(devNormalize(raw[i + 1]))) out.add(pair);
+    }
+  });
+  return [...out];
+}
+
+/**
+ * Modelos cuyo código aparece en el texto leído (OCR o códigos). Devuelve
+ * [{ model, score }] por puntaje: el token más largo que coincide gana, así
+ * 'F6600P' le gana a 'F6600' y éste a 'F660'.
+ */
+function devMatchModelsFromText(lines, catalog) {
+  const text = (Array.isArray(lines) ? lines : []).map(devNormalize).filter(Boolean).join('|');
+  if (!text) return [];
+  return (catalog || [])
+    .map((item) => {
+      const score = devModelTokens(item).reduce((best, tok) => (text.includes(tok) && tok.length > best ? tok.length : best), 0);
+      return { model: item.model, score };
+    })
+    .filter((m) => m.score > 0)
+    .sort((a, b) => b.score - a.score);
+}
+
+/** Modelo a preseleccionar: solo si la mejor coincidencia es única. */
+function devPreselectModel(matches) {
+  if (!matches || !matches.length) return null;
+  if (matches.length > 1 && matches[1].score === matches[0].score) return null;
+  return matches[0].model;
+}
+
+/** Prefijo del serial reconocido en el catálogo (o null). */
+function devSerialPrefix(serial, catalog) {
+  let s = devNormalize(serial);
+  if (!s) return null;
+  for (const [hex, alias] of Object.entries(DEVICE_SERIAL_PREFIX_ALIASES)) {
+    if (s.startsWith(hex)) s = alias + s.slice(hex.length);
+  }
+  const prefixes = new Set();
+  (catalog || []).forEach((d) => (d.serialPrefixes || []).forEach((p) => prefixes.add(devNormalize(p))));
+  const hit = [...prefixes].filter((p) => p && s.startsWith(p)).sort((a, b) => b.length - a.length);
+  return hit[0] || null;
+}
+
+/** Equipos del catálogo cuya marca coincide con el prefijo del serial. */
+function devModelsForPrefix(prefix, catalog) {
+  if (!prefix) return [];
+  return (catalog || []).filter((d) => (d.serialPrefixes || []).some((p) => devNormalize(p) === prefix));
+}
+
+/**
+ * Lista corta: primero lo leído en la etiqueta (por puntaje), luego la marca
+ * del prefijo. Vacía = no hay pista (la UI muestra todos).
+ */
+function devShortlist(catalog, serial, textMatches) {
+  const byModel = new Map((catalog || []).map((d) => [d.model, d]));
+  const out = [];
+  const seen = new Set();
+  (textMatches || []).forEach((m) => {
+    const d = byModel.get(m.model);
+    if (d && !seen.has(d.model)) { seen.add(d.model); out.push(d); }
+  });
+  devModelsForPrefix(devSerialPrefix(serial, catalog), catalog).forEach((d) => {
+    if (!seen.has(d.model)) { seen.add(d.model); out.push(d); }
+  });
+  return out;
+}
+
+/**
+ * Serial a partir de lo leído (códigos de barras o líneas de OCR). Reutiliza la
+ * limpieza de Equipos Retirados (extractSerial: rótulos SN/GPON SN/D-SN fuera).
+ * Prioriza el candidato con prefijo del catálogo o patrón distintivo conocido;
+ * si no hay, mejor esfuerzo marcado para verificar. Nunca propone como serial
+ * un texto que es el nombre del modelo.
+ */
+function devPickSerial(rawValues, catalog) {
+  const raw = (Array.isArray(rawValues) ? rawValues : []).map((v) => String(v ?? '')).filter(Boolean);
+  if (!raw.length) return { serial: '', confidence: 'none', candidates: [] };
+  const base = extractSerial(raw, '');
+  const modelTokens = new Set((catalog || []).flatMap(devModelTokens).filter((t) => t.length >= 4));
+  const looksLikeModel = (c) => [...modelTokens].some((t) => c.includes(t));
+  const cleaned = [...new Set(base.cleaned.map(devNormalize))].filter((c) => c.length >= 8 && c.length <= 20 && !looksLikeModel(c));
+  const distinctive = Object.keys(SERIAL_PATTERNS).filter(isDistinctivePattern).map((n) => SERIAL_PATTERNS[n].re);
+  const strong = cleaned.filter((c) => devSerialPrefix(c, catalog) || distinctive.some((re) => re.test(c)));
+  if (strong.length) return { serial: strong[0], confidence: 'ok', candidates: strong.slice(0, 5) };
+  const weak = (base.candidates || []).map(devNormalize).filter((c) => c.length >= 4 && !looksLikeModel(c));
+  if (weak.length) return { serial: weak[0], confidence: 'warn', candidates: weak.slice(0, 5) };
+  return { serial: '', confidence: 'none', candidates: [] };
+}
+
+/** Plan contratado del perfil: { mbps, simulated } (mbps null = sin dato). */
+function devPlanFromProfile(profile) {
+  const n = profile ? Number(profile.contractedDownloadMbps) : NaN;
+  const mbps = Number.isFinite(n) && n > 0 ? n : null;
+  const simulated = !!(profile && profile.sources && profile.sources.contractedDownloadMbps === 'MOCK');
+  return { mbps, simulated };
+}
+
+/** Vista previa con la misma regla del servidor. */
+function evaluateDeviceCapacity(device, planMbps) {
+  return WifixAPI.evaluateDeviceCapacity(device, planMbps);
+}
+
+/** Cuerpo del POST /accounts/:n/device-validations (taskId lo agrega api.js). */
+function buildDeviceValidationPayload(dev) {
+  const serial = devNormalize(dev && dev.serial);
+  const model = dev && dev.model === DEVICE_OTHER_MODEL
+    ? String(dev.otherModel || '').trim()
+    : String((dev && dev.model) || '').trim();
+  if (serial.length < 4 || !model || !devUsesModule(dev && dev.category)) return null;
+  const body = { serial, model, category: dev.category };
+  if (['barcode', 'ocr', 'manual'].includes(dev.serialSource)) body.serialSource = dev.serialSource;
+  return body;
+}
+
+// --- Captura de etiqueta (compartida con Equipos Retirados e ISP Monitor) -------
+/** Lee un File de imagen como base64 puro (sin el prefijo dataURL). */
+function readFileAsBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result;
+      resolve(typeof result === 'string' ? result.split(',').pop() : '');
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+// --- Indicadores fuera del módulo (tarjeta + banner del menú) -----------------
+const DEVICE_STATUS_TEXT = Object.freeze({
+  ok: 'Validado',
+  unknown_plan: 'Validado con aviso',
+  blocked: 'Bloqueado',
+});
+
+// Se llama también al cargar app.js (invalidateAccountCache), antes de que se
+// declaren las constantes de esta sección: por eso busca el banner en el DOM
+// y no toca el estado si no hay cuenta confirmada.
+function devRefreshIndicators() {
+  const deviceBlockBanner = document.getElementById('deviceBlockBanner');
+  const account = validatedAccount || '';
+  const st = account && devUsesModule() ? devStateFor(account) : null;
+  const pill = subscreen.querySelector('[data-slot="equipo-status"]');
+  if (pill) {
+    if (st) {
+      pill.textContent = DEVICE_STATUS_TEXT[st.status];
+      pill.className = `sub-card-status is-${st.status}`;
+      pill.hidden = false;
+    } else {
+      pill.textContent = '';
+      pill.className = 'sub-card-status';
+      pill.hidden = true;
+    }
+  }
+  if (!deviceBlockBanner) return;
+  if (st && st.status === 'blocked') {
+    const v = st.validation || {};
+    deviceBlockBanner.innerHTML = `
+      <p class="device-block-banner-title">Flujo bloqueado: equipo no apto para el plan</p>
+      <p class="device-block-banner-text">${escapeHtml(v.serial ? `Equipo ${v.serial}${v.model ? ` (${v.model})` : ''}. ` : '')}No se pueden guardar registros en ${escapeHtml(moduleLabel())} hasta validar otro equipo apto.</p>
+      <button type="button" class="save-btn device-block-banner-btn" data-action="open-equipo">Escanear otro equipo</button>`;
+    deviceBlockBanner.hidden = false;
+    const btn = deviceBlockBanner.querySelector('[data-action="open-equipo"]');
+    if (btn) btn.addEventListener('click', () => openEquipo());
+  } else {
+    deviceBlockBanner.innerHTML = '';
+    deviceBlockBanner.hidden = true;
+  }
+}
+
+// --- Render -------------------------------------------------------------------
+function devFmtMbps(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? `${n.toLocaleString('es-EC')} Mbps` : '—';
+}
+
+function devWifiText(d) {
+  if (!d) return '—';
+  if (d.wifiStatus === 'none') return 'Sin WiFi';
+  if (d.wifiStatus === 'disabled') return `${devFmtMbps(d.wifiMaxMbps)} (desactivado)`;
+  return devFmtMbps(d.wifiMaxMbps);
+}
+
+function devSimBadge() {
+  return ' <span class="source-badge" title="Dato simulado: la operadora todavía no expone el plan">simulado</span>';
+}
+
+function devCurrentModels(dev) {
+  const catalog = (dev && dev.catalog) || [];
+  const short = devShortlist(catalog, dev.serial, dev.textMatches);
+  const showAll = dev.showAll || short.length === 0;
+  const list = showAll ? catalog.slice() : short.slice();
+  const sel = catalog.find((d) => d.model === dev.model);
+  if (sel && !list.includes(sel)) list.unshift(sel);
+  return { list, short, showAll };
+}
+
+function devSelectedDevice(dev) {
+  if (!dev || !dev.model || dev.model === DEVICE_OTHER_MODEL) return null;
+  return (dev.catalog || []).find((d) => d.model === dev.model) || null;
+}
+
+function devModelsHtml(dev) {
+  if (dev.catalogError) {
+    return `<div class="detail-error" role="alert">${escapeHtml(dev.catalogError)}
+      <button type="button" class="save-btn outline dev-retry-btn" data-action="dev-retry-catalog">Reintentar</button></div>`;
+  }
+  if (!dev.catalog) return '<div class="detail-loading" role="status">Cargando catálogo de equipos…</div>';
+  const { list, short, showAll } = devCurrentModels(dev);
+  const suggested = new Set((dev.textMatches || []).map((m) => m.model));
+  const prefix = devSerialPrefix(dev.serial, dev.catalog);
+  let hint;
+  if (!dev.catalog.length) {
+    hint = 'El catálogo de equipos homologados está vacío: indica el modelo de la etiqueta.';
+  } else if (short.length && !showAll) {
+    hint = prefix
+      ? `Modelos de la marca del serial (${escapeHtml(prefix)}…). Elige el modelo exacto de la etiqueta.`
+      : 'Modelos leídos en la etiqueta. Confirma el modelo exacto.';
+  } else if (devNormalize(dev.serial).length >= 4 && !short.length) {
+    hint = 'El serial no permite reconocer la marca: elige el modelo exacto entre todos.';
+  } else {
+    hint = 'Elige el modelo exacto que figura en la etiqueta del equipo.';
+  }
+  const option = (d) => {
+    const checked = dev.model === d.model;
+    return `
+      <label class="dev-model-option${checked ? ' is-selected' : ''}">
+        <input type="radio" name="devModel" value="${escapeHtml(d.model)}"${checked ? ' checked' : ''}>
+        <span class="dev-model-text">
+          <span class="dev-model-name">${escapeHtml(d.displayName || d.model)}</span>
+          <span class="dev-model-meta">${escapeHtml(d.brand || '—')} · ${escapeHtml(d.category || d.deviceType || '')}</span>
+          <span class="dev-model-meta">Ethernet ${escapeHtml(devFmtMbps(d.ethernetMaxMbps))} · ${d.wifiStatus === 'none' ? 'Sin WiFi' : `WiFi ${escapeHtml(devWifiText(d))}`}</span>
+        </span>
+        ${suggested.has(d.model) ? '<span class="dev-model-tag">Leído en la etiqueta</span>' : ''}
+      </label>`;
+  };
+  const other = dev.model === DEVICE_OTHER_MODEL;
+  return `
+    <fieldset class="dev-models">
+      <legend class="form-label">Modelo exacto del equipo *</legend>
+      <p class="form-note dev-models-hint">${hint}</p>
+      <div class="dev-model-list">${list.map(option).join('')}
+        <label class="dev-model-option dev-model-other${other ? ' is-selected' : ''}">
+          <input type="radio" name="devModel" value="${DEVICE_OTHER_MODEL}"${other ? ' checked' : ''}>
+          <span class="dev-model-text"><span class="dev-model-name">El modelo no está en la lista</span>
+            <span class="dev-model-meta">Equipo no homologado: se registrará y quedará bloqueado</span></span>
+        </label>
+      </div>
+      ${other ? `
+      <label class="form-row dev-other-row">
+        <span class="form-label">Modelo según la etiqueta *</span>
+        <input type="text" data-field="devOtherModel" value="${escapeHtml(dev.otherModel || '')}"
+          autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="80" placeholder="Ej. ROUTER TP-LINK ARCHER C6">
+      </label>` : ''}
+      ${!showAll && short.length < dev.catalog.length ? `
+      <button type="button" class="save-btn outline dev-show-all" data-action="dev-show-all"
+        aria-label="Ver todos los modelos del catálogo (${dev.catalog.length})">Ver todos los modelos (${dev.catalog.length})</button>` : ''}
+    </fieldset>`;
+}
+
+/** Tiles plan vs equipo. `outcome` = vista previa o veredicto del servidor. */
+function devCapacityTilesHtml({ device, planMbps, planSimulated, planLoading, outcome }) {
+  const reasons = (outcome && outcome.reasons) || [];
+  const failEth = reasons.some((r) => r.kind === 'ethernet');
+  const failWifi = reasons.some((r) => r.kind === 'wifi');
+  const evaluated = outcome && outcome.result !== 'unknown_plan' && !!device;
+  const tile = (cls, label, value, sub) => `
+    <div class="status-tile ${cls}">
+      <span class="st-label">${label}</span>
+      <span class="st-value">${value}</span>
+      ${sub ? `<span class="st-sub">${sub}</span>` : ''}
+    </div>`;
+  let planValue;
+  if (planLoading) planValue = 'Cargando…';
+  else if (planMbps) planValue = escapeHtml(devFmtMbps(planMbps));
+  else planValue = 'Sin dato';
+  const planTile = `
+    <div class="status-tile ${planMbps ? 'info' : 'warn'} dev-plan-tile">
+      <span class="st-label">Plan contratado (bajada)${planSimulated ? devSimBadge() : ''}</span>
+      <span class="st-value">${planValue}</span>
+    </div>`;
+  if (!device) {
+    return `<div class="status-grid dev-capacity">${planTile}
+      ${tile('muted', 'Ethernet del equipo', '—', outcome && reasons.some((r) => r.kind === 'not_in_catalog') ? 'No homologado' : 'Elige el modelo')}
+      ${tile('muted', 'WiFi del equipo', '—', '')}</div>`;
+  }
+  const ethCls = !evaluated ? 'muted' : (failEth ? 'fail' : 'ok');
+  const ethSub = !evaluated ? 'Sin comparar' : (failEth ? 'Menor que el plan' : 'Soporta el plan');
+  let wifiCls;
+  let wifiSub;
+  if (device.wifiStatus !== 'enabled') {
+    wifiCls = 'muted';
+    wifiSub = 'No se evalúa';
+  } else if (!evaluated) {
+    wifiCls = 'muted';
+    wifiSub = 'Sin comparar';
+  } else {
+    wifiCls = failWifi ? 'fail' : 'ok';
+    wifiSub = failWifi ? 'Menor que el plan' : 'Soporta el plan';
+  }
+  return `<div class="status-grid dev-capacity">${planTile}
+    ${tile(ethCls, 'Ethernet del equipo', escapeHtml(devFmtMbps(device.ethernetMaxMbps)), ethSub)}
+    ${tile(wifiCls, `WiFi del equipo${device.wifiTech ? ` · ${escapeHtml(device.wifiTech)}` : ''}`, escapeHtml(devWifiText(device)), wifiSub)}</div>`;
+}
+
+const DEVICE_PREVIEW_TEXT = Object.freeze({
+  ok: { cls: 'badge-resolved', text: 'Vista previa: apto' },
+  blocked: { cls: 'badge-fail', text: 'Vista previa: no apto' },
+  unknown_plan: { cls: 'badge-pending', text: 'Vista previa: sin plan para comparar' },
+});
+
+function devPreviewOutcome(dev) {
+  if (!dev.model || (dev.model === DEVICE_OTHER_MODEL && !String(dev.otherModel || '').trim())) return null;
+  return evaluateDeviceCapacity(devSelectedDevice(dev), dev.plan.mbps);
+}
+
+function devCapacityHtml(dev) {
+  const outcome = devPreviewOutcome(dev);
+  const preview = outcome ? DEVICE_PREVIEW_TEXT[outcome.result] : null;
+  return `
+    ${devCapacityTilesHtml({
+      device: devSelectedDevice(dev),
+      planMbps: dev.plan.mbps,
+      planSimulated: dev.plan.simulated,
+      planLoading: dev.plan.loading,
+      outcome,
+    })}
+    ${dev.plan.error ? `<p class="form-note">${escapeHtml(dev.plan.error)}</p>` : ''}
+    ${preview ? `<p class="dev-preview"><span class="event-badge ${preview.cls}">${preview.text}</span>
+      <span class="dev-preview-note">El veredicto final lo da el servidor al validar.</span></p>` : ''}`;
+}
+
+function devMissingText(dev) {
+  if (!dev.catalog) return 'Esperando el catálogo de equipos.';
+  if (devNormalize(dev.serial).length < 4) return 'Falta el número de serie del equipo.';
+  if (!dev.model) return 'Falta confirmar el modelo exacto.';
+  if (dev.model === DEVICE_OTHER_MODEL && !String(dev.otherModel || '').trim()) return 'Escribe el modelo que figura en la etiqueta.';
+  return '';
+}
+
+function devFormActionsHtml(dev) {
+  const missing = devMissingText(dev);
+  return `
+    ${dev.postError ? `<div class="detail-error" role="alert">${escapeHtml(dev.postError)}</div>` : ''}
+    <button type="button" class="save-btn" data-action="dev-validate"${missing || dev.posting ? ' disabled' : ''}
+      ${dev.posting ? 'aria-busy="true"' : ''} aria-describedby="devValidateHint">${dev.posting ? 'Validando…' : (dev.postError ? 'Reintentar validación' : 'Validar equipo')}</button>
+    <p class="form-note" id="devValidateHint">${escapeHtml(missing || 'Se registra la validación (también si el equipo resulta no apto).')}</p>`;
+}
+
+const DEVICE_VERDICT = Object.freeze({
+  ok: { cls: 'is-ok', title: 'Equipo validado — módulo completado' },
+  unknown_plan: { cls: 'is-warn', title: 'Validado con aviso: plan desconocido' },
+  blocked: { cls: 'is-blocked', title: 'Equipo bloqueado: no soporta el plan contratado' },
+});
+
+/** Tarjeta del veredicto del servidor (ok / unknown_plan / blocked). */
+function devVerdictCardHtml(validation) {
+  const v = validation || {};
+  const meta = DEVICE_VERDICT[v.result];
+  if (!meta) return '';
+  const serial = v.serial ? `Serie ${escapeHtml(v.serial)}` : '';
+  const model = v.device ? escapeHtml(v.device.displayName || v.device.model) : (v.model ? escapeHtml(v.model) : '');
+  const role = v.result === 'blocked' ? 'alert' : 'status';
+  return `
+    <div class="dev-verdict ${meta.cls}" role="${role}">
+      <h3 class="dev-verdict-title" tabindex="-1">${meta.title}</h3>
+      <p class="dev-verdict-msg">${escapeHtml(v.message || WifixAPI.deviceValidationMessage(v))}</p>
+      ${serial || model ? `<p class="dev-verdict-device">${[model, serial].filter(Boolean).join(' · ')}</p>` : ''}
+      ${v.createdAt ? `<p class="dev-verdict-when">Registrado ${dateTimeHtml(v.createdAt)}</p>` : ''}
+    </div>
+    ${devCapacityTilesHtml({
+      device: v.device || null,
+      planMbps: v.planMbps,
+      planSimulated: v.planSource === 'simulated',
+      outcome: { result: v.result, reasons: v.reasons || [] },
+    })}`;
+}
+
+function devScannerHtml(nativeAvailable) {
+  const scanIcon = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3m0 4h4v-4m-7 4h3"/></svg>';
+  const camIcon = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>';
+  return `
+    <div class="serial-detect-block">
+      <p class="serial-browser-note">${nativeAvailable
+        ? 'Escanea el código de la etiqueta o toma una foto (la foto también lee el modelo)'
+        : 'Escaneo disponible solo en la app: toma una foto o escribe el serial'}</p>
+      <div class="serial-actions">
+        ${nativeAvailable ? `<button type="button" class="serial-action-btn" data-action="dev-scan">${scanIcon} Escanear código</button>` : ''}
+        <button type="button" class="serial-action-btn" data-action="dev-photo">${camIcon} Tomar foto</button>
+      </div>
+      <input type="file" accept="image/*" capture="environment" data-slot="dev-file" hidden aria-hidden="true" tabindex="-1">
+      <div class="serial-result-row" data-slot="dev-serial-badge" aria-live="polite"></div>
+      <label class="form-row">
+        <span class="form-label" id="devSerialLabel">Número de serie *</span>
+        <input type="text" data-field="devSerial" aria-labelledby="devSerialLabel" autocomplete="off"
+          autocapitalize="characters" spellcheck="false" maxlength="40" placeholder="Ej. ZTEGD0BB8294">
+      </label>
+    </div>`;
+}
+
+function devSerialBadgeHtml(dev) {
+  const s = dev.serialStatus;
+  if (!s) return '';
+  const cls = s.kind === 'ok' ? 'ok' : 'warn';
+  return `<span class="serial-confidence-badge ${cls}">${escapeHtml(s.text)}</span>`;
+}
+
+/** Modo de la pantalla según el estado guardado y el borrador. */
+function devMode(dev) {
+  const st = devStateFor(dev.account, dev.category);
+  if (st && !dev.rescanning) return st.status === 'blocked' ? 'blocked' : 'done';
+  return 'form';
+}
+
+function devScreenHtml(dev) {
+  const st = devStateFor(dev.account, dev.category);
+  const mode = devMode(dev);
+  if (mode === 'blocked' || mode === 'done') {
+    const again = mode === 'blocked' ? 'Escanear otro equipo' : 'Validar otro equipo';
+    return `
+      <div class="tool-form dev-module" data-form="device-validation">
+        <div data-slot="dev-verdict" aria-live="polite">${devVerdictCardHtml(st.validation)}</div>
+        ${mode === 'blocked' ? '<p class="form-note">No se puede completar el módulo ni guardar registros de la visita con este equipo.</p>' : ''}
+        <button type="button" class="save-btn${mode === 'done' ? ' outline' : ''}" data-action="dev-rescan">${again}</button>
+      </div>`;
+  }
+  const blockedBefore = st && st.status === 'blocked';
+  return `
+    <div class="tool-form dev-module" data-form="device-validation">
+      ${blockedBefore ? `<div class="dev-still-blocked" role="status">El equipo anterior${st.validation && st.validation.serial ? ` (${escapeHtml(st.validation.serial)})` : ''} quedó bloqueado. El flujo sigue bloqueado hasta validar un equipo apto.</div>` : ''}
+      <p class="form-note dev-intro">Escanea la etiqueta del equipo que vas a instalar (ONT, ONU, router o powerline), confirma el modelo y valida que soporte el plan del cliente.</p>
+      <h3 class="dev-step">1. Etiqueta del equipo</h3>
+      ${devScannerHtml(serialScannerAvailable())}
+      <h3 class="dev-step">2. Modelo</h3>
+      <div data-slot="dev-models">${devModelsHtml(dev)}</div>
+      <h3 class="dev-step">3. Capacidad vs plan</h3>
+      <div data-slot="dev-capacity">${devCapacityHtml(dev)}</div>
+      <div data-slot="dev-actions">${devFormActionsHtml(dev)}</div>
+    </div>`;
+}
+
+function devSetSlot(name, html) {
+  const el = equipoBody ? equipoBody.querySelector(`[data-slot="${name}"]`) : null;
+  if (el) el.innerHTML = html;
+}
+
+/** Repinta solo las partes dinámicas del formulario (no el input del serial). */
+function devRenderSlots(names = ['dev-models', 'dev-capacity', 'dev-actions', 'dev-serial-badge']) {
+  if (!_dev || !equipoBody) return;
+  const html = {
+    'dev-models': devModelsHtml,
+    'dev-capacity': devCapacityHtml,
+    'dev-actions': devFormActionsHtml,
+    'dev-serial-badge': devSerialBadgeHtml,
+  };
+  names.forEach((n) => devSetSlot(n, html[n](_dev)));
+}
+
+function devRender(focusSel) {
+  if (!_dev || !equipoBody) return;
+  equipoBody.innerHTML = devScreenHtml(_dev);
+  const serialInput = equipoBody.querySelector('[data-field="devSerial"]');
+  if (serialInput) serialInput.value = _dev.serial || '';
+  const badge = equipoBody.querySelector('[data-slot="dev-serial-badge"]');
+  if (badge) badge.innerHTML = devSerialBadgeHtml(_dev);
+  if (focusSel) {
+    const el = equipoBody.querySelector(focusSel);
+    if (el && typeof el.focus === 'function') el.focus();
+  }
+}
+
+// --- Acciones -------------------------------------------------------------------
+function devNewDraft(account, category, prev) {
+  return {
+    account,
+    category,
+    catalog: prev ? prev.catalog : null,
+    catalogError: null,
+    plan: prev ? prev.plan : { mbps: null, simulated: false, loading: true, error: null },
+    serial: '',
+    serialSource: null,
+    detectedSerial: '',
+    serialStatus: null,
+    textMatches: [],
+    model: '',
+    otherModel: '',
+    showAll: false,
+    rescanning: false,
+    posting: false,
+    postError: null,
+  };
+}
+
+/** Aplica lo leído por el escáner: serial + modelo sugerido. Pura sobre `dev`. */
+function devApplyCapture(dev, rawValues, source) {
+  const picked = devPickSerial(rawValues, dev.catalog || []);
+  const matches = devMatchModelsFromText(rawValues, dev.catalog || []);
+  dev.textMatches = matches;
+  if (picked.serial) {
+    dev.serial = picked.serial;
+    dev.detectedSerial = picked.serial;
+    dev.serialSource = source;
+    dev.serialStatus = picked.confidence === 'ok'
+      ? { kind: 'ok', text: `✓ Serial detectado: ${picked.serial}` }
+      : { kind: 'warn', text: `⚠ Verifica el serial contra la etiqueta: ${picked.serial}` };
+  } else {
+    dev.serialStatus = { kind: 'warn', text: source === 'barcode' ? '⚠ No se reconoció un serial en el código' : '⚠ No se encontró el serial en la foto: escríbelo a mano' };
+  }
+  const pre = devPreselectModel(matches);
+  if (pre) {
+    dev.model = pre;
+  } else if (dev.model && dev.model !== DEVICE_OTHER_MODEL) {
+    // El modelo elegido antes ya no es de la marca del serial nuevo: se pide de nuevo.
+    const still = devShortlist(dev.catalog || [], dev.serial, matches).some((d) => d.model === dev.model);
+    if (!still && devSerialPrefix(dev.serial, dev.catalog || [])) dev.model = '';
+  }
+  return dev;
+}
+
+async function devLoadPlan(dev) {
+  if (validatedProfile && validatedAccount === dev.account) {
+    dev.plan = Object.assign(devPlanFromProfile(validatedProfile), { loading: false, error: null });
+    return dev.plan;
+  }
+  try {
+    const profile = await WifixAPI.getClientProfile(dev.account);
+    dev.plan = Object.assign(devPlanFromProfile(profile), { loading: false, error: null });
+  } catch (err) {
+    console.warn('[Wifix] plan para validación de equipo:', err);
+    dev.plan = { mbps: null, simulated: false, loading: false, error: 'No se pudo cargar el plan del cliente en la app; el servidor lo resolverá al validar.' };
+  }
+  return dev.plan;
+}
+
+async function devLoadCatalogInto(dev, force) {
+  dev.catalogError = null;
+  try {
+    dev.catalog = await devLoadCatalog(force);
+  } catch (err) {
+    console.error('[Wifix] catálogo de equipos:', err);
+    dev.catalog = null;
+    dev.catalogError = (err && err.message) ? `No se pudo cargar el catálogo de equipos: ${err.message}` : 'No se pudo cargar el catálogo de equipos.';
+  }
+  return dev.catalog;
+}
+
+/**
+ * POST de la validación + aplicación del veredicto. Sin DOM (lo usa el smoke).
+ * Devuelve la validación del servidor, o null si falló (dev.postError).
+ */
+async function devSubmitValidation(dev) {
+  const body = buildDeviceValidationPayload(dev);
+  if (!body || dev.posting) return null;
+  dev.posting = true;
+  dev.postError = null;
+  try {
+    const v = await WifixAPI.createDeviceValidation(dev.account, body);
+    if (!v || !devStatusFromResult(v.result)) throw new Error('Respuesta inesperada del servidor.');
+    devApplyValidation(dev.account, dev.category, v);
+    dev.rescanning = false;
+    return v;
+  } catch (err) {
+    console.error('[Wifix] validación de equipo:', err);
+    dev.postError = `No se pudo validar el equipo: ${(err && err.message) || 'error desconocido'}. El módulo sigue sin completar.`;
+    return null;
+  } finally {
+    dev.posting = false;
+  }
+}
+
+function devStartRescan() {
+  if (!_dev) return;
+  const next = devNewDraft(_dev.account, _dev.category, _dev);
+  next.rescanning = true;
+  _dev = next;
+  devRender(serialScannerAvailable() ? '[data-action="dev-scan"]' : '[data-field="devSerial"]');
+}
+
+async function devCaptureBarcode(btn) {
+  if (!_dev) return;
+  const dev = _dev;
+  btn.disabled = true;
+  btn.setAttribute('aria-busy', 'true');
+  try {
+    const raw = await window.WifixNative.serialScanner.scanBarcodes();
+    if (!raw || !raw.length) {
+      dev.serialStatus = { kind: 'warn', text: '⚠ No se detectó ningún código. Prueba con "Tomar foto" o escribe el serial.' };
+    } else {
+      devApplyCapture(dev, raw, 'barcode');
+    }
+  } catch (err) {
+    console.error('[Wifix] equipo scanBarcodes:', err);
+    dev.serialStatus = { kind: 'warn', text: '⚠ Error al escanear' };
+  } finally {
+    btn.disabled = false;
+    btn.removeAttribute('aria-busy');
+  }
+  if (_dev !== dev) return;
+  const input = equipoBody.querySelector('[data-field="devSerial"]');
+  if (input) input.value = dev.serial;
+  devRenderSlots();
+}
+
+async function devOcrLines(base64) {
+  return (await window.WifixNative.serialScanner.ocrFromImageBase64(base64)) || [];
+}
+
+async function devCapturePhoto(btn, file) {
+  if (!_dev) return;
+  const dev = _dev;
+  btn.disabled = true;
+  btn.setAttribute('aria-busy', 'true');
+  try {
+    let base64 = null;
+    if (file) {
+      base64 = await readFileAsBase64(file);
+    } else {
+      const dataUrl = await window.WifixNative.takePhoto();
+      if (!dataUrl) {
+        dev.serialStatus = { kind: 'warn', text: '⚠ No se tomó ninguna foto' };
+      } else {
+        base64 = dataUrl.split(',').pop();
+      }
+    }
+    if (base64) {
+      const lines = await devOcrLines(base64);
+      if (!lines.length) {
+        dev.serialStatus = { kind: 'warn', text: '⚠ No se encontró texto en la foto: acerca la cámara a la etiqueta' };
+      } else {
+        devApplyCapture(dev, lines, 'ocr');
+      }
+    }
+  } catch (err) {
+    console.error('[Wifix] equipo foto/OCR:', err);
+    dev.serialStatus = { kind: 'warn', text: '⚠ Error al procesar la foto' };
+  } finally {
+    btn.disabled = false;
+    btn.removeAttribute('aria-busy');
+  }
+  if (_dev !== dev) return;
+  const input = equipoBody.querySelector('[data-field="devSerial"]');
+  if (input) input.value = dev.serial;
+  devRenderSlots();
+}
+
+/** Delegación de eventos: se registra una sola vez sobre el contenedor. */
+function devWireOnce() {
+  if (!equipoBody || equipoBody.dataset.devWired) return;
+  equipoBody.dataset.devWired = '1';
+
+  equipoBody.addEventListener('input', (ev) => {
+    if (!_dev) return;
+    const t = ev.target;
+    if (t.matches('[data-field="devSerial"]')) {
+      _dev.serial = t.value.toUpperCase();
+      if (_dev.serial !== _dev.detectedSerial) {
+        _dev.serialSource = 'manual';
+        _dev.serialStatus = null;
+      }
+      devRenderSlots();
+    } else if (t.matches('[data-field="devOtherModel"]')) {
+      // Sin repintar la lista de modelos: el input vive ahí y perdería el foco.
+      _dev.otherModel = t.value;
+      devRenderSlots(['dev-capacity', 'dev-actions']);
+    }
+  });
+
+  equipoBody.addEventListener('change', (ev) => {
+    if (!_dev) return;
+    const t = ev.target;
+    if (t.matches('input[name="devModel"]')) {
+      _dev.model = t.value;
+      devRenderSlots();
+      const sel = equipoBody.querySelector(`input[name="devModel"][value="${CSS.escape(t.value)}"]`);
+      if (sel) sel.focus();
+      if (t.value === DEVICE_OTHER_MODEL) {
+        const other = equipoBody.querySelector('[data-field="devOtherModel"]');
+        if (other) other.focus();
+      }
+    } else if (t.matches('[data-slot="dev-file"]')) {
+      const file = t.files && t.files[0];
+      const btn = equipoBody.querySelector('[data-action="dev-photo"]');
+      if (file && btn) devCapturePhoto(btn, file).finally(() => { t.value = ''; });
+    }
+  });
+
+  equipoBody.addEventListener('click', async (ev) => {
+    if (!_dev) return;
+    const btn = ev.target.closest('[data-action]');
+    if (!btn || !equipoBody.contains(btn)) return;
+    const action = btn.dataset.action;
+    if (action === 'dev-scan') {
+      devCaptureBarcode(btn);
+    } else if (action === 'dev-photo') {
+      const useNativeCamera = serialScannerAvailable() && typeof window.WifixNative?.takePhoto === 'function';
+      if (useNativeCamera) {
+        devCapturePhoto(btn, null);
+      } else {
+        const fileInput = equipoBody.querySelector('[data-slot="dev-file"]');
+        if (fileInput) fileInput.click();
+      }
+    } else if (action === 'dev-show-all') {
+      _dev.showAll = true;
+      devRenderSlots();
+      const first = equipoBody.querySelector('input[name="devModel"]');
+      if (first) first.focus();
+    } else if (action === 'dev-retry-catalog') {
+      const dev = _dev;
+      await devLoadCatalogInto(dev, true);
+      if (_dev === dev) devRenderSlots();
+    } else if (action === 'dev-validate') {
+      const dev = _dev;
+      const pending = devSubmitValidation(dev);
+      devRenderSlots();
+      const v = await pending;
+      if (_dev !== dev) return;
+      if (v) devRender('.dev-verdict-title');
+      else devRenderSlots();
+    } else if (action === 'dev-rescan') {
+      devStartRescan();
+    }
+  });
+}
+
+async function openEquipo() {
+  const cuenta = currentAccount();
+  if (!cuenta) {
+    alert('Ingresa primero el número de cuenta.');
+    return;
+  }
+  if (!devUsesModule()) return;
+  equipoChip.textContent = cuenta;
+  applyModuleLabels();
+  devWireOnce();
+
+  const reuse = _dev && _dev.account === cuenta && _dev.category === currentCategory;
+  if (!reuse) _dev = devNewDraft(cuenta, currentCategory, null);
+  const dev = _dev;
+  devRender();
+
+  detailEquipo.classList.add('open');
+  detailEquipo.setAttribute('aria-hidden', 'false');
+
+  await Promise.all([
+    dev.catalog ? null : devLoadCatalogInto(dev, false),
+    dev.plan.loading ? devLoadPlan(dev) : null,
+    devSyncFromServer(cuenta, dev.category),
+  ]);
+  if (_dev !== dev) return;
+  if (devMode(dev) === 'form') devRenderSlots();
+  else devRender();
+}
+
+if (backFromEquipo) {
+  backFromEquipo.addEventListener('click', () => {
+    detailEquipo.classList.remove('open');
+    detailEquipo.setAttribute('aria-hidden', 'true');
+  });
 }

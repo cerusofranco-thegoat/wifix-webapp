@@ -1378,11 +1378,16 @@ check('notas HTML balanceado', balanced(notes) === null, balanced(notes));
 console.log('\n== Visitas con registros de la app (include=records) ==');
 {
   const conReg = await WifixAPI.getVisits('35070291', { includeRecords: true });
-  check('mock include=records: cada visita trae checklist de 8 tipos (con clientLocation)',
-    conReg.items.every((t) => t.records && t.records.checklist.length === 8
-      && t.records.checklist.some((c) => c.type === 'clientLocation' && c.label === 'Ubicación casa cliente'))
+  check('mock include=records: cada visita trae checklist de 9 tipos (con clientLocation y deviceValidation)',
+    conReg.items.every((t) => t.records && t.records.checklist.length === 9
+      && t.records.checklist.some((c) => c.type === 'clientLocation' && c.label === 'Ubicación casa cliente')
+      && t.records.checklist.some((c) => c.type === 'deviceValidation' && c.label === 'Validación de equipo vs plan'))
     && conReg.recordsSummary);
   const html = ctx.renderVisitsList(conReg);
+  check('visitas anteriores: muestran las validaciones de equipo (bloqueada con mensaje y apta)',
+    html.includes('Validación de equipo vs plan') && html.includes('>Validación de equipo<')
+    && html.includes('>Bloqueado<') && html.includes('>Apto<') && html.includes('ZTEGD0BB8294')
+    && html.includes('plan 600 Mbps (simulado)') && html.includes('Franco Ceruso'));
   check('visitas con registros: HTML balanceado', balanced(html) === null, balanced(html));
   check('anteriores como tarjetas expandibles (<details>)',
     (html.match(/<details class="visit-card"/g) || []).length === conReg.items.length - 1);
@@ -1552,17 +1557,17 @@ console.log('\n== Módulos del menú (qué secciones ve cada uno) ==');
 const MODULE_TABLE = {
   instalaciones: {
     title: 'Instalaciones',
-    cards: ['personales', 'servicio', 'herramientas', 'retirados'],
+    cards: ['personales', 'servicio', 'equipo', 'herramientas', 'retirados'],
     servicio: ['naps', 'events'],
   },
   migraciones: {
     title: 'Migraciones',
-    cards: ['personales', 'servicio', 'herramientas', 'retirados'],
+    cards: ['personales', 'servicio', 'equipo', 'herramientas', 'retirados'],
     servicio: ['naps', 'events'],
   },
   visitas: {
     title: 'Visitas técnicas',
-    cards: ['personales', 'servicio', 'red', 'herramientas', 'retirados'],
+    cards: ['personales', 'servicio', 'equipo', 'red', 'herramientas', 'retirados'],
     servicio: ['naps', 'status', 'isp', 'events', 'visits'],
   },
   cancelaciones: {
@@ -1583,7 +1588,7 @@ function fakeSubCard(sub) {
   el.getAttribute = (k) => (k in attrs ? attrs[k] : null);
   return el;
 }
-const ALL_SUBS = ['personales', 'servicio', 'red', 'herramientas', 'retirados'];
+const ALL_SUBS = ['personales', 'servicio', 'equipo', 'red', 'herramientas', 'retirados'];
 const fakeSubCards = ALL_SUBS.map(fakeSubCard);
 const fakeGrid = fakeEl();
 fakeGrid.querySelectorAll = () => fakeSubCards;
@@ -1675,13 +1680,13 @@ console.log('\n== Nombre del módulo en las pantallas internas ==');
   const html = readFileSync(base + 'index.html', 'utf8');
   const detalles = [...html.matchAll(/<section class="detailscreen" id="([^"]+)"[\s\S]*?<\/section>/g)];
   check('cada pantalla interna tiene su eyebrow marcado con data-module-eyebrow',
-    detalles.length === 5 && detalles.every((m) => m[0].includes('class="sub-eyebrow" data-module-eyebrow')),
+    detalles.length === 6 && detalles.every((m) => m[0].includes('class="sub-eyebrow" data-module-eyebrow')),
     detalles.map((m) => m[1]).join(','));
   check('index.html ya no tiene eyebrows fijos (Diagnóstico/Registro/id viejo)',
     !/sub-eyebrow">(Instalaciones|Diagnóstico|Registro)</.test(html) && !html.includes('detailEyebrow'));
   check('app.js sin referencias muertas a detailEyebrow', !readFileSync(base + 'app.js', 'utf8').includes('detailEyebrow'));
   // Eyebrows falsos: selectModule tiene que pintarlos todos.
-  const eyebrows = [fakeEl(), fakeEl(), fakeEl(), fakeEl(), fakeEl()];
+  const eyebrows = [fakeEl(), fakeEl(), fakeEl(), fakeEl(), fakeEl(), fakeEl()];
   const qsaDoc = documentStub.querySelectorAll;
   documentStub.querySelectorAll = (sel) => (sel === '[data-module-eyebrow]' ? eyebrows : qsaDoc(sel));
   const prev = vm.runInContext('currentCategory', ctx);
@@ -2362,6 +2367,270 @@ console.log('\n== Red Interna: wrappers nativos (plugin NetworkTools falso) ==')
   let msg = '';
   try { await N.scanNetworks(); } catch (e) { msg = e.message; }
   check('APK anterior al contrato: método ausente → mensaje para actualizar la app', /no incluye "scanAccessPoints"/.test(msg), msg);
+}
+
+console.log('\n== Equipo a instalar: validación de capacidad vs plan ==');
+{
+  const run = (code) => vm.runInContext(code, ctx);
+  const A = ctx.WifixAPI;
+  A.useRealApi = false;
+
+  // --- index.html: tarjeta, pantalla y banner ---------------------------------
+  const html = readFileSync(base + 'index.html', 'utf8');
+  check('index.html: tarjeta "Equipo a instalar" con slot de estado',
+    html.includes('data-sub="equipo"') && html.includes('data-slot="equipo-status"'));
+  check('index.html: pantalla detailEquipo con chip y cuerpo',
+    html.includes('id="detailEquipo"') && html.includes('id="equipoChip"') && html.includes('id="equipoBody"'));
+  check('index.html: banner de bloqueo con role="alert"',
+    /id="deviceBlockBanner" role="alert"/.test(html));
+
+  // --- Catálogo mock = 19 modelos Moderno del Excel ---------------------------
+  const cat = (await A.getDeviceCatalog()).items;
+  const byModel = Object.fromEntries(cat.map((d) => [d.model, d]));
+  check('catálogo mock: 19 modelos, ningún Obsoleto (Linksys/Netgear/TRENDnet...)',
+    cat.length === 19 && !cat.some((d) => /LINKSYS|NETGEAR|TRENDNET|SAGEMCOM|TOTO|TL-WR741ND/i.test(d.model)));
+  const keys = ['model', 'displayName', 'brand', 'deviceType', 'category', 'wifiTech', 'ethernetMaxMbps', 'wifiMaxMbps', 'wifiStatus', 'serialPrefixes'];
+  check('catálogo mock: forma exacta del contrato',
+    cat.every((d) => JSON.stringify(Object.keys(d).sort()) === JSON.stringify(keys.slice().sort()) && Array.isArray(d.serialPrefixes)));
+  check('catálogo mock: N/A → none/null, "300 DESACTIVADO" → disabled/300, numérico → enabled',
+    byModel['ONT HUR 2001'].wifiStatus === 'none' && byModel['ONT HUR 2001'].wifiMaxMbps === null
+    && byModel['ZXHN F660'].wifiStatus === 'disabled' && byModel['ZXHN F660'].wifiMaxMbps === 300
+    && byModel['ZXHN F670L'].wifiStatus === 'enabled' && byModel['ZXHN F670L'].wifiMaxMbps === 500);
+  check('catálogo mock: XGS-PON F8605P 2500/1800 y display del Excel',
+    byModel['ONT ZTE XGS-PON ZXHN F8605P'].ethernetMaxMbps === 2500 && byModel['ONT ZTE XGS-PON ZXHN F8605P'].wifiMaxMbps === 1800
+    && byModel['ONT ZTE XGS-PON ZXHN F8605P'].displayName === 'ONT XGS-PON ZXHN F8605P');
+  check('catálogo mock: prefijos ZTEG/ZTEL/HWTC/BWH/STGU/XPON',
+    byModel['ZXHN F601'].serialPrefixes[0] === 'ZTEG' && byModel['ROUTER ZXHN H3601P V9 WIFI 6'].serialPrefixes[0] === 'ZTEL'
+    && byModel['ONT OptiXstar HG8145X6'].serialPrefixes[0] === 'HWTC' && byModel['AX3 QUAD CORE WIFI 6'].serialPrefixes[0] === 'BWH'
+    && byModel['ONU300G-1G'].serialPrefixes[0] === 'STGU' && byModel['ONU Bridge TXG-B2000'].serialPrefixes[0] === 'XPON');
+
+  // --- Regla pura ----------------------------------------------------------------
+  const ev = (m, plan) => ctx.evaluateDeviceCapacity(m ? byModel[m] : null, plan);
+  check('regla: F670L con 200 → ok', ev('ZXHN F670L', 200).result === 'ok');
+  check('regla: F670L con 600 → blocked solo por WiFi (500 < 600)', (() => {
+    const r = ev('ZXHN F670L', 600);
+    return r.result === 'blocked' && r.reasons.length === 1 && r.reasons[0].kind === 'wifi'
+      && r.reasons[0].deviceMbps === 500 && r.reasons[0].planMbps === 600;
+  })());
+  check('regla: F670L con 1500 → ethernet Y wifi', (() => {
+    const r = ev('ZXHN F670L', 1500);
+    return r.result === 'blocked' && r.reasons.map((x) => x.kind).join() === 'ethernet,wifi';
+  })());
+  check('regla: powerline con 200 → blocked por Ethernet (100), WiFi 300 no bloquea', (() => {
+    const r = ev('POWER LINE TP-LINK TLWPA4220 STARTER KIT', 200);
+    return r.result === 'blocked' && r.reasons.length === 1 && r.reasons[0].kind === 'ethernet' && r.reasons[0].deviceMbps === 100;
+  })());
+  check('regla: WiFi none/disabled solo evalúa Ethernet (HUR 2001 y F660 con 600 → ok)',
+    ev('ONT HUR 2001', 600).result === 'ok' && ev('ZXHN F660', 600).result === 'ok');
+  check('regla: fuera de catálogo → blocked not_in_catalog (aunque no haya plan)',
+    ev(null, 200).reasons[0].kind === 'not_in_catalog' && ev(null, null).result === 'blocked');
+  check('regla: sin plan → unknown_plan', ev('ZXHN F670L', null).result === 'unknown_plan' && ev('ZXHN F670L', 0).result === 'unknown_plan');
+  check('regla: XGS-PON con 1500 → ok', ev('ONT ZTE XGS-PON ZXHN F8605P', 1500).result === 'ok');
+
+  // --- Serial, marca y modelo ---------------------------------------------------
+  const pre = (lines) => ctx.devPreselectModel(ctx.devMatchModelsFromText(lines, cat));
+  check('OCR "ZXHN F670L" preselecciona F670L (no F670Y)', pre(['ZTE', 'ZXHN F670L', 'GPON SN: ZTEGD0BB8294']) === 'ZXHN F670L');
+  check('OCR "HG8145X6" preselecciona la OptiXstar', pre(['HUAWEI', 'OptiXstar HG8145X6']) === 'ONT OptiXstar HG8145X6');
+  check('OCR "F8605P" preselecciona el XGS-PON', pre(['ZXHN F8605P', 'XGS-PON']) === 'ONT ZTE XGS-PON ZXHN F8605P');
+  check('OCR "ZXHN F6600P" gana F6600P sobre F6600 y F660', pre(['ZXHN F6600P']) === 'ONT ZTE ZXHN F6600P');
+  check('OCR "ZXHN F660" no confunde con F6600', pre(['Model: ZXHN F660']) === 'ZXHN F660');
+  check('OCR "AX3" ambiguo (dual/quad) → sin preselección', pre(['HUAWEI WiFi AX3']) === null);
+  check('OCR sin modelo → sin preselección', pre(['GPON SN: ZTEGD0BB8294', 'MAC 001122334455']) === null);
+  const pk = ctx.devPickSerial(['ZXHN F670L', 'GPON SN: ZTEGD0BB8294', 'D-SN: ZTE0QH8M1234567'], cat);
+  check('serial: elige el GPON SN con prefijo del catálogo, no el nombre del modelo',
+    pk.serial === 'ZTEGD0BB8294' && pk.confidence === 'ok', JSON.stringify(pk));
+  check('serial: Huawei en hex (48575443…) se reconoce como HWTC',
+    ctx.devSerialPrefix('48575443A1B2C3D4', cat) === 'HWTC');
+  check('serial: sin prefijo conocido → mejor esfuerzo marcado para verificar',
+    ctx.devPickSerial(['SN: 9X81QW77'], cat).confidence === 'warn');
+  check('serial: nada legible → vacío', ctx.devPickSerial([], cat).serial === '');
+  check('lista corta: ZTEG → 10 ONT ZTE; STGU → 3; ZTEL → router ZTE',
+    ctx.devShortlist(cat, 'ZTEGD0BB8294', []).length === 10
+    && ctx.devShortlist(cat, 'STGU12345678', []).length === 3
+    && ctx.devShortlist(cat, 'ZTEL1234567890AB', []).map((d) => d.model).join() === 'ROUTER ZXHN H3601P V9 WIFI 6');
+  check('lista corta: lo leído en la etiqueta va primero',
+    ctx.devShortlist(cat, 'ZTEGD0BB8294', ctx.devMatchModelsFromText(['ZXHN F670L'], cat))[0].model === 'ZXHN F670L');
+  check('lista corta: serial sin marca → vacía (la UI muestra todos)', ctx.devShortlist(cat, 'ABCD1234', []).length === 0);
+
+  // --- Flujo con el mock: POST + veredicto + bloqueo ----------------------------
+  ctx.selectModule('instalaciones');
+  async function validate(account, model, extra = {}) {
+    const dev = run(`devNewDraft(${JSON.stringify(account)}, currentCategory, null)`);
+    dev.catalog = cat;
+    const profile = await A.getClientProfile(account);
+    dev.plan = Object.assign(ctx.devPlanFromProfile(profile), { loading: false, error: null });
+    dev.serial = extra.serial || 'ZTEGD0BB8294';
+    dev.serialSource = 'barcode';
+    dev.model = model;
+    if (extra.otherModel) dev.otherModel = extra.otherModel;
+    const v = await ctx.devSubmitValidation(dev);
+    return { dev, v };
+  }
+  const ok = await validate('35070291', 'ZXHN F670L');
+  const vOk = ok.v;
+  const contractKeys = ['id', 'result', 'planMbps', 'planSource', 'device', 'reasons', 'message', 'createdAt'];
+  check('mock ok: forma del contrato (201) con plan simulado de 200',
+    vOk && contractKeys.every((k) => k in vOk) && vOk.result === 'ok' && vOk.planMbps === 200 && vOk.planSource === 'simulated'
+    && vOk.device.model === 'ZXHN F670L' && vOk.reasons.length === 0 && typeof vOk.message === 'string', JSON.stringify(vOk));
+  check('mock ok: el POST lleva el taskId de la visita en curso y serialSource', vOk.taskId && vOk.serialSource === 'barcode');
+  check('ok: módulo completado y la guardia no bloquea', ctx.devStateFor('35070291').status === 'ok' && ctx.deviceRecordGuard('35070291') === null);
+  const okHtml = ctx.devScreenHtml(ok.dev);
+  check('ok: tarjeta verde "módulo completado" con aria (role=status) y HTML balanceado',
+    okHtml.includes('dev-verdict is-ok') && okHtml.includes('role="status"') && okHtml.includes('módulo completado')
+    && okHtml.includes('aria-live="polite"') && balanced(okHtml) === null, balanced(okHtml));
+
+  const wifi = await validate('40000600', 'ZXHN F670L');
+  check('mock blocked wifi: plan 600, razón wifi 500, mensaje del contrato con "600 Mbps"',
+    wifi.v.result === 'blocked' && wifi.v.reasons.length === 1 && wifi.v.reasons[0].kind === 'wifi'
+    && wifi.v.reasons[0].deviceMbps === 500 && wifi.v.message.startsWith('Advertencia: el dispositivo que usted está instalando no es el correcto')
+    && wifi.v.message.includes('(600 Mbps)'), JSON.stringify(wifi.v));
+
+  const eth = await validate('35070291', 'POWER LINE TP-LINK TLWPA4220 STARTER KIT', { serial: 'TPLK12345678' });
+  check('mock blocked ethernet: powerline 100 < 200',
+    eth.v.result === 'blocked' && eth.v.reasons.map((r) => r.kind).join() === 'ethernet' && eth.v.reasons[0].deviceMbps === 100);
+
+  // Bloqueo REAL: con la cuenta bloqueada no se guarda ningún registro de la visita.
+  const msgOf = async (p) => { try { await p; return null; } catch (e) { return e; } };
+  const e1 = await msgOf(A.createSpeedtest('35070291', { downloadMbps: 100, uploadMbps: 50 }));
+  const e2 = await msgOf(A.createRetiredEquipment('35070291', { serialValue: 'X', equipmentModelId: 'em-01', removalReasonCode: 'DANO_FISICO' }));
+  const e3 = await msgOf(A.createClientLocation('35070291', { latitude: -2.2, longitude: -79.9, label: 'CASA_CLIENTE', source: 'GPS' }));
+  const e4 = await msgOf(A.createPingTest('35070291', { target: '8.8.8.8' }));
+  const e5 = await msgOf(A.createWifiHeatmap('35070291', { rooms: [] }));
+  check('bloqueo: speedtest, retiro, casa cliente, ping y señal WiFi rechazados con DEVICE_BLOCKED',
+    [e1, e2, e3, e4, e5].every((e) => e && e.code === 'DEVICE_BLOCKED' && e.message === run('DEVICE_BLOCK_GUARD_MSG')),
+    [e1, e2, e3, e4, e5].map((e) => e && e.code).join());
+  check('bloqueo: otra cuenta sin validar no se bloquea',
+    (await msgOf(A.createSpeedtest('40123456', { downloadMbps: 1, uploadMbps: 1 }))) === null);
+  ctx.selectModule('cancelaciones');
+  check('bloqueo: en Cancelaciones (sin equipo a instalar) no aplica', ctx.deviceRecordGuard('35070291') === null);
+  ctx.selectModule('migraciones');
+  check('bloqueo: es por categoría (Migraciones de la misma cuenta no hereda el de Instalaciones)', ctx.deviceRecordGuard('35070291') === null);
+  ctx.selectModule('instalaciones');
+  check('bloqueo: al volver a Instalaciones sigue bloqueado', ctx.deviceRecordGuard('35070291') !== null);
+
+  const blkHtml = ctx.devScreenHtml(eth.dev);
+  check('bloqueado: alerta roja (role=alert) con el mensaje del servidor',
+    blkHtml.includes('dev-verdict is-blocked') && blkHtml.includes('role="alert"') && blkHtml.includes(ctx.escapeHtml(eth.v.message)));
+  check('bloqueado: única acción "Escanear otro equipo" (sin validar/guardar ni inputs)',
+    (blkHtml.match(/data-action="/g) || []).length === 1 && blkHtml.includes('data-action="dev-rescan"')
+    && blkHtml.includes('Escanear otro equipo') && !blkHtml.includes('dev-validate') && !blkHtml.includes('data-field="devSerial"'));
+  check('bloqueado: tiles plan vs equipo (Ethernet en rojo) y HTML balanceado',
+    blkHtml.includes('status-tile fail') && blkHtml.includes('Plan contratado') && balanced(blkHtml) === null, balanced(blkHtml));
+
+  // Banner del menú de la categoría.
+  const banner = fakeEl();
+  const realGet = documentStub.getElementById;
+  documentStub.getElementById = (id) => (id === 'deviceBlockBanner' ? banner : realGet(id));
+  run("validatedAccount = '35070291'");
+  ctx.devRefreshIndicators();
+  check('bloqueado: banner visible en el menú de la categoría con acceso al módulo',
+    banner.hidden === false && banner.innerHTML.includes('Flujo bloqueado') && banner.innerHTML.includes('data-action="open-equipo"'));
+
+  // "Escanear otro equipo": el formulario vuelve, pero el bloqueo sigue hasta un ok.
+  eth.dev.rescanning = true;
+  const rescanHtml = ctx.devScreenHtml(eth.dev);
+  check('reescaneo: formulario con aviso de bloqueo vigente y la guardia sigue activa',
+    rescanHtml.includes('dev-still-blocked') && rescanHtml.includes('data-field="devSerial"') && ctx.deviceRecordGuard('35070291') !== null
+    && balanced(rescanHtml) === null, balanced(rescanHtml));
+
+  // Reabrir la app / reconfirmar: el bloqueo vuelve desde el historial del servidor.
+  run('_devStates.clear()');
+  check('sin estado local la guardia no bloquea (antes de sincronizar)', ctx.deviceRecordGuard('35070291') === null);
+  await ctx.devSyncFromServer('35070291', 'instalaciones');
+  check('sincronización: el último veredicto del servidor (blocked) se restaura', ctx.devStateFor('35070291').status === 'blocked');
+
+  // Un equipo apto desbloquea.
+  const fix = await validate('35070291', 'ONT ZTE ZXHN F6600P');
+  ctx.devRefreshIndicators();
+  check('equipo apto después del bloqueo → ok, guardia libre, banner oculto',
+    fix.v.result === 'ok' && ctx.deviceRecordGuard('35070291') === null && banner.hidden === true);
+  check('con el bloqueo levantado los registros se guardan de nuevo',
+    (await msgOf(A.createSpeedtest('35070291', { downloadMbps: 100, uploadMbps: 50 }))) === null);
+  documentStub.getElementById = realGet;
+
+  const ethBoth = await validate('40001000', 'POWER LINE TP-LINK TLWPA4220 STARTER KIT', { serial: 'TPLK12345678' });
+  check('mock blocked ethernet+wifi con plan 1000 (powerline 100/300)', ethBoth.v.reasons.map((r) => r.kind).join() === 'ethernet,wifi');
+  const f670at1000 = await validate('40001000', 'ZXHN F670L');
+  check('mock plan 1000: F670L bloquea solo por WiFi (Ethernet 1000 = plan)',
+    f670at1000.v.reasons.map((r) => r.kind).join() === 'wifi');
+  const byDisplay = await validate('40001000', 'ont xgs-pon  zxhn f8605p');
+  check('mock: acepta displayName sin mayúsculas/espacios (F8605P) y trae technician{id,email,name}',
+    byDisplay.v.result === 'ok' && byDisplay.v.device.model === 'ONT ZTE XGS-PON ZXHN F8605P'
+    && byDisplay.v.technician && 'name' in byDisplay.v.technician && byDisplay.v.accountNumber === '40001000'
+    && byDisplay.v.category === 'instalaciones');
+  const nicPlan = await validate('40000000', run('DEVICE_OTHER_MODEL'), { otherModel: 'ROUTER XYZ' });
+  check('not_in_catalog tiene prioridad sobre unknown_plan', nicPlan.v.result === 'blocked' && nicPlan.v.reasons[0].kind === 'not_in_catalog');
+  await validate('40000000', 'ZXHN F670L');
+
+  const nic = await validate('35070291', run('DEVICE_OTHER_MODEL'), { serial: 'TPLK99887766', otherModel: 'ROUTER TP-LINK ARCHER C6' });
+  check('mock not_in_catalog: modelo escrito a mano → blocked, device null, mensaje de no homologado',
+    nic.v.result === 'blocked' && nic.v.device === null && nic.v.reasons[0].kind === 'not_in_catalog'
+    && nic.v.model === 'ROUTER TP-LINK ARCHER C6' && /no está homologado/.test(nic.v.message));
+  check('not_in_catalog: también bloquea el flujo', ctx.deviceRecordGuard('35070291') !== null);
+  await validate('35070291', 'ZXHN F670L');
+
+  const unk = await validate('40000000', 'ZXHN F670L');
+  const unkHtml = ctx.devScreenHtml(unk.dev);
+  check('mock unknown_plan: planMbps null, no bloquea, aviso ámbar',
+    unk.v.result === 'unknown_plan' && unk.v.planMbps === null && ctx.deviceRecordGuard('40000000') === null
+    && unkHtml.includes('dev-verdict is-warn') && balanced(unkHtml) === null);
+
+  const bad = await msgOf(A.createDeviceValidation('35070291', { serial: 'ZTEG1', model: 'ZXHN F670L', category: 'cancelaciones' }));
+  check('mock 400: categoría fuera del contrato', bad && bad.code === 'VALIDATION_ERROR');
+  check('validar otro equipo NO pasa por la guardia (es la salida del bloqueo)', (() => {
+    const src = readFileSync(base + 'api.js', 'utf8');
+    const body = src.slice(src.indexOf('async createDeviceValidation'), src.indexOf('async listDeviceValidations'));
+    return !body.includes('assertRecordAllowed') && !body.includes('withVisitContext');
+  })());
+
+  // --- Payload, historial y formulario --------------------------------------------
+  check('payload: { serial normalizado, model, category, serialSource } sin extras',
+    JSON.stringify(ctx.buildDeviceValidationPayload({ serial: 'ztegd0bb 8294', model: 'ZXHN F670L', category: 'visitas', serialSource: 'ocr' }))
+      === JSON.stringify({ serial: 'ZTEGD0BB8294', model: 'ZXHN F670L', category: 'visitas', serialSource: 'ocr' })
+    && ctx.buildDeviceValidationPayload({ serial: 'ZTEG12345678', model: 'X', category: 'cancelaciones' }) === null
+    && ctx.buildDeviceValidationPayload({ serial: 'ZT', model: 'X', category: 'visitas' }) === null);
+  const now = Date.parse('2026-10-01T15:00:00Z');
+  const hist = [
+    { result: 'ok', category: 'instalaciones', createdAt: '2026-10-01T14:00:00Z' },
+    { result: 'blocked', category: 'instalaciones', createdAt: '2026-10-01T14:30:00Z' },
+    { result: 'ok', category: 'visitas', createdAt: '2026-10-01T14:50:00Z' },
+    { result: 'blocked', category: 'instalaciones', createdAt: '2026-09-29T10:00:00Z' },
+  ];
+  check('historial: último de la categoría dentro de 12 h; lo viejo y otras categorías no cuentan',
+    ctx.devLatestFromHistory(hist, 'instalaciones', now).result === 'blocked'
+    && ctx.devLatestFromHistory(hist, 'visitas', now).result === 'ok'
+    && ctx.devLatestFromHistory(hist.slice(3), 'instalaciones', now) === null);
+
+  ctx.selectModule('visitas');
+  const draft = run("devNewDraft('40000600', 'visitas', null)");
+  draft.catalog = cat;
+  draft.plan = Object.assign(ctx.devPlanFromProfile(await A.getClientProfile('40000600')), { loading: false, error: null });
+  ctx.devApplyCapture(draft, ['ZTE', 'ZXHN F670L', 'GPON SN: ZTEGD0BB8294'], 'ocr');
+  check('captura OCR: serial + modelo preseleccionado + fuente ocr',
+    draft.serial === 'ZTEGD0BB8294' && draft.model === 'ZXHN F670L' && draft.serialSource === 'ocr');
+  const formHtml = ctx.devScreenHtml(draft);
+  check('formulario: label del serial, fieldset con legend, lista corta + "Ver todos" y "no está en la lista"',
+    formHtml.includes('aria-labelledby="devSerialLabel"') && formHtml.includes('<legend') && formHtml.includes('data-action="dev-show-all"')
+    && formHtml.includes('Ver todos los modelos (19)') && formHtml.includes('El modelo no está en la lista')
+    && formHtml.includes('Leído en la etiqueta'));
+  check('formulario: plan con badge "simulado" (como Datos personales) y vista previa no apto por WiFi',
+    formHtml.includes('source-badge') && formHtml.includes('>simulado<') && formHtml.includes('Vista previa: no apto')
+    && formHtml.includes('status-tile fail'));
+  check('formulario: navegador sin escáner nativo → solo "Tomar foto" + nota', !formHtml.includes('data-action="dev-scan"')
+    && formHtml.includes('data-action="dev-photo"') && formHtml.includes('Escaneo disponible solo en la app'));
+  check('formulario: botón Validar habilitado y HTML balanceado',
+    /data-action="dev-validate"(?![^>]*disabled)/.test(formHtml) && balanced(formHtml) === null, balanced(formHtml));
+  const empty = run("devNewDraft('40000600', 'visitas', null)");
+  empty.catalog = cat;
+  const emptyHtml = ctx.devScreenHtml(empty);
+  check('formulario vacío: Validar deshabilitado con el motivo (aria-describedby)',
+    /data-action="dev-validate" disabled/.test(emptyHtml) && emptyHtml.includes('Falta el número de serie'));
+  const loading = run("devNewDraft('40000600', 'visitas', null)");
+  check('estado de carga del catálogo y del plan', ctx.devScreenHtml(loading).includes('Cargando catálogo de equipos')
+    && ctx.devScreenHtml(loading).includes('Cargando…'));
+  loading.catalogError = 'No se pudo cargar el catálogo de equipos: sin red';
+  check('estado de error del catálogo con Reintentar', ctx.devScreenHtml(loading).includes('data-action="dev-retry-catalog"'));
+  ctx.selectModule('cancelaciones');
 }
 
 console.log('\n== Prohibiciones del contrato ==');
