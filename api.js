@@ -171,7 +171,28 @@
   // pendiente no se manda nada y el backend asocia el registro por horario.
   // Un `taskId` explícito en el payload manda sobre el resolver.
   let taskIdResolver = null;
+
+  // Guardia de registros de la visita (validación de equipo vs plan): app.js
+  // registra una función (accountNumber) => null | string. Si devuelve un
+  // mensaje, el flujo de la categoría está BLOQUEADO (el equipo a instalar no
+  // soporta el plan) y ningún registro de la visita se guarda: speedtest, ping,
+  // traceroute, señal WiFi, distancia, equipos retirados y casa cliente.
+  // Es el único punto por el que pasan todos esos POST (withVisitContext +
+  // createClientLocation), así que el bloqueo no depende de cada pantalla.
+  let recordGuard = null;
+  function assertRecordAllowed(accountNumber) {
+    if (typeof recordGuard !== 'function') return;
+    let msg = null;
+    try { msg = recordGuard(String(accountNumber || '').trim()); } catch (_) { msg = null; }
+    if (msg) {
+      const err = new Error(String(msg));
+      err.code = 'DEVICE_BLOCKED';
+      throw err;
+    }
+  }
+
   async function withVisitContext(accountNumber, body) {
+    assertRecordAllowed(accountNumber);
     const ctx = withContext(accountNumber, body);
     if (ctx.taskId === undefined || ctx.taskId === null || String(ctx.taskId).trim() === '') {
       delete ctx.taskId;
@@ -363,9 +384,28 @@
       degraded: { reason: 'FSM_NO_DATA', message: hit.message },
     };
   }
+  // Velocidad contratada de prueba por cuenta (demo de la validación de equipo):
+  // Solo valores que da el plan simulado del backend (50/100/200/400/600/1000).
+  //   40000600 → 600 Mbps  (un ONT con WiFi 500 queda bloqueado por WiFi)
+  //   40001000 → 1000 Mbps (powerline: bloquea por Ethernet y por WiFi)
+  //   40000000 → sin plan  (unknown_plan: no bloquea, deja alerta)
+  //   resto    → 200 Mbps
+  const MOCK_PLAN_BY_ACCOUNT = { '40000600': 600, '40001000': 1000, '40000000': null };
   function mockClientProfile(accountNumber) {
     const sinFsm = MOCK_FSM_NO_DATA[String(accountNumber || '').trim()];
     if (sinFsm) return mockClientProfileNoFsm(String(accountNumber).trim(), sinFsm);
+    const key = String(accountNumber || '').trim();
+    if (Object.prototype.hasOwnProperty.call(MOCK_PLAN_BY_ACCOUNT, key)) {
+      const down = MOCK_PLAN_BY_ACCOUNT[key];
+      return Object.assign(mockClientProfileBase(accountNumber), {
+        planName: down ? 'Wifix Hogar ' + down : null,
+        contractedDownloadMbps: down,
+        contractedUploadMbps: down ? Math.round(down / 2) : null,
+      });
+    }
+    return mockClientProfileBase(accountNumber);
+  }
+  function mockClientProfileBase(accountNumber) {
     return {
       accountNumber: accountNumber,
       fullName: 'Cliente Mock Apellido Apellido',
@@ -417,6 +457,13 @@
     '50000001': { source: 'IMPORT', status: 'ACTIVO', city: 'MANTA', node: 'MTA-01',
       businessType: 'RESIDENCIAL', accountType: 'POSTPAGO', accessType: 'Normal' },
     '50000002': { source: 'IMPORT', status: 'ACTIVO', city: 'PORTOVIEJO', node: 'PTV-03',
+      businessType: 'RESIDENCIAL', accountType: 'POSTPAGO', accessType: 'Normal' },
+    // Planes de prueba para la validación de equipo (ver MOCK_PLAN_BY_ACCOUNT).
+    '40000600': { source: 'IMPORT', status: 'ACTIVO', city: 'GUAYAQUIL', node: 'GYE-NORTE-04',
+      businessType: 'RESIDENCIAL', accountType: 'POSTPAGO', accessType: 'Normal' },
+    '40001000': { source: 'IMPORT', status: 'ACTIVO', city: 'QUITO', node: 'UIO-CENTRO-02',
+      businessType: 'RESIDENCIAL', accountType: 'POSTPAGO', accessType: 'Normal' },
+    '40000000': { source: 'IMPORT', status: 'ACTIVO', city: 'GUAYAQUIL', node: 'GYE-SUR-11',
       businessType: 'RESIDENCIAL', accountType: 'POSTPAGO', accessType: 'Normal' },
   };
   const MOCK_WHITELIST_IMPORTED_AT = '2026-09-24T14:30:00.000Z';
@@ -1188,6 +1235,152 @@
   }
 
   // ---------------------------------------------------------------------------
+  // Validación de equipo vs plan contratado (contrato 2026-10-01)
+  // ---------------------------------------------------------------------------
+  // Catálogo mock = los 19 modelos ESTADO_EQUIPO 'Moderno' de "Velocidades por
+  // modelos de equipos GPON.xlsx" (Hoja1), con la misma normalización que el
+  // script de importación del backend: WIFI 'N/A' → none/null, '300 DESACTIVADO'
+  // → disabled/300 (informativo), numérico → enabled. serialPrefixes es solo una
+  // pista de marca para filtrar la lista; no identifica el modelo exacto.
+  function mockDevice(model, displayName, brand, deviceType, category, wifiTech, eth, wifi, wifiStatus, prefixes) {
+    return {
+      model: model, displayName: displayName, brand: brand, deviceType: deviceType, category: category,
+      wifiTech: wifiTech, ethernetMaxMbps: eth, wifiMaxMbps: wifi, wifiStatus: wifiStatus, serialPrefixes: prefixes,
+    };
+  }
+  const ONT_GPON = 'ONT / ONU (GPON)';
+  const MOCK_DEVICE_CATALOG = [
+    mockDevice('ROUTER ZXHN H3601P V9 WIFI 6', 'ROUTER ZXHN H3601P V9 WIFI 6', 'ZTE', 'ROUTER', 'Router WiFi', 'WIFI 6', 1000, 1200, 'enabled', ['ZTEL']),
+    mockDevice('AX3 DUAL CORE WIFI 6', 'AX3 DUAL CORE WIFI 6', 'HUAWEI', 'ROUTER', 'Router WiFi', 'WIFI 6', 1000, 1000, 'enabled', ['BWH']),
+    mockDevice('AX3 QUAD CORE WIFI 6', 'AX3 QUAD CORE WIFI 6', 'HUAWEI', 'ROUTER', 'Router WiFi', 'WIFI 6', 1000, 1000, 'enabled', ['BWH']),
+    mockDevice('POWER LINE TP-LINK TLWPA4220 STARTER KIT', 'POWER LINE TP-LINK TLWPA4220 STARTER KIT', 'TP-LINK', 'REPETIDOR POWERLINE', 'Accesorio (Power Line)', 'WIFI 4', 100, 300, 'enabled', []),
+    mockDevice('ONT HUR 2001', 'ONT HUR 2001', 'INTELLEGO', 'ONT', ONT_GPON, 'SIN WIFI', 1000, null, 'none', ['STGU']),
+    mockDevice('ONU Bridge TXG-B2000', 'ONU Bridge TXG-B2000', 'ONU', 'ONT', ONT_GPON, 'SIN WIFI', 1000, null, 'none', ['XPON']),
+    mockDevice('ONU HUR4101XR', 'ONU HUR4101XR', 'INTELLEGO', 'ONT', ONT_GPON, 'SIN WIFI', 1000, null, 'none', ['STGU']),
+    mockDevice('ONU300G-1G', 'ONU300G-1G', 'Blik Telecom', 'ONT', ONT_GPON, 'SIN WIFI', 1000, null, 'none', ['STGU']),
+    mockDevice('ZXHN F601', 'ZXHN F601', 'ZTE', 'ONT', ONT_GPON, 'SIN WIFI', 1000, null, 'none', ['ZTEG']),
+    mockDevice('ZXHN F612C', 'ZXHN F612C', 'ZTE', 'ONT', ONT_GPON, 'SIN WIFI', 1000, null, 'none', ['ZTEG']),
+    mockDevice('ZXHN F660', 'ZXHN F660', 'ZTE', 'ONT', ONT_GPON, 'WIFI 4', 1000, 300, 'disabled', ['ZTEG']),
+    mockDevice('ZXHN F670L', 'ZXHN F670L', 'ZTE', 'ONT', ONT_GPON, 'WIFI 5', 1000, 500, 'enabled', ['ZTEG']),
+    mockDevice('ZXHN F670Y', 'ZXHN F670Y', 'ZTE', 'ONT', ONT_GPON, 'WIFI 5', 1000, 500, 'enabled', ['ZTEG']),
+    mockDevice('ZXHN F688 V9.0', 'ZXHN F688 V9.0', 'ZTE', 'ONT', ONT_GPON, 'WIFI 5', 1000, 500, 'enabled', ['ZTEG']),
+    mockDevice('ONT OptiXstar HG8145X6', 'ONT OptiXstar HG8145X6', 'HUAWEI', 'ONT', ONT_GPON, 'WIFI 6', 1000, 1000, 'enabled', ['HWTC']),
+    mockDevice('ONT ZTE ZXHN F6600 WIFI 6', 'ONT ZTE ZXHN F6600 WIFI 6', 'ZTE', 'ONT', ONT_GPON, 'WIFI 6', 1000, 1000, 'enabled', ['ZTEG']),
+    mockDevice('ONT ZTE ZXHN F6600P', 'ONT ZTE ZXHN F6600P', 'ZTE', 'ONT', ONT_GPON, 'WIFI 6', 1000, 1000, 'enabled', ['ZTEG']),
+    mockDevice('ONT ZXHN F1611A-1FXS', 'ONT ZXHN F1611A-1FXS', 'ZTE', 'ONT', ONT_GPON, 'WIFI 6', 1000, 1200, 'enabled', ['ZTEG']),
+    mockDevice('ONT ZTE XGS-PON ZXHN F8605P', 'ONT XGS-PON ZXHN F8605P', 'ZTE', 'ONT', 'ONT / ONU (XGS-PON)', 'WIFI 6', 2500, 1800, 'enabled', ['ZTEG']),
+  ];
+  const DEVICE_VALIDATION_CATEGORIES = ['instalaciones', 'migraciones', 'visitas'];
+  const SERIAL_SOURCES = ['barcode', 'ocr', 'manual'];
+
+  function positiveMbps(v) {
+    const n = typeof v === 'string' && v.trim() !== '' ? Number(v) : v;
+    return typeof n === 'number' && isFinite(n) && n > 0 ? n : null;
+  }
+
+  // Regla del contrato, PURA (sin red ni DOM). El servidor es la fuente de
+  // verdad; app.js la usa para el feedback inmediato y el mock para responder.
+  //   device null (no está en catálogo)          → blocked  [not_in_catalog]
+  //   sin planMbps                               → unknown_plan (no bloquea)
+  //   ethernetMaxMbps < plan                     → blocked  [ethernet]
+  //   wifiStatus 'enabled' && wifiMaxMbps < plan → blocked  [wifi]
+  //   wifiStatus 'none' | 'disabled'             → solo cuenta Ethernet
+  // Ethernet y WiFi se evalúan las dos (pueden salir ambas razones).
+  function evaluateDeviceCapacity(device, planMbps) {
+    const plan = positiveMbps(planMbps);
+    if (!device) return { result: 'blocked', reasons: [{ kind: 'not_in_catalog' }], planMbps: plan };
+    if (plan === null) return { result: 'unknown_plan', reasons: [], planMbps: null };
+    const reasons = [];
+    const eth = Number(device.ethernetMaxMbps);
+    if (!(isFinite(eth) && eth >= plan)) {
+      reasons.push({ kind: 'ethernet', deviceMbps: isFinite(eth) ? eth : 0, planMbps: plan });
+    }
+    if (device.wifiStatus === 'enabled') {
+      const wifi = Number(device.wifiMaxMbps);
+      if (!(isFinite(wifi) && wifi >= plan)) {
+        reasons.push({ kind: 'wifi', deviceMbps: isFinite(wifi) ? wifi : 0, planMbps: plan });
+      }
+    }
+    return { result: reasons.length ? 'blocked' : 'ok', reasons: reasons, planMbps: plan };
+  }
+
+  // Texto en español del veredicto (el servidor manda el suyo; este es el del
+  // mock y el de la vista previa). Base del contrato + detalle por razón.
+  function deviceValidationMessage(outcome) {
+    const o = outcome || {};
+    const plan = positiveMbps(o.planMbps);
+    const planTxt = plan !== null ? plan + ' Mbps' : 'sin dato';
+    if (o.result === 'ok') {
+      return 'Equipo apto: soporta la máxima capacidad del plan contratado (' + planTxt + ').';
+    }
+    if (o.result === 'unknown_plan') {
+      return 'No se conoce la velocidad del plan contratado: no se pudo comparar con la capacidad del equipo. ' +
+        'Puede continuar; quedó registrada una alerta para revisión.';
+    }
+    const reasons = Array.isArray(o.reasons) ? o.reasons : [];
+    if (reasons.some(function (r) { return r && r.kind === 'not_in_catalog'; })) {
+      return 'Advertencia: el dispositivo que usted está instalando no es el correcto, ya que no está homologado ' +
+        '(no figura en el catálogo de equipos vigentes) y no garantiza la máxima capacidad del plan contratado (' +
+        planTxt + '); por lo tanto, no le va a dar un buen servicio al cliente.';
+    }
+    const detail = reasons.map(function (r) {
+      if (r.kind === 'ethernet') return 'su enlace Ethernet llega a ' + r.deviceMbps + ' Mbps';
+      if (r.kind === 'wifi') return 'su WiFi llega a ' + r.deviceMbps + ' Mbps';
+      return '';
+    }).filter(Boolean).join(' y ');
+    return 'Advertencia: el dispositivo que usted está instalando no es el correcto, ya que no permite la máxima ' +
+      'capacidad del plan contratado (' + planTxt + ') y, por lo tanto, no le va a dar un buen servicio al cliente.' +
+      (detail ? ' Detalle: ' + detail + '.' : '');
+  }
+
+  // Append-only en memoria (se pierde al recargar, igual que el resto del mock).
+  const MOCK_DEVICE_VALIDATIONS = {};
+  function mockCreateDeviceValidation(accountNumber, body) {
+    const cuenta = String(accountNumber || '').trim();
+    const b = body || {};
+    const serial = typeof b.serial === 'string' ? b.serial.trim() : '';
+    const model = typeof b.model === 'string' ? b.model.trim() : '';
+    if (!cuenta || !serial || !model || DEVICE_VALIDATION_CATEGORIES.indexOf(b.category) === -1 ||
+        (b.serialSource !== undefined && SERIAL_SOURCES.indexOf(b.serialSource) === -1) ||
+        (b.taskId !== undefined && typeof b.taskId !== 'string')) {
+      const err = new Error('Datos de validación de equipo inválidos.');
+      err.code = 'VALIDATION_ERROR';
+      err.status = 400;
+      throw err;
+    }
+    // Igual que el backend: acepta MODELO o displayName, sin distinguir
+    // mayúsculas ni espacios (F8605P: model y display difieren).
+    const norm = function (x) { return String(x || '').toUpperCase().replace(/\s+/g, ' ').trim(); };
+    const device = MOCK_DEVICE_CATALOG.filter(function (d) {
+      return norm(d.model) === norm(model) || norm(d.displayName) === norm(model);
+    })[0] || null;
+    const profile = mockClientProfile(cuenta);
+    const planMbps = positiveMbps(profile.contractedDownloadMbps);
+    const planSource = profile.sources && profile.sources.contractedDownloadMbps === 'MOCK' ? 'simulated' : 'real';
+    const outcome = evaluateDeviceCapacity(device, planMbps);
+    const user = getUser() || { id: 'mock-user-1', email: 'franco@tulpasolutions.com' };
+    const rec = {
+      id: uuidMock(),
+      accountNumber: cuenta,
+      category: b.category,
+      serial: serial,
+      model: model,
+      serialSource: b.serialSource || null,
+      taskId: b.taskId || null,
+      result: outcome.result,
+      planMbps: planMbps,
+      planSource: planSource,
+      device: device ? Object.assign({}, device, { serialPrefixes: device.serialPrefixes.slice() }) : null,
+      reasons: outcome.reasons,
+      message: deviceValidationMessage({ result: outcome.result, reasons: outcome.reasons, planMbps: planMbps }),
+      technician: { id: user.id, email: user.email, name: user.name || null },
+      createdAt: nowIso(),
+    };
+    MOCK_DEVICE_VALIDATIONS[cuenta] = [rec].concat(MOCK_DEVICE_VALIDATIONS[cuenta] || []);
+    return rec;
+  }
+
+  // ---------------------------------------------------------------------------
   // API pública
   // ---------------------------------------------------------------------------
   const WifixAPI = {
@@ -1374,6 +1567,55 @@
     },
 
     // ---- Historial de la cuenta -------------------------------------------
+    // ---- Validación de equipo vs plan contratado ---------------------------
+    // Catálogo de equipos homologados: { items: [{ model, displayName, brand,
+    // deviceType, category, wifiTech, ethernetMaxMbps, wifiMaxMbps,
+    // wifiStatus, serialPrefixes }] }.
+    async getDeviceCatalog() {
+      if (this.useRealApi) return fetchJson('GET', '/device-catalog');
+      await delay(60);
+      return { items: MOCK_DEVICE_CATALOG.map(function (d) { return Object.assign({}, d, { serialPrefixes: d.serialPrefixes.slice() }); }) };
+    },
+    // POST append-only (201). body = { serial, model, category, taskId?,
+    // serialSource? }. Sin taskId se manda el de la visita en curso, igual que
+    // en los demás registros por visita (si no hay, lo asigna el backend).
+    // NO pasa por la guardia de registros: validar otro equipo es justamente la
+    // salida de un bloqueo.
+    async createDeviceValidation(accountNumber, body) {
+      const b = Object.assign({}, body || {});
+      if (b.taskId === undefined || b.taskId === null || String(b.taskId).trim() === '') {
+        delete b.taskId;
+        if (typeof taskIdResolver === 'function') {
+          try {
+            const t = await taskIdResolver(String(accountNumber || '').trim());
+            if (t && String(t).trim()) b.taskId = String(t).trim();
+          } catch (_) { /* sin taskId: el backend lo asigna */ }
+        }
+      }
+      if (this.useRealApi) {
+        return fetchJson('POST', '/accounts/' + encodeURIComponent(accountNumber) + '/device-validations', b);
+      }
+      await delay(120);
+      return mockCreateDeviceValidation(accountNumber, b);
+    },
+    // Historial de la cuenta: { items: [...] } (más reciente primero).
+    async listDeviceValidations(accountNumber) {
+      if (this.useRealApi) {
+        const r = await fetchJson('GET', '/accounts/' + encodeURIComponent(accountNumber) + '/device-validations');
+        return { items: r && Array.isArray(r.items) ? r.items : (Array.isArray(r) ? r : []) };
+      }
+      await delay(60);
+      return { items: (MOCK_DEVICE_VALIDATIONS[String(accountNumber || '').trim()] || []).slice() };
+    },
+    // Regla y mensaje puros (misma lógica que el mock y que el servidor).
+    evaluateDeviceCapacity: evaluateDeviceCapacity,
+    deviceValidationMessage: deviceValidationMessage,
+
+    // Registra la guardia de registros de la visita (ver assertRecordAllowed).
+    setRecordGuard(fn) {
+      recordGuard = typeof fn === 'function' ? fn : null;
+    },
+
     // ---- Datos del Cliente (campos 1-5, 7) ---------------------------------
     async getClientProfile(accountNumber) {
       if (this.useRealApi) {
@@ -1559,6 +1801,7 @@
     // accuracyMeters, label:'CASA_CLIENTE', source:'GPS'|'MANUAL', napCode,
     // napPort, taskId?, capturedAt, notes? }. Va tal cual: sin clientId/contractId.
     async createClientLocation(accountNumber, body) {
+      assertRecordAllowed(accountNumber);
       if (this.useRealApi) {
         return fetchJson('POST', '/accounts/' + encodeURIComponent(accountNumber) + '/client-location', body);
       }
@@ -1693,6 +1936,7 @@
     ['distance', 'Medición de distancia'],
     ['clientLocation', 'Ubicación casa cliente'],
     ['retiredEquipment', 'Equipos retirados'],
+    ['deviceValidation', 'Validación de equipo vs plan'],
   ];
   function mockVisitRecords(visit, accountNumber, spec) {
     const acct = String(accountNumber || '35070291');
@@ -1703,7 +1947,7 @@
     const base = function (min, by) {
       return Object.assign({ id: uuidMock(), accountNumber: acct, createdAt: at(min - 1), measuredAt: at(min) }, link(by));
     };
-    const r = { speedtests: [], pingTests: [], tracerouteTests: [], wifiHeatmaps: [], distanceMeasurements: [], clientLocations: [], retiredEquipment: [] };
+    const r = { speedtests: [], pingTests: [], tracerouteTests: [], wifiHeatmaps: [], distanceMeasurements: [], clientLocations: [], retiredEquipment: [], deviceValidations: [] };
     (spec || []).forEach(function (k) {
       if (k === 'ext') {
         r.speedtests.push(Object.assign(base(40, 'TASK_ID'), {
@@ -1755,6 +1999,25 @@
           distanceToRegisteredMeters: 30.6, distanceToNapMeters: 41.2,
         }));
       }
+      if (k === 'devval') {
+        const wifiReason = [{ kind: 'wifi', deviceMbps: 500, planMbps: 600 }];
+        r.deviceValidations.push(Object.assign(base(45, 'TASK_ID'), {
+          category: 'visitas', serial: 'ZTEGD0BB8294', serialSource: 'barcode', model: 'ZXHN F670L',
+          result: 'blocked', planMbps: 600, planSource: 'simulated',
+          device: MOCK_DEVICE_CATALOG.filter(function (d) { return d.model === 'ZXHN F670L'; })[0],
+          reasons: wifiReason,
+          message: deviceValidationMessage({ result: 'blocked', reasons: wifiReason, planMbps: 600 }),
+          technician: { id: 'mock-user-1', email: 'franco@tulpasolutions.com', name: 'Franco Ceruso' },
+        }));
+        r.deviceValidations.push(Object.assign(base(42, 'TASK_ID'), {
+          category: 'visitas', serial: 'ZTEGC1A20077', serialSource: 'ocr', model: 'ONT ZTE ZXHN F6600P',
+          result: 'ok', planMbps: 600, planSource: 'simulated',
+          device: MOCK_DEVICE_CATALOG.filter(function (d) { return d.model === 'ONT ZTE ZXHN F6600P'; })[0],
+          reasons: [],
+          message: deviceValidationMessage({ result: 'ok', reasons: [], planMbps: 600 }),
+          technician: { id: 'mock-user-1', email: 'franco@tulpasolutions.com', name: 'Franco Ceruso' },
+        }));
+      }
       if (k === 'retired') {
         r.retiredEquipment.push(Object.assign(base(15, 'TASK_ID'), {
           equipmentModelId: 'ONT ZTE (todas)', serialValue: 'ZTEGD0BB8294', removalReasonCode: 'DANADO', retiredAt: at(15),
@@ -1770,8 +2033,9 @@
       distance: r.distanceMeasurements.length,
       clientLocation: r.clientLocations.length,
       retiredEquipment: r.retiredEquipment.length,
+      deviceValidation: r.deviceValidations.length,
     };
-    const all = [].concat(r.speedtests, r.pingTests, r.tracerouteTests, r.wifiHeatmaps, r.distanceMeasurements, r.clientLocations, r.retiredEquipment);
+    const all = [].concat(r.speedtests, r.pingTests, r.tracerouteTests, r.wifiHeatmaps, r.distanceMeasurements, r.clientLocations, r.retiredEquipment, r.deviceValidations);
     const kinds = all.map(function (x) { return x.linkedBy; })
       .filter(function (v, i, arr) { return arr.indexOf(v) === i; });
     const until = visit.endedAt
@@ -1799,7 +2063,7 @@
 
     const historial = [
       { seed: 6,  result: 'INSATISFACTORIA', reason: 'Intermitencia en la conexión', notesLoaded: true, recs: ['ext', 'ping', 'trace'] },
-      { seed: 14, result: 'SATISFACTORIA',   reason: 'WiFi débil en habitaciones',    notesLoaded: false, recs: ['wifi', 'dist', 'loc', 'retired'] },
+      { seed: 14, result: 'SATISFACTORIA',   reason: 'WiFi débil en habitaciones',    notesLoaded: false, recs: ['wifi', 'dist', 'loc', 'retired', 'devval'] },
       { seed: 27, result: 'CANCELADA',       reason: 'Cliente ausente',               notesLoaded: true, closingNotes: 'Cliente no se encontraba en el domicilio.', recs: [] },
       { seed: 41, result: 'REALIZADA',       reason: 'Cambio de equipo',              notesLoaded: false, recs: ['app'] },
       { seed: 63, result: 'SATISFACTORIA',   reason: 'Instalación',                   notesLoaded: false, recs: [] },
