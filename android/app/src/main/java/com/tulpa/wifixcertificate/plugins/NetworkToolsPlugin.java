@@ -5,12 +5,20 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.net.ConnectivityManager;
+import android.net.DhcpInfo;
+import android.net.LinkAddress;
+import android.net.LinkProperties;
+import android.net.Network;
+import android.net.NetworkCapabilities;
+import android.net.RouteInfo;
 import android.net.wifi.ScanResult;
 import android.net.wifi.WifiInfo;
 import android.net.wifi.WifiManager;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.Log;
 
 import com.getcapacitor.JSObject;
 import com.getcapacitor.PermissionState;
@@ -22,15 +30,24 @@ import com.getcapacitor.annotation.Permission;
 import com.getcapacitor.annotation.PermissionCallback;
 
 import org.json.JSONArray;
+import org.json.JSONObject;
 
 import java.io.BufferedReader;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
+import java.net.Inet4Address;
 import java.net.InetAddress;
+import java.net.NetworkInterface;
 import java.net.URL;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -501,6 +518,22 @@ public class NetworkToolsPlugin extends Plugin {
             ap.put("capabilities", r.capabilities);
             ap.put("isConnected", r.BSSID != null && r.BSSID.equalsIgnoreCase(connectedBssid));
             ap.put("timestampMs", r.timestamp);
+            // Ancho de canal y frecuencias centrales (API 23+). Sin dato → 20 MHz.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                ap.put("channelWidthMhz", channelWidthMhz(r.channelWidth));
+                ap.put("centerFreq0", r.centerFreq0);
+                ap.put("centerFreq1", r.centerFreq1);
+            } else {
+                ap.put("channelWidthMhz", 20);
+                ap.put("centerFreq0", JSONObject.NULL);
+                ap.put("centerFreq1", JSONObject.NULL);
+            }
+            // Estándar WiFi del AP (API 30+).
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                int std = r.getWifiStandard();
+                ap.put("wifiStandard", std);
+                ap.put("wifiStandardName", standardName(std));
+            }
             arr.put(ap);
         }
 
@@ -522,9 +555,23 @@ public class NetworkToolsPlugin extends Plugin {
 
     private int channelFromFreq(int freq) {
         if (freq >= 2412 && freq <= 2484) return (freq - 2407) / 5;
-        if (freq >= 5180 && freq <= 5825) return (freq - 5000) / 5;
+        // 5 GHz hasta 5885 (canal 177, UNII-4).
+        if (freq >= 5180 && freq <= 5885) return (freq - 5000) / 5;
         if (freq >= 5955 && freq <= 7115) return (freq - 5955) / 5 + 1;
         return -1;
+    }
+
+    /** ScanResult.CHANNEL_WIDTH_* → MHz (80+80 cuenta como 160). */
+    private static int channelWidthMhz(int w) {
+        switch (w) {
+            case 0: return 20;   // CHANNEL_WIDTH_20MHZ
+            case 1: return 40;   // CHANNEL_WIDTH_40MHZ
+            case 2: return 80;   // CHANNEL_WIDTH_80MHZ
+            case 3: return 160;  // CHANNEL_WIDTH_160MHZ
+            case 4: return 160;  // CHANNEL_WIDTH_80MHZ_PLUS_MHZ
+            case 5: return Build.VERSION.SDK_INT >= 33 ? 320 : 20; // CHANNEL_WIDTH_320MHZ (API 33)
+            default: return 20;
+        }
     }
 
     private String standardName(int std) {
@@ -544,6 +591,434 @@ public class NetworkToolsPlugin extends Plugin {
         if (ip == 0) return null;
         return (ip & 0xFF) + "." + ((ip >> 8) & 0xFF) + "."
              + ((ip >> 16) & 0xFF) + "." + ((ip >> 24) & 0xFF);
+    }
+
+    // =======================================================================
+    // RED INTERNA — getNetConfig, tcpPing, sweepSubnet, probeHosts,
+    // discoverNetwork. Port de netprobe.js / discovery.js de Wifix Remote
+    // (motor Node) a sockets Java; la lógica de sockets vive en LanEngine y la
+    // lógica pura (paquetes y parsers) en LanParsers.
+    //
+    // Todo corre en lanExecutor (nunca en el hilo UI) y con los sockets
+    // bindeados a la Network WiFi cuando existe.
+    // =======================================================================
+
+    private static final String LAN_TAG = "WifixLan";
+    private static final int[] DEFAULT_TCPPING_PORTS = { 80, 443, 22, 445, 7, 8080, 53, 139 };
+    private static final int[] DEFAULT_SWEEP_PORTS = { 80, 443, 22, 445, 139, 53, 8080, 7, 9100, 62078 };
+
+    private final ExecutorService lanExecutor = Executors.newCachedThreadPool();
+
+    @Override
+    protected void handleOnDestroy() {
+        lanExecutor.shutdownNow();
+        super.handleOnDestroy();
+    }
+
+    private interface LanTask {
+        void run() throws Exception;
+    }
+
+    /** Ejecuta fuera del hilo UI; cualquier excepción termina en reject (nunca crash). */
+    private void runLan(final PluginCall call, final String what, final LanTask task) {
+        try {
+            lanExecutor.execute(() -> {
+                try {
+                    task.run();
+                } catch (Throwable t) {
+                    Log.w(LAN_TAG, what + " falló", t);
+                    String msg = t.getMessage() != null ? t.getMessage() : t.getClass().getSimpleName();
+                    call.reject(what + " falló: " + msg);
+                }
+            });
+        } catch (RejectedExecutionException e) {
+            call.reject(what + " no disponible: el plugin se está cerrando.");
+        }
+    }
+
+    private static Object nz(Object v) {
+        return v == null ? JSONObject.NULL : v;
+    }
+
+    private static int clamp(int v, int min, int max) {
+        return Math.max(min, Math.min(max, v));
+    }
+
+    private static int[] readPorts(PluginCall call, String key, int[] def) {
+        JSONArray arr = call.getArray(key);
+        if (arr == null || arr.length() == 0) return def;
+        List<Integer> out = new ArrayList<>();
+        for (int i = 0; i < arr.length(); i++) {
+            int p = arr.optInt(i, -1);
+            if (p >= 1 && p <= 65535 && !out.contains(p)) out.add(p);
+        }
+        if (out.isEmpty()) return def;
+        int[] r = new int[out.size()];
+        for (int i = 0; i < r.length; i++) r[i] = out.get(i);
+        return r;
+    }
+
+    private static JSONArray intArray(List<Integer> v) {
+        JSONArray a = new JSONArray();
+        if (v != null) for (Integer i : v) a.put((Object) i);
+        return a;
+    }
+
+    /** Forma `stat` de netprobe.js:88-118 (nulls explícitos). */
+    private static JSObject statToJs(LanParsers.Stat s) {
+        JSObject o = new JSObject();
+        o.put("avg", nz(s.avg));
+        o.put("min", nz(s.min));
+        o.put("max", nz(s.max));
+        o.put("time", nz(s.time));
+        o.put("packetLoss", nz(s.packetLoss));
+        o.put("stddev", nz(s.stddev));
+        o.put("sent", s.sent);
+        o.put("received", s.received);
+        JSONArray samples = new JSONArray();
+        for (double d : s.samples) samples.put((Object) Double.valueOf(d));
+        o.put("samples", samples);
+        return o;
+    }
+
+    // ---- Configuración de red WiFi ----------------------------------------
+
+    private static final class NetConfig {
+        Network network;
+        String deviceIp;
+        String gatewayIp;
+        Integer prefixLength;
+        List<String> dns = new ArrayList<>();
+        String interfaceName;
+        String source;
+    }
+
+    @SuppressWarnings("deprecation")
+    private static Network findWifiNetwork(ConnectivityManager cm) {
+        if (cm == null) return null;
+        try {
+            for (Network n : cm.getAllNetworks()) {
+                NetworkCapabilities nc = cm.getNetworkCapabilities(n);
+                if (nc != null && nc.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) return n;
+            }
+        } catch (Exception e) {
+            Log.w(LAN_TAG, "findWifiNetwork: " + e);
+        }
+        return null;
+    }
+
+    @SuppressWarnings("deprecation")
+    private NetConfig resolveNetConfig() {
+        Context ctx = getContext().getApplicationContext();
+        NetConfig cfg = new NetConfig();
+        ConnectivityManager cm = (ConnectivityManager) ctx.getSystemService(Context.CONNECTIVITY_SERVICE);
+        Network wifi = findWifiNetwork(cm);
+        if (wifi != null) {
+            cfg.network = wifi;
+            LinkProperties lp = null;
+            try { lp = cm.getLinkProperties(wifi); } catch (Exception ignored) {}
+            if (lp != null) {
+                cfg.interfaceName = lp.getInterfaceName();
+                for (LinkAddress la : lp.getLinkAddresses()) {
+                    if (la.getAddress() instanceof Inet4Address) {
+                        cfg.deviceIp = la.getAddress().getHostAddress();
+                        cfg.prefixLength = la.getPrefixLength();
+                        break;
+                    }
+                }
+                for (RouteInfo r : lp.getRoutes()) {
+                    InetAddress g = r.getGateway();
+                    if (r.isDefaultRoute() && g instanceof Inet4Address && !g.isAnyLocalAddress()) {
+                        cfg.gatewayIp = g.getHostAddress();
+                        break;
+                    }
+                }
+                for (InetAddress d : lp.getDnsServers()) {
+                    if (d != null) cfg.dns.add(d.getHostAddress());
+                }
+                cfg.source = "linkProperties";
+            }
+        }
+        // Respaldo: DhcpInfo para lo que LinkProperties no dio.
+        if (cfg.deviceIp == null || cfg.gatewayIp == null || cfg.prefixLength == null || cfg.dns.isEmpty()) {
+            try {
+                WifiManager wm = (WifiManager) ctx.getSystemService(Context.WIFI_SERVICE);
+                DhcpInfo di = wm != null ? wm.getDhcpInfo() : null;
+                if (di != null && di.ipAddress != 0) {
+                    boolean used = false;
+                    if (cfg.deviceIp == null) { cfg.deviceIp = intToIp(di.ipAddress); used = true; }
+                    if (cfg.gatewayIp == null && di.gateway != 0) { cfg.gatewayIp = intToIp(di.gateway); used = true; }
+                    if (cfg.prefixLength == null) {
+                        int p = LanParsers.prefixFromDhcpNetmask(di.netmask);
+                        if (p > 0) { cfg.prefixLength = p; used = true; }
+                    }
+                    if (cfg.dns.isEmpty()) {
+                        if (di.dns1 != 0) { cfg.dns.add(intToIp(di.dns1)); used = true; }
+                        if (di.dns2 != 0) { cfg.dns.add(intToIp(di.dns2)); used = true; }
+                    }
+                    if (used) cfg.source = cfg.source == null ? "dhcpInfo" : cfg.source + "+dhcpInfo";
+                }
+            } catch (Exception e) {
+                Log.w(LAN_TAG, "getDhcpInfo: " + e);
+            }
+        }
+        return cfg;
+    }
+
+    private LanEngine.Ctx buildCtx(NetConfig cfg) {
+        NetworkInterface iface = null;
+        Inet4Address local = null;
+        try {
+            if (cfg.deviceIp != null) {
+                InetAddress a = InetAddress.getByName(cfg.deviceIp);
+                if (a instanceof Inet4Address) local = (Inet4Address) a;
+            }
+        } catch (Exception ignored) {}
+        try {
+            if (cfg.interfaceName != null) iface = NetworkInterface.getByName(cfg.interfaceName);
+            if (iface == null && local != null) iface = NetworkInterface.getByInetAddress(local);
+        } catch (Exception ignored) {}
+        return new LanEngine.Ctx(cfg.network, iface, local, lanExecutor);
+    }
+
+    private static final String NO_WIFI_MSG =
+        "No hay conexión WiFi activa: conéctese a la red del cliente y reintente.";
+
+    // -----------------------------------------------------------------------
+    // getNetConfig() → { deviceIp, gatewayIp, prefixLength, netmask, dns[] }
+    // -----------------------------------------------------------------------
+    @PluginMethod
+    public void getNetConfig(PluginCall call) {
+        runLan(call, "getNetConfig", () -> {
+            NetConfig cfg = resolveNetConfig();
+            if (cfg.deviceIp == null) {
+                call.reject(NO_WIFI_MSG);
+                return;
+            }
+            JSObject r = new JSObject();
+            r.put("deviceIp", cfg.deviceIp);
+            r.put("gatewayIp", nz(cfg.gatewayIp));
+            r.put("prefixLength", nz(cfg.prefixLength));
+            r.put("netmask", nz(cfg.prefixLength != null ? LanParsers.netmaskFromPrefix(cfg.prefixLength) : null));
+            JSONArray dns = new JSONArray();
+            for (String d : cfg.dns) dns.put(d);
+            r.put("dns", dns);
+            r.put("interfaceName", nz(cfg.interfaceName));
+            r.put("source", nz(cfg.source));
+            call.resolve(r);
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // tcpPing({ host, ports[], count, timeoutMs }) — tcpPingHost de netprobe.
+    // Devuelve los campos de `stat` en la raíz + { stat, respondsTcp,
+    // openPort, openPorts }.
+    // -----------------------------------------------------------------------
+    @PluginMethod
+    public void tcpPing(PluginCall call) {
+        final String host = call.getString("host");
+        if (host == null || host.trim().isEmpty()) {
+            call.reject("host requerido");
+            return;
+        }
+        final int[] ports = readPorts(call, "ports", DEFAULT_TCPPING_PORTS);
+        final int count = clamp(call.getInt("count", 4), 1, 100);
+        final int timeoutMs = clamp(call.getInt("timeoutMs", 1500), 50, 30000);
+        final int probeTimeoutMs = clamp(call.getInt("probeTimeoutMs", 800), 50, 30000);
+        runLan(call, "tcpPing", () -> {
+            Network net = resolveNetConfig().network;
+            LanEngine.HostPing hp = LanEngine.tcpPingHost(host.trim(), ports, count, timeoutMs, probeTimeoutMs, net);
+            JSObject stat = statToJs(hp.stat);
+            JSObject r = new JSObject();
+            java.util.Iterator<String> keys = stat.keys();
+            while (keys.hasNext()) {
+                String k = keys.next();
+                r.put(k, stat.opt(k));
+            }
+            r.put("stat", stat);
+            r.put("respondsTcp", hp.respondsTcp);
+            r.put("openPort", nz(hp.openPort));
+            r.put("openPorts", intArray(hp.openPorts));
+            r.put("host", host.trim());
+            call.resolve(r);
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // sweepSubnet({ ports, timeoutMs=600, batchSize=32 }) → { alive:[...] }
+    // Barre la /24 de la IP local; emite 'lanProgress' {phase,done,total}.
+    // -----------------------------------------------------------------------
+    @PluginMethod
+    public void sweepSubnet(PluginCall call) {
+        final int[] ports = readPorts(call, "ports", DEFAULT_SWEEP_PORTS);
+        final int timeoutMs = clamp(call.getInt("timeoutMs", 600), 50, 10000);
+        // Tope 64: 64 IPs × 10 puertos = 640 sockets simultáneos como máximo.
+        final int batchSize = clamp(call.getInt("batchSize", 32), 1, 64);
+        final String ipArg = call.getString("deviceIp");
+        runLan(call, "sweepSubnet", () -> {
+            NetConfig cfg = resolveNetConfig();
+            String base = (ipArg != null && !ipArg.isEmpty()) ? ipArg : cfg.deviceIp;
+            if (base == null) {
+                call.reject(NO_WIFI_MSG);
+                return;
+            }
+            String prefix = LanParsers.slash24Prefix(base);
+            if (prefix == null) {
+                call.reject("IP local inválida para el barrido: " + base);
+                return;
+            }
+            long t0 = System.currentTimeMillis();
+            List<LanEngine.SweepHit> hits = LanEngine.sweepSubnet(prefix, ports, timeoutMs, batchSize, cfg.network,
+                (done, total) -> {
+                    JSObject p = new JSObject();
+                    p.put("phase", "sweep");
+                    p.put("done", done);
+                    p.put("total", total);
+                    notifyListeners("lanProgress", p);
+                });
+            JSONArray alive = new JSONArray();
+            for (LanEngine.SweepHit h : hits) {
+                JSObject o = new JSObject();
+                o.put("ip", h.ip);
+                o.put("rttMs", Double.isInfinite(h.rttMs) ? JSONObject.NULL : (Object) LanParsers.r1(h.rttMs));
+                o.put("openPorts", intArray(h.openPorts));
+                o.put("respondsTcp", true);
+                alive.put(o);
+            }
+            JSObject r = new JSObject();
+            r.put("alive", alive);
+            r.put("subnet", prefix + "0/24");
+            r.put("durationMs", System.currentTimeMillis() - t0);
+            call.resolve(r);
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // probeHosts({ hosts:[ip], gatewayIp }) → { results:[...] } en lotes de 6.
+    // Por IP en paralelo: tcpPing, mDNS PTR, NetBIOS, PTR unicast al gateway
+    // y (si hay puerto web y falta nombre/tipo) banner HTTP.
+    // -----------------------------------------------------------------------
+    @PluginMethod
+    public void probeHosts(PluginCall call) {
+        JSONArray arr = call.getArray("hosts");
+        final List<String> hosts = new ArrayList<>();
+        if (arr != null) {
+            for (int i = 0; i < arr.length(); i++) {
+                String h = arr.optString(i, null);
+                if (h != null && !h.trim().isEmpty() && !hosts.contains(h.trim())) hosts.add(h.trim());
+            }
+        }
+        if (hosts.isEmpty()) {
+            call.reject("hosts requerido (lista de IPs)");
+            return;
+        }
+        final String gwArg = call.getString("gatewayIp");
+        runLan(call, "probeHosts", () -> {
+            NetConfig cfg = resolveNetConfig();
+            final String gw = (gwArg != null && !gwArg.isEmpty()) ? gwArg : cfg.gatewayIp;
+            final LanEngine.Ctx ctx = buildCtx(cfg);
+            final int total = hosts.size();
+            final int BATCH = 6;
+            JSONArray results = new JSONArray();
+            for (int i = 0; i < total; i += BATCH) {
+                List<Future<LanEngine.ProbeResult>> fs = new ArrayList<>();
+                List<String> slice = hosts.subList(i, Math.min(total, i + BATCH));
+                for (final String ip : slice) {
+                    fs.add(lanExecutor.submit(() -> LanEngine.probeHost(ip, gw, ctx)));
+                }
+                for (int k = 0; k < fs.size(); k++) {
+                    LanEngine.ProbeResult pr = LanEngine.getOr(fs.get(k), 30000, null);
+                    results.put(probeToJs(slice.get(k), pr));
+                }
+                JSObject p = new JSObject();
+                p.put("phase", "probe");
+                p.put("done", Math.min(total, i + BATCH));
+                p.put("total", total);
+                notifyListeners("lanProgress", p);
+            }
+            JSObject r = new JSObject();
+            r.put("results", results);
+            call.resolve(r);
+        });
+    }
+
+    private static JSObject probeToJs(String ip, LanEngine.ProbeResult pr) {
+        JSObject o = new JSObject();
+        o.put("ip", ip);
+        LanEngine.HostPing hp = pr != null ? pr.ping : null;
+        if (hp == null) {
+            hp = new LanEngine.HostPing();
+            hp.stat = LanParsers.noResponseStat();
+        }
+        o.put("openPorts", intArray(hp.openPorts));
+        o.put("openPort", nz(hp.openPort));
+        o.put("respondsTcp", hp.respondsTcp);
+        o.put("stat", statToJs(hp.stat));
+        o.put("mdnsName", nz(pr != null ? pr.mdnsName : null));
+        o.put("netbiosName", nz(pr != null ? pr.netbiosName : null));
+        o.put("netbiosMac", nz(pr != null ? pr.netbiosMac : null));
+        o.put("ptrName", nz(pr != null ? pr.ptrName : null));
+        if (pr != null && pr.banner != null) {
+            JSObject b = new JSObject();
+            b.put("server", nz(pr.banner.server));
+            b.put("realm", nz(pr.banner.realm));
+            b.put("title", nz(pr.banner.title));
+            o.put("banner", b);
+        } else {
+            o.put("banner", JSONObject.NULL);
+        }
+        return o;
+    }
+
+    // -----------------------------------------------------------------------
+    // discoverNetwork({ mdnsMs=6000, ssdpMs=6000 }) →
+    //   { [ip]: { name, type, source, manufacturer, model } }
+    // Adquiere y libera el MulticastLock dentro del método.
+    // -----------------------------------------------------------------------
+    @PluginMethod
+    public void discoverNetwork(PluginCall call) {
+        final int mdnsMs = clamp(call.getInt("mdnsMs", call.getInt("mdnsTimeoutMs", 6000)), 500, 30000);
+        final int ssdpMs = clamp(call.getInt("ssdpMs", call.getInt("ssdpTimeoutMs", 6000)), 500, 30000);
+        runLan(call, "discoverNetwork", () -> {
+            NetConfig cfg = resolveNetConfig();
+            if (cfg.deviceIp == null) {
+                call.reject(NO_WIFI_MSG);
+                return;
+            }
+            LanEngine.Ctx ctx = buildCtx(cfg);
+            WifiManager wm = (WifiManager) getContext().getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+            WifiManager.MulticastLock lock = null;
+            Map<String, LanParsers.Device> found;
+            try {
+                if (wm != null) {
+                    try {
+                        lock = wm.createMulticastLock("wifix-lan-discovery");
+                        lock.setReferenceCounted(false);
+                        lock.acquire();
+                    } catch (Exception e) {
+                        Log.w(LAN_TAG, "MulticastLock no disponible: " + e);
+                        lock = null;
+                    }
+                }
+                found = LanEngine.discoverNetwork(mdnsMs, ssdpMs, ctx);
+            } finally {
+                if (lock != null) {
+                    try { if (lock.isHeld()) lock.release(); } catch (Exception ignored) {}
+                }
+            }
+            JSObject r = new JSObject();
+            for (Map.Entry<String, LanParsers.Device> e : found.entrySet()) {
+                LanParsers.Device d = e.getValue();
+                JSObject o = new JSObject();
+                o.put("name", nz(d.name));
+                o.put("type", nz(d.type));
+                o.put("source", nz(d.source));
+                o.put("manufacturer", nz(d.manufacturer));
+                o.put("model", nz(d.model));
+                r.put(e.getKey(), o);
+            }
+            call.resolve(r);
+        });
     }
 
     // =======================================================================
