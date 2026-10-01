@@ -1406,6 +1406,15 @@ function _napUsesContractedNap(category = currentCategory) {
   return NAP_CONTRACTED_MODULES.includes(category);
 }
 
+// Módulos donde se puede guardar la ubicación "Casa cliente" (mismo
+// componente y mismo POST client-location; el backend no distingue módulo).
+// En Visita técnica / Migración va dentro de la tarjeta de la NAP del
+// cliente; en Instalaciones, al final del panel (debajo del resumen GPON).
+const CLIENT_LOC_MODULES = Object.freeze(['instalaciones', 'visitas', 'migraciones']);
+function _napUsesClientLoc(category = currentCategory) {
+  return CLIENT_LOC_MODULES.includes(category);
+}
+
 // ¿Hay NAP del cliente para pintar (current-nap con found y nap)?
 function _napHasClientNap() {
   const cur = _napPanelState.currentNap;
@@ -1882,6 +1891,7 @@ async function _napFetchAndRender(scope) {
       _napPanelState.selectedNap = null;
       _napPanelState.selectedPort = null;
       await _renderGponSummary(scope);
+      _clientLocRefresh(scope);
     }
     _renderNapCards(_napPanelState.naps, scope);
     _napRenderAllFullHint(scope);
@@ -2072,6 +2082,8 @@ function _wireNapCardButtons(scope, naps) {
       _wireNapCardButtons(scope, naps);
       _napMapFocus(fresh.dataset.nap, false);
       await _renderGponSummary(scope);
+      // Casa cliente: la distancia se mide contra la NAP elegida para GPON.
+      _clientLocRefresh(scope);
     });
   });
 }
@@ -2221,7 +2233,7 @@ function _wireNapCurrentCard(scope) {
 }
 
 // ---------------------------------------------------------------------------
-// Ubicación "Casa cliente" (Visita técnica / Migración)
+// Ubicación "Casa cliente" (Visita técnica / Migración / Instalaciones)
 // GET/POST /accounts/:accountNumber/client-location. Append-only: cada captura
 // es un registro nuevo; nunca se edita la anterior.
 // ---------------------------------------------------------------------------
@@ -2283,8 +2295,25 @@ function _clientLocAccuracyHtml(source, acc) {
 }
 
 // Distancia de un punto a la NAP del cliente (Haversine local).
+// NAP de referencia de la captura Casa cliente:
+//   Visita técnica / Migración → la NAP contratada (current-nap) y su puerto.
+//   Instalaciones              → la NAP elegida para GPON y el puerto elegido.
+// { nap: null, port: null } si todavía no hay NAP.
+function _clientLocRefNap() {
+  if (_napUsesContractedNap()) {
+    const cur = _napPanelState.currentNap;
+    return {
+      nap: _napHasClientNap() ? cur.nap : null,
+      port: cur ? cur.portNumber : null,
+    };
+  }
+  const ref = _napPanelState.selectedNap;
+  const nap = ref ? (_napPanelState.naps || []).find(n => _napRef(n) === ref) || null : null;
+  return { nap, port: nap ? _napPanelState.selectedPort : null };
+}
+
 function _clientLocDistToNap(pt) {
-  const n = _napHasClientNap() ? _napPanelState.currentNap.nap : null;
+  const n = _clientLocRefNap().nap;
   if (!pt || !n || !_napHasCoords(n)) return null;
   return _napHaversineMeters(Number(pt.latitude), Number(pt.longitude), Number(n.latitude), Number(n.longitude));
 }
@@ -2299,14 +2328,24 @@ function _clientLocDistToRegistered(pt, reg) {
 function _clientLocComparisonHtml(pt, fromBackend) {
   const st = _napPanelState.clientLoc;
   const reg = (fromBackend && fromBackend.registeredLocation) || st.registeredLocation || null;
-  const napCode = _napHasClientNap() ? (_napPanelState.currentNap.nap.napCode || 'NAP') : null;
-  const dNap = fromBackend && _isNum(fromBackend.distanceToNapMeters)
-    ? Number(fromBackend.distanceToNapMeters) : _clientLocDistToNap(pt);
+  const refNap = _clientLocRefNap().nap;
+  // La captura guardada trae su propio napCode (la NAP de ese momento).
+  const napCode = (fromBackend && fromBackend.napCode) || (refNap ? (refNap.napCode || 'NAP') : null);
+  // El backend solo calcula la distancia contra la NAP de current-nap. En
+  // Instalaciones la NAP elegida suele ser otra: si la captura guardada es de
+  // esa misma NAP, la distancia se calcula aquí.
+  const mismaNap = !!(fromBackend && refNap && fromBackend.napCode && refNap.napCode
+    && String(fromBackend.napCode).trim().toUpperCase() === String(refNap.napCode).trim().toUpperCase());
+  let dNap;
+  if (fromBackend && _isNum(fromBackend.distanceToNapMeters)) dNap = Number(fromBackend.distanceToNapMeters);
+  else if (!fromBackend || mismaNap || _napUsesContractedNap()) dNap = _clientLocDistToNap(pt);
+  else dNap = null;
   const dReg = fromBackend && _isNum(fromBackend.distanceToRegisteredMeters)
     ? Number(fromBackend.distanceToRegisteredMeters) : _clientLocDistToRegistered(pt, reg);
-  const napTxt = dNap !== null
-    ? `${escapeHtml(_fmtMeters(dNap))}${napCode ? ` de la NAP ${escapeHtml(napCode)}` : ''}`
-    : 'Sin coordenada de la NAP para calcular';
+  let napTxt;
+  if (dNap !== null) napTxt = `${escapeHtml(_fmtMeters(dNap))}${napCode ? ` de la NAP ${escapeHtml(napCode)}` : ''}`;
+  else if (!refNap && !_napUsesContractedNap()) napTxt = 'Elige una NAP para GPON para calcular la distancia';
+  else napTxt = 'Sin coordenada de la NAP para calcular';
   const dePrueba = reg && reg.source === 'MOCK' ? ' (de prueba)' : '';
   let regTxt;
   if (!reg) regTxt = 'Sin ubicación registrada de la operadora para comparar';
@@ -2543,10 +2582,12 @@ async function _clientLocSave(scope, btn) {
     // Mismo taskId que el resto de registros: workOrder/fsmTaskId de la
     // visita PENDIENTE de la cuenta (null → no se envía).
     const taskId = await resolveCurrentVisitTaskId(st.account);
-    const cur = _napPanelState.currentNap;
+    // NAP de referencia según el módulo (contratada o la elegida para GPON).
+    // El contrato del POST no lleva campo de módulo/origen: no se envía.
+    const ref = _clientLocRefNap();
     const payload = buildClientLocationPayload(st.draft, {
-      napCode: cur && cur.nap ? cur.nap.napCode : null,
-      napPort: cur ? cur.portNumber : null,
+      napCode: ref.nap ? ref.nap.napCode : null,
+      napPort: ref.port,
       taskId,
       notes: notesEl ? notesEl.value : '',
     });
@@ -2720,17 +2761,20 @@ function _napMapNaps() {
   return out;
 }
 
-// Puntos extra del mapa en Visita técnica / Migración:
+// Puntos extra del mapa:
 //   casa: captura "Casa cliente" (la nueva sin guardar manda sobre la guardada)
+//         — Instalaciones, Visita técnica y Migración.
 //   registered: ubicación registrada de la operadora (del GET client-location;
-//   mientras no llega, la coordenada del domicilio del perfil).
+//   mientras no llega, la coordenada del domicilio del perfil) — solo Visita
+//   técnica / Migración (Instalaciones ya pinta el domicilio del perfil).
 function _napMapClientPoints() {
-  if (!_napUsesContractedNap()) return { casa: null, registered: null, napFallback: null };
+  if (!_napUsesClientLoc()) return { casa: null, registered: null, napFallback: null };
   const st = _napPanelState.clientLoc;
   const valid = (p) => !!p && _isNum(p.latitude) && _isNum(p.longitude);
   let casa = null;
   if (valid(st.draft)) casa = { latitude: Number(st.draft.latitude), longitude: Number(st.draft.longitude), unsaved: true };
   else if (valid(st.latest)) casa = { latitude: Number(st.latest.latitude), longitude: Number(st.latest.longitude), unsaved: false };
+  if (!_napUsesContractedNap()) return { casa, registered: null, napFallback: null };
   let reg = st.registeredLocation;
   if (!reg && (st.loading || st.error)) reg = _napPanelState.homeCoords;
   const registered = valid(reg)
@@ -2869,6 +2913,7 @@ function _napMapCreate(scope, slot) {
     <div class="nap-map-legend" aria-hidden="true">
       <span><span class="nap-map-dot tech"></span>Tú</span>
       <span><span class="nap-map-dot home"></span>Domicilio</span>
+      <span><span class="nap-map-dot casa"></span>Casa cliente</span>
       <span><span class="nap-map-dot free"></span>Con libres</span>
       <span><span class="nap-map-dot full"></span>Llena</span>
       <span><span class="nap-map-dot unknown"></span>Sin dato</span>
@@ -3121,6 +3166,9 @@ function renderNapPanel() {
       <!-- 6) Bloque resumen GPON -->
       <div data-slot="gpon-summary" hidden></div>
 
+      <!-- 7) Ubicación Casa cliente (mismo componente que Visita técnica) -->
+      ${_napUsesClientLoc() ? _renderClientLocSection() : ''}
+
     </div>`;
 }
 
@@ -3153,20 +3201,25 @@ async function loadNapPanel(cuenta) {
   if (home) {
     _napPanelState.homeCoords = { latitude: home.latitude, longitude: home.longitude, accuracy: null };
   }
-  // Visita técnica / Migración: la NAP contratada del cliente y, en paralelo,
-  // su ubicación "Casa cliente" guardada. Una sola llamada de cada una por
-  // apertura del panel: los re-render leen el estado.
-  if (_napUsesContractedNap() && cuenta) {
+  // Ubicación "Casa cliente" guardada (Instalaciones, Visita técnica y
+  // Migración): una sola llamada por apertura del panel; los re-render leen
+  // el estado.
+  let locP = null;
+  if (_napUsesClientLoc() && cuenta) {
     const cl = _napPanelState.clientLoc;
     cl.account = cuenta;
     cl.loading = true;
-    const locP = WifixAPI.getClientLocation(cuenta).then(
+    locP = WifixAPI.getClientLocation(cuenta).then(
       (r) => { if (_napPanelState.clientLoc === cl) _clientLocApplyList(cl, r); },
       (err) => {
         console.error('[Wifix] casa cliente (GET)', err);
         if (_napPanelState.clientLoc === cl) cl.error = err;
       },
     ).then(() => { cl.loading = false; });
+  }
+  // Visita técnica / Migración: además, la NAP contratada del cliente (en
+  // paralelo con la ubicación guardada).
+  if (_napUsesContractedNap() && cuenta) {
     try {
       // Sin coordenada del domicilio, el backend no puede ubicar la NAP: si el
       // técnico ya tiene GPS de una apertura anterior, se usa como centro.
@@ -3179,6 +3232,8 @@ async function loadNapPanel(cuenta) {
       console.error('[Wifix] NAP del cliente', err);
       _napPanelState.currentNapError = err;
     }
+  }
+  if (locP) {
     await locP;
     if (seq !== _napLoadSeq) return null;
   }
@@ -3196,6 +3251,7 @@ function _bootNapPanel(body) {
     return;
   }
   _wireNapPanel(panel);
+  _wireClientLoc(panel);
   // Si ya había una coordenada de una apertura anterior, se reconsulta sola.
   if (_napPanelState.coords) {
     _napFetchAndRender(panel);

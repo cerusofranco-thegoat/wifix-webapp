@@ -903,9 +903,21 @@ console.log('\n== NAP contratada en Migraciones e Instalaciones intacta ==');
   llamadasCN = 0;
   ctx.selectModule('instalaciones');
   const instH = await ctx.loadNapPanel('35070291');
-  check('instalación: sigue la lista 280/500 m sin current-nap ni Casa cliente',
+  check('instalación: sigue la lista 280/500 m sin current-nap, ahora con Casa cliente',
     llamadasCN === 0 && instH.includes('data-meters="280"') && instH.includes('data-meters="500"')
-    && instH.includes('data-action="nap-search"') && !instH.includes('client-loc'));
+    && instH.includes('data-action="nap-search"') && instH.includes('data-slot="client-loc"')
+    && instH.includes('data-action="client-loc-save"'));
+  check('_napUsesClientLoc: instalaciones, visitas y migraciones sí; cancelaciones no',
+    ctx._napUsesClientLoc('instalaciones') && ctx._napUsesClientLoc('visitas') && ctx._napUsesClientLoc('migraciones')
+    && !ctx._napUsesClientLoc('cancelaciones'));
+  vm.runInContext("_napPanelState.naps = [{ napId: 77, napCode: 'NAP-INST-1', latitude: -2.2476, longitude: -79.9046, totalPorts: 8, occupiedPorts: 3 }];"
+    + " _napPanelState.selectedNap = '77'; _napPanelState.selectedPort = 4;", ctx);
+  const refInst = ctx._clientLocRefNap();
+  check('instalación: la NAP de referencia de Casa cliente es la elegida para GPON (y su puerto)',
+    refInst.nap && refInst.nap.napCode === 'NAP-INST-1' && refInst.port === 4);
+  vm.runInContext("_napPanelState.selectedNap = null; _napPanelState.selectedPort = null; _napPanelState.naps = [];", ctx);
+  check('instalación sin NAP elegida: no inventa NAP de referencia',
+    ctx._clientLocRefNap().nap === null && ctx._clientLocRefNap().port === null);
   check('instalación: título del panel sin cambios',
     ctx.servicioItemTitle(vm.runInContext('SERVICIO_ITEMS', ctx)[0]) === 'NAPs cercanas y seleccion GPON Xtreme');
   check('styles.css sin la regla muerta de "Cambiar NAP"',
