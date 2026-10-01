@@ -1243,11 +1243,6 @@ function renderClientProfile(profile, cuenta) {
 function renderEditProfileForm(profile, cuenta, slot) {
   slot.innerHTML = `
     <div class="tool-form" data-form="profile-edit">
-      <div class="form-row form-row-readonly">
-        <span class="form-label" id="profileEditNameLabel">Nombres y Apellidos</span>
-        <p class="readonly-value" aria-labelledby="profileEditNameLabel" aria-describedby="profileEditNameHint">${profileFieldHtml(profile.fullName)}</p>
-        <span class="form-hint" id="profileEditNameHint">Solo lectura: el nombre del titular no se puede modificar desde Wifix.</span>
-      </div>
       <label class="form-row"><span class="form-label">Dirección</span>
         <textarea data-field="address" rows="2">${escapeHtml(profile.address || '')}</textarea></label>
       <label class="form-row"><span class="form-label">Teléfonos (uno por línea)</span>
@@ -1259,8 +1254,9 @@ function renderEditProfileForm(profile, cuenta, slot) {
   const formEl = slot.querySelector('[data-form="profile-edit"]');
   const saveBtn = formEl.querySelector('[data-action="save-profile"]');
   saveBtn.addEventListener('click', async () => {
-    // Nombre y apellido son de solo lectura (dato sensible del titular): nunca
-    // viajan en el payload, aunque alguien manipule el DOM.
+    // Nombre y apellido NO forman parte de este formulario (dato del titular,
+    // no editable desde Wifix): el payload solo lleva dirección y teléfonos.
+    // El nombre se sigue mostrando en el resumen de la cuenta.
     const address = nonEmpty(formEl.querySelector('[data-field="address"]').value);
     const phonesRaw = formEl.querySelector('[data-field="phones"]').value || '';
     const phones = phonesRaw.split('\n').map(s => s.trim()).filter(Boolean);

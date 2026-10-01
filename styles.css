@@ -1813,18 +1813,6 @@ body {
 }
 .tool-form textarea { resize: vertical; min-height: 56px; }
 
-/* Campo de solo lectura dentro de un formulario (p. ej. nombre del titular en
-   "Actualizar datos"): se ve como dato, no como input deshabilitado. */
-.readonly-value {
-  margin: 0;
-  padding: 10px 12px;
-  font-size: 13px;
-  color: var(--text-primary);
-  background: var(--gray-50);
-  border: 1px dashed var(--gray-200);
-  border-radius: var(--radius-btn);
-  word-break: break-word;
-}
 .form-hint {
   font-size: 11px;
   color: var(--text-secondary);
