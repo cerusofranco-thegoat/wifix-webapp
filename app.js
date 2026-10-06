@@ -1536,6 +1536,8 @@ let _napPanelState = {
   currentNapError: null, // Error si la consulta falló (red, 502, 503)
   // Ubicación "Casa cliente" (GET/POST /accounts/:n/client-location).
   clientLoc: _clientLocEmptyState(),
+  // NAP elegida en Instalación (GET/POST /accounts/:n/nap-assignment).
+  napAssign: _napAssignEmptyState(),
 };
 
 // Visita técnica y Migraciones: el cliente YA tiene una NAP contratada
@@ -2133,7 +2135,8 @@ async function _renderGponSummary(scope) {
           <span class="nap-gpon-val nap-gpon-free-port${_portState(elegido) === 'cancelado' ? ' is-reusable' : ''}">${escapeHtml(_gponPortText(elegido))}</span>
         </div>` : '';
 
-    // TODO: a futuro -> enviar selección (NAP + puerto) a API GPON Xtreme (POST .../assign-nap)
+    // La selección (NAP + puerto) se persiste con «Guardar NAP elegida»
+    // (POST /accounts/:n/nap-assignment, ver _napAssignSave).
 
     summarySlot.innerHTML = `
       <div class="nap-gpon-summary">
@@ -2175,6 +2178,7 @@ async function _renderGponSummary(scope) {
         if (again) again.focus();
       });
     });
+    _napAssignRefresh(scope);
   } catch (err) {
     summarySlot.innerHTML = `<div class="detail-error">${escapeHtml(err.message || 'Error al cargar puertos')}</div>`;
   }
@@ -2239,6 +2243,9 @@ async function _napFetchAndRender(scope) {
       _napRenderMap(scope);
       return;
     }
+    // Al reabrir: si no hay selección y la NAP guardada está en el resultado,
+    // se preselecciona con su puerto (el técnico la ve ya elegida).
+    _napAssignPreselect(_napPanelState.naps);
     // Si la NAP seleccionada ya no está en el resultado, se limpia la selección.
     if (_napPanelState.selectedNap &&
         !_napPanelState.naps.some(n => _napRef(n) === _napPanelState.selectedNap)) {
@@ -2251,6 +2258,8 @@ async function _napFetchAndRender(scope) {
     _napRenderAllFullHint(scope);
     _wireNapCardButtons(scope, _napPanelState.naps);
     _napRenderMap(scope);
+    if (_napPanelState.selectedNap) _renderGponSummary(scope);
+    _napAssignRefresh(scope);
     // Puertos de cada NAP en segundo plano (no se espera: la lista ya está).
     const lista = _napPanelState.naps;
     _napAutoLoadPorts(scope, lista, {
@@ -2608,6 +2617,210 @@ function _renderCurrentNapCard() {
 function _wireNapCurrentCard(scope) {
   if (!_napHasClientNap() || !_napCanLoadPorts(_napPanelState.currentNap)) return;
   wireNapPortsButtons(scope);
+}
+
+// ---------------------------------------------------------------------------
+// NAP elegida en Instalación — POST/GET /accounts/:n/nap-assignment
+// (contrato 2026-10-06 §5, append-only). El técnico elige NAP + puerto en el
+// panel GPON y toca «Guardar NAP elegida»; al reabrir se ve la guardada (y se
+// preselecciona si aparece en la búsqueda).
+// ---------------------------------------------------------------------------
+const NAP_ASSIGN_MODULES = Object.freeze(['instalaciones']);
+const NAP_ASSIGN_SOURCES = Object.freeze(['FSM', 'TEC', 'MOCK']);
+
+function _napUsesNapAssignment(category = currentCategory) {
+  return NAP_ASSIGN_MODULES.includes(category);
+}
+
+function _napAssignEmptyState() {
+  return { account: null, loading: false, error: null, latest: null, items: [], saving: false, status: null, statusKind: '' };
+}
+
+function _napAssignApplyList(st, r) {
+  const body = r || {};
+  st.items = Array.isArray(body.items) ? body.items : [];
+  st.latest = body.latest || st.items[0] || null;
+}
+
+/** NAP elegida actualmente en el panel (objeto NAP + puerto) o null. */
+function _napAssignSelection() {
+  const ref = _napPanelState.selectedNap;
+  if (!ref) return null;
+  const nap = (_napPanelState.naps || []).find(n => _napRef(n) === ref) || null;
+  if (!nap) return null;
+  const port = _isNum(_napPanelState.selectedPort) ? Number(_napPanelState.selectedPort) : null;
+  return { nap, port };
+}
+
+/**
+ * Cuerpo del POST nap-assignment. Pura. ctx = { taskId, workOrder, mock }.
+ * napId como texto (o null), coordenadas/distancia null si no hay.
+ */
+function buildNapAssignmentPayload(nap, port, ctx = {}) {
+  const numOrNull = (v) => (_isNum(v) ? Number(v) : null);
+  let source = nap && NAP_ASSIGN_SOURCES.includes(nap.source) ? nap.source : 'TEC';
+  if (ctx.mock) source = 'MOCK';
+  const dist = numOrNull(ctx.distanceMeters);
+  return {
+    napId: nap && nap.napId !== null && nap.napId !== undefined ? String(nap.napId) : null,
+    napCode: String((nap && nap.napCode) || ''),
+    napName: (nap && (nap.napName || nap.name || nap.networkName)) || null,
+    port: Number.isInteger(port) && port > 0 ? port : null,
+    latitude: numOrNull(nap && nap.latitude),
+    longitude: numOrNull(nap && nap.longitude),
+    distanceMeters: dist === null ? null : Math.round(dist * 10) / 10,
+    source,
+    taskId: ctx.taskId || null,
+    workOrder: ctx.workOrder || null,
+  };
+}
+
+/** ¿La selección actual es la misma que la guardada? */
+function _napAssignSameAsSaved(sel, saved) {
+  if (!sel || !saved) return false;
+  const mismaNap = (saved.napId !== null && saved.napId !== undefined && sel.nap.napId !== null && sel.nap.napId !== undefined)
+    ? String(saved.napId) === String(sel.nap.napId)
+    : String(saved.napCode || '').toUpperCase() === String(sel.nap.napCode || '').toUpperCase();
+  return mismaNap && String(saved.port ?? '') === String(sel.port ?? '');
+}
+
+/** Preselecciona la NAP guardada si está en el resultado y no hay selección. */
+function _napAssignPreselect(naps) {
+  const saved = _napPanelState.napAssign && _napPanelState.napAssign.latest;
+  if (!saved || _napPanelState.selectedNap || !_napUsesNapAssignment()) return;
+  const hit = (naps || []).find((n) => (saved.napId !== null && saved.napId !== undefined && n.napId !== null && n.napId !== undefined)
+    ? String(n.napId) === String(saved.napId)
+    : String(n.napCode || '').toUpperCase() === String(saved.napCode || '').toUpperCase());
+  if (!hit) return;
+  _napPanelState.selectedNap = _napRef(hit);
+  _napPanelState.selectedPort = saved.port ?? null;
+}
+
+/** Bloque "NAP guardada" + botón Guardar. Pura respecto al DOM. */
+function _napAssignHtml() {
+  const st = _napPanelState.napAssign || _napAssignEmptyState();
+  const sel = _napAssignSelection();
+  const saved = st.latest;
+  let guardada;
+  if (st.loading) guardada = '<div class="detail-loading">Cargando NAP guardada…</div>';
+  else if (st.error) {
+    guardada = `<div class="client-loc-error" role="alert">No se pudo cargar la NAP guardada: ${escapeHtml(st.error.message || 'error del servidor')}.
+        <button type="button" class="link-btn" data-action="nap-assign-reload">Reintentar</button></div>`;
+  } else if (saved) {
+    const dist = _fmtMeters(saved.distanceMeters);
+    guardada = `
+      <div class="nap-assign-saved">
+        <p class="nap-assign-saved-head">NAP guardada el ${dateTimeHtml(saved.createdAt, { seconds: false, relative: false })}</p>
+        <dl class="client-loc-facts">
+          <div><dt>NAP</dt><dd class="mono">${escapeHtml(saved.napCode || '—')}</dd></div>
+          <div><dt>Puerto</dt><dd>${saved.port ? escapeHtml(pad(saved.port)) : 'Sin puerto'}</dd></div>
+          ${dist ? `<div><dt>Distancia</dt><dd>${escapeHtml(dist)}</dd></div>` : ''}
+          ${saved.workOrder ? `<div><dt>Orden</dt><dd class="mono">${escapeHtml(saved.workOrder)}</dd></div>` : ''}
+        </dl>
+        ${st.items.length > 1 ? `<p class="client-loc-count">${escapeHtml(String(st.items.length))} NAPs guardadas para esta cuenta; se muestra la más reciente.</p>` : ''}
+      </div>`;
+  } else {
+    guardada = '<p class="client-loc-empty">Aún no hay NAP guardada para esta instalación.</p>';
+  }
+  const igual = _napAssignSameAsSaved(sel, saved);
+  let accion;
+  if (!sel) {
+    accion = '<p class="nap-assign-hint">Elige una NAP con «Seleccionar para GPON» y su puerto para guardarla.</p>';
+  } else if (igual) {
+    accion = '<p class="nap-assign-hint is-ok">La NAP y el puerto elegidos ya están guardados.</p>';
+  } else {
+    const resumen = `${sel.nap.napCode || 'NAP'}${sel.port ? ` · puerto ${pad(sel.port)}` : ' · sin puerto'}`;
+    accion = `<button type="button" class="save-btn nap-assign-save-btn" data-action="nap-assign-save"
+        aria-describedby="napAssignStatus"${st.saving ? ' disabled aria-busy="true"' : ''}>${st.saving ? 'Guardando…' : `Guardar NAP elegida (${escapeHtml(resumen)})`}</button>`;
+  }
+  return `
+      <h4 class="client-loc-title" id="napAssignTitle">NAP elegida para la instalación</h4>
+      <div aria-live="polite">${guardada}</div>
+      ${accion}
+      <p class="client-loc-status${st.statusKind ? ' ' + st.statusKind : ''}" id="napAssignStatus" role="${st.statusKind === 'error' ? 'alert' : 'status'}">${escapeHtml(st.status || '')}</p>`;
+}
+
+function _napAssignRefresh(scope) {
+  const slot = scope && scope.querySelector ? scope.querySelector('[data-slot="nap-assign"]') : null;
+  if (slot) slot.innerHTML = _napAssignHtml();
+}
+
+async function _napAssignSave(scope) {
+  const st = _napPanelState.napAssign;
+  const sel = _napAssignSelection();
+  if (!st || st.saving || !sel || !st.account) return null;
+  st.saving = true;
+  st.status = 'Guardando la NAP elegida…';
+  st.statusKind = '';
+  _napAssignRefresh(scope);
+  let saved = null;
+  try {
+    const payload = buildNapAssignmentPayload(sel.nap, sel.port, {
+      // Instalaciones no tiene task de FSM validada: viaja la orden de la sesión.
+      taskId: visitTaskIdFor(st.account),
+      workOrder: sessionWorkOrder(st.account),
+      distanceMeters: _napDistanceToNap(sel.nap),
+      mock: !WifixAPI.useRealApi,
+    });
+    saved = await WifixAPI.createNapAssignment(st.account, payload);
+    if (_napPanelState.napAssign !== st) return null;
+    st.latest = saved;
+    st.items = [saved].concat(st.items.filter((x) => x && x.id !== saved.id));
+    st.status = `NAP guardada: ${saved.napCode}${saved.port ? `, puerto ${pad(saved.port)}` : ''}.`;
+    st.statusKind = 'ok';
+  } catch (err) {
+    console.error('[Wifix] guardar NAP elegida', err);
+    if (_napPanelState.napAssign === st) {
+      st.status = `No se pudo guardar la NAP: ${(err && err.message) || 'error desconocido'}`;
+      st.statusKind = 'error';
+    }
+  } finally {
+    st.saving = false;
+    if (_napPanelState.napAssign === st) _napAssignRefresh(scope);
+  }
+  return saved;
+}
+
+async function _napAssignReload(scope) {
+  const st = _napPanelState.napAssign;
+  if (!st || !st.account) return;
+  st.loading = true;
+  st.error = null;
+  _napAssignRefresh(scope);
+  try {
+    const r = await WifixAPI.getNapAssignment(st.account);
+    if (_napPanelState.napAssign !== st) return;
+    _napAssignApplyList(st, r);
+  } catch (err) {
+    if (_napPanelState.napAssign !== st) return;
+    st.error = err;
+  }
+  st.loading = false;
+  _napAssignRefresh(scope);
+}
+
+function _wireNapAssign(scope) {
+  const slot = scope && scope.querySelector ? scope.querySelector('[data-slot="nap-assign"]') : null;
+  if (!slot || !slot.addEventListener) return;
+  slot.addEventListener('click', (ev) => {
+    const btn = ev.target && ev.target.closest ? ev.target.closest('[data-action]') : null;
+    if (!btn) return;
+    ev.stopPropagation();
+    if (btn.dataset.action === 'nap-assign-save') _napAssignSave(scope);
+    else if (btn.dataset.action === 'nap-assign-reload') _napAssignReload(scope);
+  });
+}
+
+/** Registro "NAP elegida" en el historial de visitas (records.napAssignments). */
+function _recNapAssignmentHtml(a) {
+  const dist = _fmtMeters(a.distanceMeters);
+  return `
+    <li class="rec-item">
+      <div class="rec-head"><span class="rec-title">NAP elegida (instalación)</span></div>
+      <div class="rec-values">NAP <strong class="mono">${escapeHtml(a.napCode || '—')}</strong>${a.port ? ` · puerto <strong>${escapeHtml(pad(a.port))}</strong>` : ' · sin puerto'}${dist ? ` · a ${escapeHtml(dist)}` : ''}</div>
+      ${a.workOrder ? `<div class="rec-values">Orden <span class="mono">${escapeHtml(a.workOrder)}</span></div>` : ''}
+      <div class="rec-meta">${_recordWhen(a, 'createdAt')}${_recordLinkHint(a)}</div>
+    </li>`;
 }
 
 // ---------------------------------------------------------------------------
@@ -3550,6 +3763,9 @@ function renderNapPanel() {
       <!-- 6) Bloque resumen GPON -->
       <div data-slot="gpon-summary" hidden></div>
 
+      <!-- 6b) NAP elegida guardada (POST/GET nap-assignment) -->
+      ${_napUsesNapAssignment() ? `<section class="nap-assign" data-slot="nap-assign" aria-labelledby="napAssignTitle">${_napAssignHtml()}</section>` : ''}
+
       <!-- 7) Ubicación Casa cliente (mismo componente que Visita técnica) -->
       ${_napUsesClientLoc() ? _renderClientLocSection() : ''}
 
@@ -3575,6 +3791,7 @@ async function loadNapPanel(cuenta) {
   _napPanelState.currentNap = null;
   _napPanelState.currentNapError = null;
   _napPanelState.clientLoc = _clientLocEmptyState();
+  _napPanelState.napAssign = _napAssignEmptyState();
   // Coordenada del domicilio: sale del perfil que ya se cargó al confirmar la
   // cuenta. NO se pide de nuevo: cero llamadas extra a la operadora.
   _napPanelState.homeCoords = null;
@@ -3617,8 +3834,26 @@ async function loadNapPanel(cuenta) {
       _napPanelState.currentNapError = err;
     }
   }
+  // Instalaciones: la NAP ya guardada para esta cuenta (al reabrir se ve).
+  let asgP = null;
+  if (_napUsesNapAssignment() && cuenta) {
+    const na = _napPanelState.napAssign;
+    na.account = cuenta;
+    na.loading = true;
+    asgP = WifixAPI.getNapAssignment(cuenta).then(
+      (r) => { if (_napPanelState.napAssign === na) _napAssignApplyList(na, r); },
+      (err) => {
+        console.error('[Wifix] NAP elegida (GET)', err);
+        if (_napPanelState.napAssign === na) na.error = err;
+      },
+    ).then(() => { na.loading = false; });
+  }
   if (locP) {
     await locP;
+    if (seq !== _napLoadSeq) return null;
+  }
+  if (asgP) {
+    await asgP;
     if (seq !== _napLoadSeq) return null;
   }
   return renderNapPanel();
@@ -3642,6 +3877,7 @@ function _bootNapPanel(body) {
   }
   _wireNapPanel(panel);
   _wireClientLoc(panel);
+  _wireNapAssign(panel);
   // Si ya había una coordenada de una apertura anterior, se reconsulta sola.
   if (_napPanelState.coords) {
     _napFetchAndRender(panel);
@@ -5689,6 +5925,7 @@ function renderVisitRecords(records) {
     ...arr('wifiHeatmaps').map(_recWifiHtml),
     ...arr('distanceMeasurements').map(_recDistanceHtml),
     ...arr('clientLocations').map(_recClientLocationHtml),
+    ...arr('napAssignments').map(_recNapAssignmentHtml),
     ...arr('retiredEquipment').map(_recRetiredHtml),
     ...arr('deviceValidations').map(_recDeviceValidationHtml),
   ].join('');

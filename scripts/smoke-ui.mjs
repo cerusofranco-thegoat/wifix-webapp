@@ -2172,6 +2172,45 @@ console.log('\n== Contexto de la orden (Visita técnica / Migraciones) ==');
     idsMig === 'order,naps,events' && idsVis.includes('order') && !idsIns.includes('order'), idsMig);
 }
 
+console.log('\n== NAP elegida en Instalación (nap-assignment) ==');
+{
+  const api = ctx.WifixAPI;
+  ctx.selectModule('instalaciones');
+  const nap = { napId: 11542, napCode: 'NAP-14-03', networkName: 'OLT-GYE-03/1/2', latitude: -2.2475, longitude: -79.9039, distanceMeters: 61.27, source: 'FSM' };
+  const p = ctx.buildNapAssignmentPayload(nap, 5, { taskId: null, workOrder: 'ORDER/463158/2026', distanceMeters: 61.27 });
+  check('payload nap-assignment: forma del contrato §5',
+    p.napId === '11542' && p.napCode === 'NAP-14-03' && p.napName === 'OLT-GYE-03/1/2' && p.port === 5
+    && p.latitude === -2.2475 && p.distanceMeters === 61.3 && p.source === 'FSM' && p.taskId === null
+    && p.workOrder === 'ORDER/463158/2026', JSON.stringify(p));
+  check('payload nap-assignment: en mock la fuente es MOCK y sin puerto va null',
+    ctx.buildNapAssignmentPayload(nap, null, { mock: true }).source === 'MOCK'
+    && ctx.buildNapAssignmentPayload(nap, null, {}).port === null);
+  // Panel: al abrir carga la guardada; elegir + Guardar hace el POST y muestra la confirmación.
+  const cuenta = '40123456';
+  const html = await ctx.loadNapPanel(cuenta);
+  check('panel Instalaciones: sección "NAP elegida" con estado vacío', html.includes('data-slot="nap-assign"')
+    && html.includes('Aún no hay NAP guardada') && balanced(html) === null);
+  vm.runInContext("_napPanelState.naps = " + JSON.stringify([nap]) + "; _napPanelState.selectedNap = '11542'; _napPanelState.selectedPort = 5;", ctx);
+  check('con NAP elegida: botón "Guardar NAP elegida"', ctx._napAssignHtml().includes('data-action="nap-assign-save"'));
+  const fakeScope = { querySelector: () => null };
+  const saved = await ctx._napAssignSave(fakeScope);
+  const after = ctx._napAssignHtml();
+  check('guardar: POST con la NAP y el puerto, confirmación "NAP guardada" y ya no ofrece guardar lo mismo',
+    saved && saved.napCode === 'NAP-14-03' && saved.port === 5 && after.includes('NAP guardada')
+    && after.includes('ya están guardados') && !after.includes('data-action="nap-assign-save"'));
+  const html2 = await ctx.loadNapPanel(cuenta);
+  check('al reabrir: GET muestra la NAP ya guardada', html2.includes('NAP guardada el') && html2.includes('NAP-14-03'));
+  vm.runInContext("_napPanelState.selectedNap = null; _napPanelState.selectedPort = null;", ctx);
+  ctx._napAssignPreselect([nap]);
+  check('al reabrir: la NAP guardada se preselecciona con su puerto',
+    vm.runInContext('_napPanelState.selectedNap', ctx) === '11542' && vm.runInContext('_napPanelState.selectedPort', ctx) === 5);
+  const hist = ctx.renderVisitRecords({ checklist: [{ type: 'napAssignment', label: 'NAP elegida (instalación)', done: true, count: 1 }],
+    napAssignments: [saved] });
+  check('historial de visitas: ítem "NAP elegida (instalación)" con NAP y puerto',
+    hist.includes('NAP elegida (instalación)') && hist.includes('NAP-14-03') && hist.includes('puerto <strong>05</strong>'));
+  vm.runInContext("_napPanelState.naps = []; _napPanelState.selectedNap = null; _napPanelState.selectedPort = null;", ctx);
+}
+
 console.log('\n== Speedtest con dispositivo externo (simulado) ==');
 {
   const html = ctx.externalSpeedtestHtml();
