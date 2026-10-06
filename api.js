@@ -1414,9 +1414,9 @@
   // vienen los dígitos). null si el formato no es válido.
   function normalizeOrderNumber(raw) {
     const s = String(raw === null || raw === undefined ? '' : raw).replace(/\s+/g, '').toUpperCase();
-    let m = /^ORDER\/(\d{4,9})\/(\d{4})$/.exec(s);
+    let m = /^ORDER\/(\d{4,10})\/(\d{4})$/.exec(s);
     if (m) return 'ORDER/' + m[1] + '/' + m[2];
-    m = /^(\d{4,9})$/.exec(s);
+    m = /^(\d{4,10})$/.exec(s);
     if (m) return 'ORDER/' + m[1] + '/' + new Date().getFullYear();
     return null;
   }
