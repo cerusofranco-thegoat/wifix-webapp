@@ -57,6 +57,8 @@ const MODULES = {
   migraciones: {
     eyebrow: 'Categoría', title: 'Migraciones', label: 'Migraciones',
     ...INSTALL_SECTIONS,
+    // Además de lo de Instalaciones: el contexto de la orden (como en FSM).
+    servicio: Object.freeze(['order', 'naps', 'events']),
   },
   visitas: {
     eyebrow: 'Categoría', title: 'Visitas técnicas', label: 'Visita técnica',
@@ -5864,7 +5866,338 @@ function renderWorkOrderNotes(data) {
     </ul>`;
 }
 
+// ============================================================================
+// Contexto de la orden de trabajo (TYTAN simulado) — Visita técnica y
+// Migraciones. GET /orders/context?workOrder=… (contrato 2026-10-06 §3).
+// Como en FSM: tareas de la orden con su estado y su cierre (tap para
+// desplegar), dispositivos instalados, dirección guardada y observaciones.
+// Fechas en hora de Ecuador. Si el técnico entró por cuenta/cédula, se le pide
+// el nº de orden dentro del módulo antes de mostrar nada.
+// ============================================================================
+const ORDER_CONTEXT_TTL_MS = 10 * 60 * 1000;
+const _orderContextCache = new Map();   // workOrder → { data, at, promise }
+let _orderUid = 0;
+
+/** Contexto de la orden (cache por workOrder; una sola llamada en vuelo). */
+function loadOrderContext(workOrder, force = false) {
+  const wo = String(workOrder || '').trim();
+  if (!wo) return Promise.reject(new Error('Falta el nº de orden.'));
+  const hit = _orderContextCache.get(wo);
+  if (!force && hit) {
+    if (hit.promise) return hit.promise;
+    if (Date.now() - hit.at < ORDER_CONTEXT_TTL_MS) return Promise.resolve(hit.data);
+  }
+  const promise = WifixAPI.getOrderContext(wo)
+    .then((data) => {
+      _orderContextCache.set(wo, { data, at: Date.now(), promise: null });
+      return data;
+    })
+    .catch((err) => {
+      _orderContextCache.delete(wo);
+      throw err;
+    });
+  _orderContextCache.set(wo, { data: null, at: Date.now(), promise });
+  return promise;
+}
+
+/** Contexto ya cargado (sin red) o null. */
+function peekOrderContext(workOrder) {
+  const hit = workOrder ? _orderContextCache.get(String(workOrder).trim()) : null;
+  return hit && hit.data && Date.now() - hit.at < ORDER_CONTEXT_TTL_MS ? hit.data : null;
+}
+
+const ORDER_STATUS_BADGE = Object.freeze({
+  Realizado: 'badge-resolved',
+  Pendiente: 'badge-pending',
+  'En curso': 'badge-pending',
+  Cancelado: 'badge-neutral',
+});
+const ORDER_CLOSURE_BADGE = Object.freeze({ Satisfactoria: 'badge-resolved', Insatisfactoria: 'badge-fail' });
+
+/** Chip de estado (texto + color, nunca solo color). */
+function orderStatusChip(status) {
+  return `<span class="event-badge order-chip ${ORDER_STATUS_BADGE[status] || 'badge-neutral'}">${escapeHtml(status || 'Sin estado')}</span>`;
+}
+
+/** "lun 6 oct 2026, 08:00 – 10:00" (mismo día) o las dos fechas completas, hora Ecuador. */
+function fmtRangeEc(from, to) {
+  const a = toValidDate(from);
+  const b = toValidDate(to);
+  if (!a && !b) return '—';
+  if (a && !b) return `desde ${fmtDateTimeEc(a, { seconds: false })}`;
+  if (!a) return `hasta ${fmtDateTimeEc(b, { seconds: false })}`;
+  const pa = _ecParts(a);
+  const pb = _ecParts(b);
+  const mismoDia = pa.day === pb.day && pa.month === pb.month && pa.year === pb.year;
+  return mismoDia
+    ? `${fmtDateTimeEc(a, { seconds: false })} – ${pb.hh}:${pb.mm}`
+    : `${fmtDateTimeEc(a, { seconds: false })} – ${fmtDateTimeEc(b, { seconds: false })}`;
+}
+
+/** MAC '400EF304BFB6' → '40:0E:F3:04:BF:B6' (si no son 12 hex, tal cual). */
+function fmtMac(mac) {
+  const s = String(mac || '').replace(/[^0-9a-f]/gi, '').toUpperCase();
+  return s.length === 12 ? s.match(/.{2}/g).join(':') : String(mac || '');
+}
+
+/** Tareas ordenadas por agenda, la más reciente primero. */
+function orderTasksSorted(tasks) {
+  const t = (x) => {
+    const d = toValidDate(x && (x.scheduledFrom || x.doneFrom));
+    return d ? d.getTime() : 0;
+  };
+  return [...(Array.isArray(tasks) ? tasks : [])].filter(Boolean).sort((a, b) => t(b) - t(a));
+}
+
+function orderMaterialsHtml(materials) {
+  const list = Array.isArray(materials) ? materials.filter(Boolean) : [];
+  if (!list.length) return '<p class="order-muted">Sin materiales registrados.</p>';
+  return `
+          <table class="order-materials">
+            <caption>Materiales</caption>
+            <thead><tr><th scope="col">Material</th><th scope="col">Tipo</th><th scope="col" class="num">Cant.</th></tr></thead>
+            <tbody>${list.map(m => `
+              <tr><td>${escapeHtml(m.name || '—')}</td><td>${escapeHtml(m.type || '—')}</td><td class="num">${escapeHtml(m.quantity ?? '—')}</td></tr>`).join('')}
+            </tbody>
+          </table>`;
+}
+
+function orderClosureHtml(t) {
+  const c = t.closure;
+  if (!c) {
+    return `<p class="order-muted">${t.status === 'Pendiente'
+      ? 'Tarea pendiente: todavía no tiene cierre.'
+      : 'La orden no trae detalle de cierre para esta tarea.'}</p>`;
+  }
+  return `
+        <div class="order-closure">
+          <span class="event-badge order-chip ${ORDER_CLOSURE_BADGE[c.result] || 'badge-neutral'}">Terminado ${escapeHtml(c.result || 'sin resultado')}</span>
+          <dl class="order-facts">
+            <div><dt>Razón de cierre</dt><dd>${escapeHtml(c.reason || '—')}</dd></div>
+            <div><dt>Notas</dt><dd class="order-notes">${c.notes ? escapeHtml(c.notes) : '—'}</dd></div>
+          </dl>
+          ${orderMaterialsHtml(c.materials)}
+        </div>`;
+}
+
+/** Una tarea: resumen siempre visible; tap para desplegar el cierre. */
+function orderTaskHtml(t, highlightTaskId) {
+  const actual = !!highlightTaskId && t.taskId === highlightTaskId;
+  const hecho = t.doneFrom || t.doneTo ? fmtRangeEc(t.doneFrom, t.doneTo) : '—';
+  return `
+    <li class="order-task${actual ? ' is-current' : ''}">
+      <details>
+        <summary class="order-task-summary">
+          <span class="order-task-top">
+            <span class="order-task-id mono">${escapeHtml(t.taskId || '—')}</span>
+            ${orderStatusChip(t.status)}
+            ${actual ? '<span class="order-current-badge">Task de esta visita</span>' : ''}
+          </span>
+          <span class="order-task-type">${escapeHtml(t.taskType || 'Tarea')}</span>
+          <span class="order-task-line"><span class="order-key">Agendado</span> ${escapeHtml(fmtRangeEc(t.scheduledFrom, t.scheduledTo))}</span>
+          <span class="order-task-line"><span class="order-key">Realizado</span> ${escapeHtml(hecho)}</span>
+          <span class="order-task-line"><span class="order-key">Asignado a</span> ${escapeHtml(t.assignedTo || '—')}</span>
+          <span class="order-task-toggle"><span class="order-task-toggle-txt">Ver cierre</span>${SERVICIO_ICONS.chev}</span>
+        </summary>
+        <div class="order-task-body">${orderClosureHtml(t)}</div>
+      </details>
+    </li>`;
+}
+
+const ORDER_DEVICE_BADGE = Object.freeze({ Aprovisionado: 'badge-resolved' });
+
+function orderDeviceHtml(e) {
+  const nombre = e.shortName || e.productName || 'Dispositivo';
+  const producto = [e.productName && e.productName !== nombre ? e.productName : '', e.type].filter(Boolean).join(' · ');
+  return `
+    <li class="order-device">
+      <div class="order-device-head">
+        <span class="order-device-name">${escapeHtml(nombre)}</span>
+        <span class="event-badge order-chip ${ORDER_DEVICE_BADGE[e.status] || 'badge-neutral'}">${escapeHtml(e.status || 'Sin estado')}</span>
+      </div>
+      ${producto ? `<span class="order-device-product">${escapeHtml(producto)}</span>` : ''}
+      <dl class="order-facts compact">
+        <div><dt>Modelo</dt><dd>${escapeHtml(e.model || '—')}</dd></div>
+        <div><dt>Serial</dt><dd class="mono">${escapeHtml(e.serial || '—')}</dd></div>
+        <div><dt>MAC</dt><dd class="mono">${escapeHtml(e.mac ? fmtMac(e.mac) : '—')}</dd></div>
+        <div><dt>ID servicio</dt><dd class="mono">${escapeHtml(e.serviceId || '—')}</dd></div>
+      </dl>
+    </li>`;
+}
+
+/** Panel completo con el contexto de la orden. Pura (sin DOM) para el smoke. */
+function orderContextHtml(data, cuenta, opts = {}) {
+  const o = (data && data.order) || {};
+  const cl = (data && data.client) || {};
+  const tasks = orderTasksSorted(data && data.tasks);
+  const equipos = Array.isArray(data && data.equipment) ? data.equipment.filter(Boolean) : [];
+  const simulado = data && data.simulated
+    ? '<span class="sim-badge" title="Integración TYTAN simulada: datos de prueba">TYTAN simulado</span>' : '';
+  const otraCuenta = cl.accountNumber && cuenta && String(cl.accountNumber) !== String(cuenta)
+    ? `<div class="detail-warning" role="status">Esta orden es de la cuenta ${escapeHtml(cl.accountNumber)}, no de la cuenta confirmada (${escapeHtml(cuenta)}). Verifica el nº de orden.</div>`
+    : '';
+  const dir = data && data.registeredAddress ? data.registeredAddress : cl.address;
+  return `
+    <div class="order-panel" data-panel="order">
+      <div class="order-head">
+        <div class="order-head-top">
+          <span class="order-wo mono">${escapeHtml(o.workOrder || '—')}</span>
+          ${orderStatusChip(o.status)}
+          ${simulado}
+        </div>
+        <span class="order-head-type">${escapeHtml([o.orderType, o.technology].filter(Boolean).join(' · ') || 'Orden de trabajo')}</span>
+        <dl class="order-facts compact">
+          <div><dt>Creada</dt><dd>${escapeHtml(fmtDateTimeEc(o.createdAt, { seconds: false }))}</dd></div>
+          <div><dt>SLA</dt><dd>${escapeHtml(fmtDateTimeEc(o.slaAt, { seconds: false }))}</dd></div>
+          <div><dt>Cerrada</dt><dd>${o.closedAt ? escapeHtml(fmtDateTimeEc(o.closedAt, { seconds: false })) : 'Abierta'}</dd></div>
+          ${o.externalId ? `<div><dt>ID ${escapeHtml(o.externalSystem || 'externo')}</dt><dd class="mono">${escapeHtml(o.externalId)}</dd></div>` : ''}
+          ${o.signatureProcess ? `<div><dt>Proceso</dt><dd class="mono">${escapeHtml(o.signatureProcess)}</dd></div>` : ''}
+        </dl>
+        <button type="button" class="link-btn order-change-btn" data-action="order-change">Cambiar nº de orden</button>
+      </div>
+      ${otraCuenta}
+
+      <section class="order-section" aria-labelledby="orderTasksTitle${opts.uid || ''}">
+        <h4 class="order-section-title" id="orderTasksTitle${opts.uid || ''}">Tareas de la orden (${tasks.length})</h4>
+        ${tasks.length
+          ? `<ul class="order-task-list">${tasks.map(t => orderTaskHtml(t, opts.currentTaskId)).join('')}</ul>`
+          : '<div class="detail-empty">La orden no trae tareas.</div>'}
+      </section>
+
+      <section class="order-section" aria-labelledby="orderDevicesTitle${opts.uid || ''}">
+        <h4 class="order-section-title" id="orderDevicesTitle${opts.uid || ''}">Dispositivos instalados (${equipos.length})</h4>
+        ${equipos.length
+          ? `<ul class="order-device-list">${equipos.map(orderDeviceHtml).join('')}</ul>`
+          : '<div class="detail-empty">La orden no trae dispositivos instalados.</div>'}
+      </section>
+
+      <section class="order-section" aria-labelledby="orderAddrTitle${opts.uid || ''}">
+        <h4 class="order-section-title" id="orderAddrTitle${opts.uid || ''}">Dirección guardada</h4>
+        <p class="order-text">${dir ? escapeHtml(dir) : '<span class="no-fsm-data">Sin dirección en la orden</span>'}</p>
+        ${cl.napCode || cl.zoneCode ? `<p class="order-muted">${cl.napCode ? `NAP ${escapeHtml(cl.napCode)}` : ''}${cl.napCode && cl.zoneCode ? ' · ' : ''}${cl.zoneCode ? `Zona ${escapeHtml(cl.zoneCode)}` : ''}</p>` : ''}
+      </section>
+
+      <section class="order-section" aria-labelledby="orderObsTitle${opts.uid || ''}">
+        <h4 class="order-section-title" id="orderObsTitle${opts.uid || ''}">Observaciones</h4>
+        <p class="order-text">${data && data.observations ? escapeHtml(data.observations) : '<span class="order-muted">Sin observaciones.</span>'}</p>
+      </section>
+    </div>`;
+}
+
+/**
+ * Formulario "Nº de orden" (cuando el técnico entró por cuenta o cédula, o
+ * quiere cambiarla). opts = { value, error, intro, submitLabel }.
+ */
+function orderPromptHtml(opts = {}) {
+  const uid = ++_orderUid;
+  const errId = `orderPromptErr${uid}`;
+  return `
+    <form class="order-prompt" data-form="order-prompt" novalidate>
+      ${opts.intro ? `<p class="order-prompt-intro">${escapeHtml(opts.intro)}</p>` : ''}
+      <label class="form-label" for="orderPrompt${uid}">Nº de orden de trabajo</label>
+      <input type="text" id="orderPrompt${uid}" class="order-input" data-field="order-number"
+        inputmode="text" autocapitalize="characters" autocomplete="off" maxlength="32"
+        placeholder="ORDER/463158/2026 o 463158" value="${escapeHtml(opts.value || '')}"
+        aria-describedby="${errId}"${opts.error ? ' aria-invalid="true"' : ''}>
+      <p class="order-field-error" id="${errId}" data-slot="order-prompt-error" role="alert">${escapeHtml(opts.error || '')}</p>
+      <button type="submit" class="save-btn order-submit">${escapeHtml(opts.submitLabel || 'Cargar orden')}</button>
+    </form>`;
+}
+
+/**
+ * Valida y carga una orden escrita por el técnico. Devuelve { ok, workOrder,
+ * data } o { ok:false, error }. Solo si el contexto carga se guarda en la sesión.
+ */
+async function submitOrderNumber(cuenta, raw) {
+  const wo = WifixAPI.normalizeOrderNumber(raw);
+  if (!wo) return { ok: false, error: 'Formato inválido. Usa ORDER/463158/2026 o solo el número (463158).' };
+  try {
+    const data = await loadOrderContext(wo, true);
+    setSessionWorkOrder(cuenta, (data && data.order && data.order.workOrder) || wo, 'module');
+    return { ok: true, workOrder: sessionWorkOrder(cuenta), data };
+  } catch (err) {
+    console.error('[Wifix] orden (módulo):', err);
+    if (err && err.code === 'VALIDATION_ERROR') return { ok: false, error: 'Formato de orden inválido. Usa ORDER/463158/2026 o solo el número.' };
+    if (err && (err.code === 'NOT_FOUND' || err.code === 'HTTP_404')) return { ok: false, error: `No existe la orden ${wo}.` };
+    return { ok: false, error: `No se pudo consultar la orden: ${(err && err.message) || 'error del servidor'}.` };
+  }
+}
+
+/** HTML del panel "Orden de trabajo" de Datos del Servicio. */
+async function loadOrderPanel(cuenta, opts = {}) {
+  const wo = sessionWorkOrder(cuenta);
+  if (!wo || opts.change) {
+    return `<div class="order-panel" data-panel="order">${orderPromptHtml({
+      value: opts.change ? (wo || '') : '',
+      intro: opts.change
+        ? 'Escribe el nuevo nº de orden de esta visita.'
+        : 'Ingresaste por cuenta o cédula: escribe el nº de orden de esta visita para ver sus tareas, cierres y equipos.',
+    })}</div>`;
+  }
+  try {
+    const data = await loadOrderContext(wo, !!opts.force);
+    return orderContextHtml(data, cuenta, { uid: ++_orderUid, currentTaskId: opts.currentTaskId || null });
+  } catch (err) {
+    console.error('[Wifix] contexto de orden:', err);
+    return `<div class="order-panel" data-panel="order">
+      ${renderPanelError(err, 'No se pudo cargar el contexto de la orden.')}
+      <div class="order-actions">
+        <button type="button" class="add-row-btn" data-action="order-retry">Reintentar</button>
+        <button type="button" class="link-btn" data-action="order-change">Cambiar nº de orden</button>
+      </div>
+    </div>`;
+  }
+}
+
+/** Conecta el panel de orden (delegación: el contenido se repinta entero). */
+function _bootOrderPanel(body, cuenta, opts = {}) {
+  if (!body || body.dataset.orderWired === '1') return;
+  body.dataset.orderWired = '1';
+  const repaint = async (loadOpts) => {
+    body.innerHTML = '<div class="detail-loading">Cargando orden…</div>';
+    const html = await loadOrderPanel(cuenta, Object.assign({ currentTaskId: opts.currentTaskId ? opts.currentTaskId() : null }, loadOpts));
+    if (!body.isConnected && body.isConnected !== undefined) return;
+    body.innerHTML = html;
+    const foco = body.querySelector('[data-field="order-number"]') || body.querySelector('.order-wo');
+    if (foco && foco.focus) {
+      if (!foco.matches || !foco.matches('input')) foco.setAttribute('tabindex', '-1');
+      foco.focus({ preventScroll: true });
+    }
+  };
+  body.addEventListener('click', (ev) => {
+    const btn = ev.target && ev.target.closest ? ev.target.closest('[data-action]') : null;
+    if (!btn) return;
+    if (btn.dataset.action === 'order-change') { ev.stopPropagation(); repaint({ change: true }); }
+    else if (btn.dataset.action === 'order-retry') { ev.stopPropagation(); repaint({ force: true }); }
+  });
+  body.addEventListener('submit', async (ev) => {
+    const form = ev.target && ev.target.closest ? ev.target.closest('[data-form="order-prompt"]') : null;
+    if (!form) return;
+    ev.preventDefault();
+    const input = form.querySelector('[data-field="order-number"]');
+    const errEl = form.querySelector('[data-slot="order-prompt-error"]');
+    const btn = form.querySelector('button[type="submit"]');
+    btn.disabled = true;
+    btn.setAttribute('aria-busy', 'true');
+    btn.textContent = 'Consultando…';
+    const r = await submitOrderNumber(cuenta, input.value);
+    if (!r.ok) {
+      btn.disabled = false;
+      btn.removeAttribute('aria-busy');
+      btn.textContent = 'Cargar orden';
+      input.setAttribute('aria-invalid', 'true');
+      if (errEl) errEl.textContent = r.error;
+      input.focus();
+      return;
+    }
+    repaint({});
+  });
+}
+
 const SERVICIO_ITEMS = [
+  // Visita técnica / Migraciones: contexto de la orden (TYTAN simulado).
+  { id: 'order',   icon: SERVICIO_ICONS.history, title: 'Orden de trabajo — tareas, cierres y equipos',
+    load: (cuenta) => loadOrderPanel(cuenta) },
   { id: 'naps',    icon: SERVICIO_ICONS.nap,     title: 'NAPs cercanas y seleccion GPON Xtreme',
     // Visita técnica / Migración: solo la NAP contratada (sin búsqueda).
     titleContracted: 'NAP del cliente (contratada)',
@@ -5957,6 +6290,8 @@ function openDatosServicio() {
           body.dataset.loaded = '1';
           if (id === 'naps') {
             _bootNapPanel(body);
+          } else if (id === 'order') {
+            _bootOrderPanel(body, cuenta);
           } else if (id === 'isp') {
             _bootIspPanel(body, cuenta);
           } else {

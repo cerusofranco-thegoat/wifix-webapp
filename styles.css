@@ -5125,3 +5125,135 @@ ul.nap-map-legend li { display: inline-flex; align-items: center; }
 @media (prefers-reduced-motion: reduce) {
   .dev-model-option { transition: none; }
 }
+
+/* ==========================================================================
+ * Orden de trabajo (TYTAN simulado) — Visita técnica y Migraciones
+ * Tarjetas legibles en móvil: tareas como lista con chip de estado y tap para
+ * desplegar el cierre; dispositivos instalados; dirección y observaciones.
+ * ========================================================================*/
+.order-panel { display: flex; flex-direction: column; gap: 12px; }
+.order-chip { margin-bottom: 0; }
+.order-head {
+  padding: 12px;
+  border-radius: var(--radius-card);
+  background: var(--surface-tint);
+  border: 1px solid var(--border-lavender);
+}
+.order-head-top { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
+.order-wo { font-size: 15px; font-weight: 700; color: var(--brand-dark); overflow-wrap: anywhere; }
+.order-head-type { display: block; margin-top: 4px; font-size: 12.5px; font-weight: 600; color: var(--text-primary); }
+.order-change-btn { margin-top: 2px; }
+.order-section { display: flex; flex-direction: column; gap: 6px; }
+.order-section-title {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  color: var(--brand-primary);
+}
+.order-text { margin: 0; font-size: 12.5px; line-height: 1.45; color: var(--text-primary); overflow-wrap: anywhere; }
+.order-muted { margin: 4px 0 0; font-size: 12px; color: var(--text-secondary); }
+.order-key { color: var(--text-secondary); margin-right: 4px; }
+
+.order-facts { margin: 8px 0 0; display: grid; gap: 4px; }
+.order-facts > div { display: grid; grid-template-columns: 92px 1fr; gap: 8px; font-size: 12px; }
+.order-facts dt { color: var(--text-secondary); }
+.order-facts dd { margin: 0; color: var(--text-primary); overflow-wrap: anywhere; }
+.order-facts.compact > div { grid-template-columns: 82px 1fr; }
+.order-notes { white-space: pre-line; line-height: 1.45; }
+
+.order-task-list, .order-device-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.order-task {
+  border: 1px solid var(--border-lavender);
+  border-radius: var(--radius-btn);
+  background: var(--surface-card);
+}
+.order-task.is-current { border-color: var(--brand-primary); box-shadow: inset 3px 0 0 var(--brand-primary); }
+.order-task-summary {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 10px 12px;
+  min-height: 44px;
+  cursor: pointer;
+}
+.order-task-summary::-webkit-details-marker { display: none; }
+.order-task-summary:focus-visible { outline: 2px solid var(--brand-primary); outline-offset: 2px; border-radius: var(--radius-btn); }
+.order-task-top { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
+.order-task-id { font-size: 13px; font-weight: 700; color: var(--text-primary); }
+.order-task-type { font-size: 12.5px; font-weight: 600; color: var(--brand-dark); }
+.order-task-line { font-size: 12px; color: var(--text-primary); overflow-wrap: anywhere; }
+.order-current-badge {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  padding: 2px 6px;
+  border-radius: var(--radius-pill);
+  background: var(--brand-primary);
+  color: var(--text-on-brand);
+}
+.order-task-toggle {
+  align-self: flex-end;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--brand-primary);
+}
+.order-task-toggle svg { transition: transform 0.2s; }
+.order-task details[open] .order-task-toggle svg { transform: rotate(180deg); }
+@media (prefers-reduced-motion: reduce) { .order-task-toggle svg { transition: none; } }
+.order-task-body { padding: 0 12px 12px; border-top: 1px dashed var(--border-lavender); }
+.order-closure { padding-top: 10px; }
+
+.order-materials { width: 100%; margin-top: 10px; border-collapse: collapse; font-size: 11.5px; }
+.order-materials caption {
+  text-align: left;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-secondary);
+  padding-bottom: 4px;
+}
+.order-materials th, .order-materials td {
+  padding: 6px 4px;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--gray-100);
+  overflow-wrap: anywhere;
+}
+.order-materials th { font-weight: 600; color: var(--text-secondary); }
+.order-materials .num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+
+.order-device {
+  padding: 10px 12px;
+  border-radius: var(--radius-btn);
+  background: var(--surface-app);
+  border: 1px solid var(--border-lavender);
+}
+.order-device-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.order-device-name { font-size: 13px; font-weight: 700; color: var(--text-primary); }
+.order-device-product { display: block; margin-top: 2px; font-size: 11.5px; color: var(--text-secondary); }
+
+.order-prompt { display: flex; flex-direction: column; gap: 6px; }
+.order-prompt-intro { margin: 0; font-size: 12px; line-height: 1.45; color: var(--text-primary); }
+.order-input {
+  min-height: 44px;
+  padding: 10px 12px;
+  font: inherit;
+  font-size: 14px;
+  color: var(--text-primary);
+  background: var(--surface-card);
+  border: 1px solid var(--border-lavender);
+  border-radius: var(--radius-btn);
+  text-transform: uppercase;
+}
+.order-input::placeholder { text-transform: none; color: var(--text-secondary); }
+.order-input:focus { outline: 2px solid var(--brand-primary); outline-offset: 1px; }
+.order-input[aria-invalid="true"] { border-color: var(--error-border); }
+.order-field-error { margin: 0; min-height: 0; font-size: 12px; color: var(--error-text); }
+.order-field-error:empty { display: none; }
+.order-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }

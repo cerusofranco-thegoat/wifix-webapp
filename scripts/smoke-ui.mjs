@@ -984,7 +984,7 @@ console.log('\n== NAP contratada en Migraciones e Instalaciones intacta ==');
     !migHtml.includes('data-action="nap-search"') && !migHtml.includes('data-action="nap-meters"')
     && !migHtml.includes('data-action="nap-gps"') && !migHtml.includes('Cambiar NAP'));
   check('migración: título del panel = "NAP del cliente (contratada)"',
-    ctx.servicioItemTitle(vm.runInContext('SERVICIO_ITEMS', ctx)[0]) === 'NAP del cliente (contratada)');
+    ctx.servicioItemTitle(vm.runInContext("SERVICIO_ITEMS.find((i) => i.id === 'naps')", ctx)) === 'NAP del cliente (contratada)');
   check('_napUsesContractedNap: visitas y migraciones sí; instalaciones y cancelaciones no',
     ctx._napUsesContractedNap('visitas') && ctx._napUsesContractedNap('migraciones')
     && !ctx._napUsesContractedNap('instalaciones') && !ctx._napUsesContractedNap('cancelaciones'));
@@ -1007,7 +1007,7 @@ console.log('\n== NAP contratada en Migraciones e Instalaciones intacta ==');
   check('instalación sin NAP elegida: no inventa NAP de referencia',
     ctx._clientLocRefNap().nap === null && ctx._clientLocRefNap().port === null);
   check('instalación: título del panel sin cambios',
-    ctx.servicioItemTitle(vm.runInContext('SERVICIO_ITEMS', ctx)[0]) === 'NAPs cercanas y seleccion GPON Xtreme');
+    ctx.servicioItemTitle(vm.runInContext("SERVICIO_ITEMS.find((i) => i.id === 'naps')", ctx)) === 'NAPs cercanas y seleccion GPON Xtreme');
   check('styles.css sin la regla muerta de "Cambiar NAP"',
     !readFileSync(base + 'styles.css', 'utf8').includes('nap-toggle-nearby'));
   check('app.js sin referencias muertas de "Cambiar NAP"',
@@ -1564,12 +1564,12 @@ const MODULE_TABLE = {
   migraciones: {
     title: 'Migraciones',
     cards: ['personales', 'servicio', 'equipo', 'herramientas', 'retirados'],
-    servicio: ['naps', 'events'],
+    servicio: ['order', 'naps', 'events'],
   },
   visitas: {
     title: 'Visitas técnicas',
     cards: ['personales', 'servicio', 'equipo', 'red', 'herramientas', 'retirados'],
-    servicio: ['naps', 'status', 'isp', 'events', 'visits'],
+    servicio: ['order', 'naps', 'status', 'isp', 'events', 'visits'],
   },
   cancelaciones: {
     title: 'Cancelación de servicio',
@@ -2116,6 +2116,47 @@ console.log('\n== Ingreso por nº de orden (TYTAN simulado) ==');
   input.value = '';
   ctx.invalidateAccountCache();
   console.warn = origWarn;
+}
+
+console.log('\n== Contexto de la orden (Visita técnica / Migraciones) ==');
+{
+  const api = ctx.WifixAPI;
+  const data = await api.getOrderContext('ORDER/463158/2026');
+  const cuenta = data.client.accountNumber;
+  const html = ctx.orderContextHtml(data, cuenta, { uid: 1, currentTaskId: data.tasks[0].taskId });
+  check('contexto: HTML balanceado', balanced(html) === null, balanced(html));
+  check('contexto: tareas con ID, tipo, estado, agendado, realizado y asignado',
+    data.tasks.every((t) => html.includes(t.taskId)) && html.includes('Agendado') && html.includes('Realizado')
+    && html.includes('Asignado a') && html.includes(data.tasks[0].taskType));
+  const cerrada = data.tasks.find((t) => t.closure && t.closure.materials.length);
+  check('contexto: cierre con resultado, razón, notas y materiales (tipo y cantidad)',
+    !!cerrada && html.includes('Terminado ' + cerrada.closure.result) && html.includes('Razón de cierre')
+    && html.includes(ctx.escapeHtml(cerrada.closure.reason)) && html.includes('<caption>Materiales</caption>')
+    && html.includes(ctx.escapeHtml(cerrada.closure.materials[0].name)));
+  check('contexto: dispositivos con estado, ID servicio, tipo, modelo, serial y MAC',
+    data.equipment.every((e) => html.includes(e.serviceId)) && html.includes('Aprovisionado')
+    && html.includes(data.equipment[0].serial) && html.includes(ctx.fmtMac(data.equipment[0].mac)));
+  check('contexto: dirección guardada, observaciones y task de la visita resaltada',
+    html.includes('Dirección guardada') && html.includes('Observaciones') && html.includes('Task de esta visita'));
+  check('contexto: otra cuenta → aviso (no bloquea)',
+    ctx.orderContextHtml(data, '99999999').includes('no de la cuenta confirmada'));
+  check('fechas en hora Ecuador: rango del mismo día',
+    ctx.fmtRangeEc('2026-10-06T13:00:00.000Z', '2026-10-06T15:00:00.000Z') === 'mar 6 oct 2026, 08:00 – 10:00', ctx.fmtRangeEc('2026-10-06T13:00:00.000Z', '2026-10-06T15:00:00.000Z'));
+  const prompt = await ctx.loadOrderPanel('11112222');
+  check('sin orden en la sesión: pide el nº de orden dentro del módulo',
+    prompt.includes('data-form="order-prompt"') && balanced(prompt) === null && prompt.includes('<label'));
+  const malo = await ctx.submitOrderNumber('11112222', 'abc');
+  const bueno = await ctx.submitOrderNumber('11112222', '463158');
+  check('nº de orden en el módulo: valida formato y guarda en la sesión solo si carga',
+    malo.ok === false && ctx.sessionWorkOrder('11112222') === bueno.workOrder && bueno.ok === true);
+  ctx.selectModule('migraciones');
+  const idsMig = ctx.servicioItemsForModule().map((i) => i.id).join(',');
+  ctx.selectModule('visitas');
+  const idsVis = ctx.servicioItemsForModule().map((i) => i.id);
+  ctx.selectModule('instalaciones');
+  const idsIns = ctx.servicioItemsForModule().map((i) => i.id);
+  check('panel de orden en Visita técnica y Migraciones, no en Instalaciones',
+    idsMig === 'order,naps,events' && idsVis.includes('order') && !idsIns.includes('order'), idsMig);
 }
 
 console.log('\n== Speedtest con dispositivo externo (simulado) ==');
