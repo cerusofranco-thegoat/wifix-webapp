@@ -341,6 +341,7 @@
       }
       const err = new Error(msg);
       err.code = code;
+      err.status = res.status;
       err.details = data && data.details;
       if (code === 'UPSTREAM_AUTH_ERROR') {
         err.meta = data && data.meta;
@@ -1137,17 +1138,373 @@
       uptime: mockUptime(outages),
     };
   }
+  // Métricas por cuenta: la tecnología sale de la misma regla que la orden y
+  // el monitor. GPON → niveles ópticos (nada DOCSIS); HFC → sin óptica GPON.
   function mockNetworkMetrics(accountNumber) {
+    const technology = mockAccountTechnology(accountNumber);
     return {
       accountNumber: accountNumber,
-      technology: 'GPON',
-      signalLevels: { rxDbm: -18.4, txDbm: 2.1 },
+      technology: technology,
+      signalLevels: technology === 'GPON' ? { rxDbm: -18.4, txDbm: 2.1 } : null,
       outagesLast24h: 1,
       trafficMbpsIn: 87.3,
       trafficMbpsOut: 12.5,
       measuredAt: nowIso(),
     };
   }
+  // --- Tecnología por cuenta (compartida: orden mock e ISP Monitor) --------
+  // Espejo de resolveAccountTechnology(accountNumber) del backend: hoy
+  // SIMULADA y determinística (~70 % GPON / 30 % HFC). La usan /orders/context
+  // e ISP Monitor por cuenta para que orden y monitor no se contradigan.
+  // TODO(tytan-real): la tecnología real vendrá del inventario de la operadora.
+  // Cuentas fijas de demo (las de la whitelist mock), para recorrer los casos:
+  //   35070291 → GPON, equipo working, sin falla
+  //   40123456 → GPON, falla interna (solo el cliente lost)
+  //   40000600 → GPON, falla externa en la NAP (plan 600)
+  //   40001000 → GPON, falla externa en la red de acceso (plan 1000)
+  //   35070288 → HFC (cablemódem), sin falla
+  const MOCK_ACCOUNT_TECH = {
+    '35070291': 'GPON', '40123456': 'GPON', '40000600': 'GPON', '40001000': 'GPON', '35070288': 'HFC',
+  };
+  const MOCK_ISP_SCENARIO = {
+    '35070291': 'NONE', '40123456': 'INTERNAL', '40000600': 'EXTERNAL_NAP',
+    '40001000': 'EXTERNAL_NETWORK', '35070288': 'NONE',
+  };
+  // Hash FNV-1a de 32 bits: estable entre sesiones y navegadores.
+  function accountHash(accountNumber) {
+    let h = 0x811c9dc5;
+    const s = String(accountNumber || '').trim();
+    for (let i = 0; i < s.length; i++) {
+      h ^= s.charCodeAt(i);
+      h = Math.imul(h, 0x01000193) >>> 0;
+    }
+    return h >>> 0;
+  }
+  function mockAccountTechnology(accountNumber) {
+    const key = String(accountNumber || '').trim();
+    if (MOCK_ACCOUNT_TECH[key]) return MOCK_ACCOUNT_TECH[key];
+    return accountHash(key) % 10 < 7 ? 'GPON' : 'HFC';
+  }
+  // ~10 % de las cuentas con falla (interna / NAP / red), determinístico.
+  function mockIspScenario(accountNumber) {
+    const key = String(accountNumber || '').trim();
+    if (MOCK_ISP_SCENARIO[key]) return MOCK_ISP_SCENARIO[key];
+    const k = (accountHash(key) >>> 8) % 30;
+    return k === 0 ? 'INTERNAL' : k === 1 ? 'EXTERNAL_NAP' : k === 2 ? 'EXTERNAL_NETWORK' : 'NONE';
+  }
+  function hexFrom(rnd, n) {
+    let s = '';
+    for (let i = 0; i < n; i++) s += Math.floor(rnd() * 16).toString(16);
+    return s.toUpperCase();
+  }
+  // Identificador del equipo de la cuenta: serial GPON (ZTEG/XPON/STGU + 8 hex)
+  // o MAC de 12 hex del cablemódem. Lo comparten la orden mock y el monitor.
+  function mockAccountDeviceId(accountNumber, technology) {
+    const rnd = seededRandom((accountHash(accountNumber) ^ 0x5bd1e995) >>> 0);
+    if ((technology || mockAccountTechnology(accountNumber)) === 'HFC') return hexFrom(rnd, 12);
+    const prefix = ['ZTEG', 'ZTEG', 'XPON', 'STGU'][Math.floor(rnd() * 4)];
+    return prefix + hexFrom(rnd, 8);
+  }
+  // Plan en bits: misma fuente que client-profile (plan simulado, simétrico).
+  function mockIspPlan(accountNumber) {
+    const p = mockClientProfile(accountNumber);
+    const down = Number(p.contractedDownloadMbps);
+    if (!isFinite(down) || down <= 0) return null;
+    const up = Number(p.contractedUploadMbps) > 0 ? Number(p.contractedUploadMbps) : down;
+    return {
+      profile: 'RES-' + (down * 1000) + '/' + (up * 1000) + '-I',
+      downloadKbps: down * 1000, uploadKbps: up * 1000,
+      downloadMbps: down, uploadMbps: up,
+      name: p.planName || null,
+    };
+  }
+  const MOCK_ISP_CITIES = ['Guayaquil', 'Quito', 'Manta', 'Portoviejo', 'Machala', 'Daule'];
+  function titleCity(s) {
+    const c = String(s || '').toLowerCase();
+    return c ? c.charAt(0).toUpperCase() + c.slice(1) : null;
+  }
+  // Topología simulada de la cuenta: red de acceso, NAP del cliente, puerto.
+  function mockIspTopology(accountNumber, technology) {
+    const h = accountHash(accountNumber);
+    const rnd = seededRandom((h ^ 0x27d4eb2f) >>> 0);
+    const L = function () { return String.fromCharCode(65 + Math.floor(rnd() * 26)); };
+    const pre = ['HG', 'QQ', 'GY', 'UI'][h % 4];
+    const accessNetwork = pre + (1 + Math.floor(rnd() * 8)) + L() + L();
+    const wl = MOCK_WHITELIST[String(accountNumber || '').trim()];
+    const city = (wl && titleCity(wl.city)) || MOCK_ISP_CITIES[h % MOCK_ISP_CITIES.length];
+    const isGpon = technology === 'GPON';
+    const slot = 1 + Math.floor(rnd() * 4);
+    const port = 1 + Math.floor(rnd() * 16);
+    const onu = 1 + Math.floor(rnd() * 64);
+    // NAP del cliente: 6 caracteres (HG4NB2); en HFC es un tap (RM7TF6).
+    return {
+      city: city,
+      accessNetwork: accessNetwork,
+      clientNap: accessNetwork.slice(0, 3) + (isGpon ? 'N' : 'T') + L() + (1 + Math.floor(rnd() * 9)),
+      port: isGpon ? 'gpon_olt-1/' + slot + '/' + port : 'Cable' + slot + '/0/' + port + '-upstream0',
+      onuId: isGpon ? 'gpon-onu_1/' + slot + '/' + port + ':' + onu : null,
+      headend: isGpon ? (city.slice(0, 3).toUpperCase() + ' HEADEND ZTE ' + (1 + (h % 4)))
+        : (city.slice(0, 3).toUpperCase() + ' CMTS ARRIS E6000 ' + (1 + (h % 3))),
+      distanceMeters: 800 + Math.floor(rnd() * 9000),
+    };
+  }
+  function mockIspClientName(accountNumber) {
+    return String(mockOrderClientName(accountNumber) || 'CLIENTE XTRIM').toUpperCase();
+  }
+  function mockIspAccountStatus(accountNumber) {
+    const wl = MOCK_WHITELIST[String(accountNumber || '').trim()];
+    if (wl && wl.status === 'SUSPENDIDO') return 'S';
+    return 'A';
+  }
+  const HOUR_MS = 3600000;
+  // Instante estable durante el día (no "baila" entre consultas).
+  function mockAgo(hours) {
+    return new Date(ecuadorMidnightUtcMs() + 8 * HOUR_MS - hours * HOUR_MS).toISOString();
+  }
+
+  // Validación de la cuenta como el backend: dígitos, 4–12 significativos
+  // (sin ceros a la izquierda) → si no, 400; fuera de la whitelist → 404.
+  function mockIspCheckAccount(accountNumber) {
+    const raw = String(accountNumber || '').trim();
+    const significant = raw.replace(/^0+/, '');
+    if (!/^\d+$/.test(raw) || significant.length < 4 || significant.length > 12) {
+      throw validationError('Número de cuenta inválido: usa solo dígitos (4 a 12).');
+    }
+    if (!MOCK_WHITELIST[raw]) {
+      const err = new Error('La cuenta ' + raw + ' no está en la base de clientes Xtrim.');
+      err.code = 'NOT_FOUND';
+      err.status = 404;
+      throw err;
+    }
+  }
+
+  // GET /accounts/:n/isp-monitor (modo demo). Mismo shape que el contrato.
+  function mockIspMonitor(accountNumber) {
+    const cuenta = String(accountNumber || '').trim();
+    const technology = mockAccountTechnology(cuenta);
+    const isGpon = technology === 'GPON';
+    const scenario = mockIspScenario(cuenta);
+    const lost = scenario !== 'NONE';
+    const topo = mockIspTopology(cuenta, technology);
+    const plan = mockIspPlan(cuenta);
+    const profile = mockClientProfile(cuenta);
+    const serial = mockAccountDeviceId(cuenta, technology);
+    const clientName = mockIspClientName(cuenta);
+    const h = accountHash(cuenta);
+    const rnd = seededRandom((h ^ 0x165667b1) >>> 0);
+    const r2 = function (x) { return Math.round(x * 100) / 100; };
+    const lastOffline = lost ? mockAgo(1 + (h % 5)) : mockAgo(24 * (3 + (h % 20)));
+    const lastOnline = lost ? mockAgo(30 + (h % 48)) : mockAgo(24 * (3 + (h % 20)) - 0.2);
+    const cause = lost
+      ? (scenario === 'INTERNAL' ? (h % 2 ? 'DYING GASP' : 'ONU LOS') : 'ONU LOS')
+      : (h % 3 === 0 ? 'ONU LOS' : 'DYING GASP');
+    const accountStatus = mockIspAccountStatus(cuenta);
+    let optics = null;
+    if (isGpon) {
+      if (!lost) {
+        const rx = r2(-15 - rnd() * 7);
+        const rxOlt = r2(-18 - rnd() * 7);
+        const tx = r2(1.8 + rnd() * 1.6);
+        optics = { distanceMeters: topo.distanceMeters, rxOltDbm: rxOlt, txDbm: tx, rxDbm: rx,
+          voltage: r2(3.24 + rnd() * 0.08), temperatureC: r2(38 + rnd() * 9),
+          rxOltOk: rxOlt >= -28 && rxOlt <= -8, txOk: tx >= 0.5 && tx <= 5, rxOk: rx >= -27 && rx <= -8 };
+      } else {
+        // Equipo lost (como el backend): lecturas numéricas null y flags false.
+        optics = { distanceMeters: null, rxOltDbm: null, txDbm: null, rxDbm: null,
+          voltage: null, temperatureC: null, rxOltOk: false, txOk: false, rxOk: false };
+      }
+    }
+    const internet = plan ? plan.downloadMbps : 200;
+    const portState = lost ? 'down' : 'up';
+    const device = {
+      serial: serial,
+      model: isGpon ? 'F6600V9.0' : 'TG2482A',
+      version: isGpon ? 'V9.0' : '9.1.103',
+      software: isGpon ? 'V9.0.10P2N8' : '9.1.103S5',
+      state: lost ? 'lost' : 'working',
+      adminState: accountStatus === 'A' ? 'up' : 'down',   // como el backend
+      port: topo.port,
+      accessNetwork: topo.accessNetwork,
+      headend: topo.headend,
+      onuId: topo.onuId,
+      lastOnline: lastOnline,
+      lastOffline: lastOffline,
+      offlineCause: isGpon ? cause : null,                 // HFC: el CMTS no informa causa
+      speedMode: isGpon ? 'GPON' : 'DOCSIS 3.1',
+      nap: topo.clientNap,
+      client: { accountNumber: cuenta, name: clientName, address: profile.address || null },
+      servicePorts: isGpon ? [
+        { id: 1, mode: 'tag', vlanIn: 950, vlanOut: 950, service: 'INT Residencial',
+          trafficProfile: 'DOWN-RES-' + (internet * 1000) + '-I', macLearned: lost ? 0 : 1, state: portState },
+      ].concat(h % 3 === 0 ? [{ id: 2, mode: 'tag', vlanIn: 960, vlanOut: 960, service: 'VOIP', trafficProfile: 'VOIP-1M',
+        macLearned: lost ? 0 : 1, state: portState }] : []) : [],
+      wanIp: isGpon ? 'DHCP' : (lost ? null : '10.' + (h % 200) + '.' + ((h >>> 8) % 250) + '.' + (2 + (h % 250))),
+      cpes: lost ? [] : [{
+        ip: '190.155.' + (h % 250) + '.' + (2 + ((h >>> 4) % 250)),
+        mac: hexFrom(seededRandom((h ^ 7) >>> 0), 12).match(/.{2}/g).join(':'),
+        vendor: isGpon ? 'zte' : 'arris',
+      }],
+      optics: optics,
+    };
+    let docsis = null;
+    if (!isGpon) {
+      const r1 = function (x) { return Math.round(x * 10) / 10; };
+      docsis = lost
+        ? { downstream: [], upstream: [], codewords: { corrected: null, uncorrected: null }, ok: false }
+        : {
+          downstream: [1, 2, 3, 4, 5, 6, 7, 8].map(function (n) {
+            return { channel: n, frequencyMHz: 549 + n * 6, powerDbmv: r1(-1.5 + rnd() * 6), snrDb: r1(36 + rnd() * 4) };
+          }),
+          upstream: [1, 2, 3, 4].map(function (n) {
+            return { channel: n, frequencyMHz: r1(16.4 + n * 6.4), powerDbmv: r1(40 + rnd() * 8), snrDb: r1(31 + rnd() * 6) };
+          }),
+          codewords: { corrected: 1200 + Math.floor(rnd() * 9000), uncorrected: Math.floor(rnd() * 40) },
+          ok: true,
+        };
+    }
+    return {
+      simulated: true,
+      source: 'ISP_MONITOR',
+      technology: technology,
+      searchRow: {
+        serial: serial, city: topo.city, accessNetwork: topo.accessNetwork,
+        profile: plan ? plan.profile : null, accountNumber: cuenta,
+        accountStatus: accountStatus, clientName: clientName,
+      },
+      plan: plan,
+      device: device,
+      docsis: docsis,
+    };
+  }
+
+  const MOCK_ISP_NAMES = [
+    'GALO ALFREDO ESPINOZA CEDEÑO', 'MARIA JOSE VERA LOOR', 'CARLOS ANDRES PINCAY TOMALA',
+    'ROSA ELENA MORAN QUIMI', 'JORGE LUIS BAJAÑA SUAREZ', 'ANA LUCIA CEDEÑO ZAMBRANO',
+    'PEDRO PABLO VILLAMAR ROCA', 'GABRIELA ESTEFANIA LEON MERA', 'LUIS FERNANDO ALAVA MERO',
+    'KATHERINE PAOLA SALAZAR ORTIZ', 'DIEGO ARMANDO CHOEZ PIGUAVE', 'NANCY BEATRIZ YAGUAL TIGRERO',
+    'WILSON EDUARDO MACIAS PONCE', 'VERONICA ALEXANDRA RIZZO PLUAS', 'FREDDY JAVIER CASTRO LINO',
+    'PATRICIA MONSERRATE INTRIAGO BRAVO',
+  ];
+  // Regla de diagnóstico (contrato §2), aplicada sobre los datos ya armados.
+  function ispDiagnosis(naps, clientNapCode) {
+    let client = null;
+    let clientNap = null;
+    naps.forEach(function (n) {
+      n.devices.forEach(function (d) { if (d.isClient) { client = d; clientNap = n; } });
+    });
+    if (!client || client.state !== 'lost') {
+      return { scope: 'NONE', message: 'El equipo del cliente está working y su NAP no reporta fallas: no hay falla de red visible.' };
+    }
+    const others = clientNap.devices.filter(function (d) { return !d.isClient; });
+    if (others.every(function (d) { return d.state === 'working'; })) {
+      return { scope: 'INTERNAL', message: 'Solo el equipo del cliente está lost: la falla es interna (domicilio/drop/equipo).' };
+    }
+    let total = 0;
+    let lostAll = 0;
+    let napsWithLost = 0;
+    naps.forEach(function (n) {
+      total += n.summary.total; lostAll += n.summary.lost;
+      if (n.summary.lost > 0) napsWithLost++;
+    });
+    if (total && lostAll / total >= 0.3 && napsWithLost >= 2) {
+      return { scope: 'EXTERNAL_NETWORK', message: lostAll + ' de ' + total + ' equipos de la red de acceso están lost en ' +
+        napsWithLost + ' NAPs: la falla es externa en la red de acceso.' };
+    }
+    if (clientNap.summary.lost / clientNap.summary.total >= 0.5) {
+      return { scope: 'EXTERNAL_NAP', message: clientNap.summary.lost + ' de ' + clientNap.summary.total +
+        ' equipos de la NAP ' + clientNapCode + ' están lost: la falla es externa en la NAP.' };
+    }
+    return { scope: 'INTERNAL', message: 'El equipo del cliente está lost y su NAP tiene pocos equipos caídos: revisar primero domicilio/drop/equipo.' };
+  }
+  function napSummary(devices) {
+    const lost = devices.filter(function (d) { return d.state === 'lost'; }).length;
+    return {
+      total: devices.length, working: devices.length - lost, lost: lost,
+      state: lost === 0 ? 'OK' : lost === devices.length ? 'DOWN' : 'PARTIAL',
+    };
+  }
+
+  // GET /accounts/:n/isp-monitor/access-network (modo demo).
+  // TODO(lopdp): en modo real esto expone nombres de terceros (clientes de la
+  // misma red de acceso). Hoy es simulado: definir minimización antes de real.
+  function mockAccessNetwork(accountNumber) {
+    const cuenta = String(accountNumber || '').trim();
+    const technology = mockAccountTechnology(cuenta);
+    const scenario = mockIspScenario(cuenta);
+    const topo = mockIspTopology(cuenta, technology);
+    const h = accountHash(cuenta);
+    const rnd = seededRandom((h ^ 0x3c6ef372) >>> 0);
+    const isGpon = technology === 'GPON';
+    const napCount = 4 + Math.floor(rnd() * 4);              // 4..7
+    const codes = [topo.clientNap];
+    while (codes.length < napCount) {
+      // Vecinas: 6 o 7 caracteres (HG4NA10); en HFC, taps (RM7TF12).
+      const c = topo.accessNetwork.slice(0, 3) + (isGpon ? 'N' : 'T') +
+        String.fromCharCode(65 + Math.floor(rnd() * 26)) + (1 + Math.floor(rnd() * 12));
+      if (codes.indexOf(c) === -1) codes.push(c);
+    }
+    const accountStatusPick = function () { const x = rnd(); return x < 0.88 ? 'A' : x < 0.96 ? 'S' : 'T'; };
+    const naps = codes.map(function (code, i) {
+      // La NAP del cliente con al menos 3 equipos: así los 3 casos se distinguen.
+      const size = i === 0 ? 3 + Math.floor(rnd() * 6) : 2 + Math.floor(rnd() * 7);   // 2..8
+      const devices = [];
+      for (let k = 0; k < size; k++) {
+        const isClient = i === 0 && k === 0;
+        const acc = isClient ? cuenta : String(10000000 + Math.floor(rnd() * 89999999));
+        devices.push({
+          serial: isClient ? mockAccountDeviceId(cuenta, technology)
+            : (isGpon ? ['ZTEG', 'STGU', 'XPON'][Math.floor(rnd() * 3)] + hexFrom(rnd, 8) : hexFrom(rnd, 12)),
+          accountNumber: acc,
+          services: { internet: isClient ? true : rnd() < 0.95, phone: rnd() < 0.4, tv: rnd() < 0.55 },
+          clientName: isClient ? mockIspClientName(cuenta) : MOCK_ISP_NAMES[Math.floor(rnd() * MOCK_ISP_NAMES.length)],
+          accountStatus: isClient ? mockIspAccountStatus(cuenta) : accountStatusPick(),
+          state: 'working',
+          isClient: isClient,
+        });
+      }
+      // El cliente no va siempre primero dentro de su NAP.
+      if (i === 0) {
+        const pos = Math.floor(rnd() * size);
+        const tmp = devices[pos]; devices[pos] = devices[0]; devices[0] = tmp;
+      }
+      return { nap: code, devices: devices };
+    });
+    const clientNap = naps[0];
+    const client = clientNap.devices.filter(function (d) { return d.isClient; })[0];
+    if (scenario === 'INTERNAL') {
+      client.state = 'lost';
+    } else if (scenario === 'EXTERNAL_NAP') {
+      // Toda la NAP del cliente lost menos un vecino: ≥50 % y PARCIAL.
+      let keep = clientNap.devices.filter(function (d) { return !d.isClient; })[0];
+      clientNap.devices.forEach(function (d) { d.state = d === keep ? 'working' : 'lost'; });
+    } else if (scenario === 'EXTERNAL_NETWORK') {
+      // NAP del cliente y otras NAPs completas lost hasta pasar el 30 % de la red.
+      const total = naps.reduce(function (a, n) { return a + n.devices.length; }, 0);
+      let lostCount = 0;
+      for (let i = 0; i < naps.length && (i < 2 || lostCount / total < 0.3); i++) {
+        naps[i].devices.forEach(function (d) { d.state = 'lost'; });
+        lostCount += naps[i].devices.length;
+      }
+    } else if (h % 2 === 0) {
+      // Sin falla del cliente, pero un equipo suelto lost en otra NAP (realismo).
+      const other = naps[1 + (h % (naps.length - 1))];
+      other.devices[other.devices.length - 1].state = 'lost';
+    }
+    const ordered = naps.map(function (n) { return { nap: n.nap, summary: napSummary(n.devices), devices: n.devices }; });
+    const totals = ordered.reduce(function (a, n) {
+      return { devices: a.devices + n.summary.total, working: a.working + n.summary.working, lost: a.lost + n.summary.lost };
+    }, { devices: 0, working: 0, lost: 0 });
+    return {
+      simulated: true,
+      accessNetwork: topo.accessNetwork,
+      technology: technology,
+      clientNap: topo.clientNap,
+      naps: ordered,
+      totals: totals,
+      diagnosis: ispDiagnosis(ordered, topo.clientNap),
+    };
+  }
+
   function mockNodeEvents() {
     return [
       { type: 'Mantenimiento de red', description: 'Reset general y validación.', status: 'RESUELTO', occurredAt: nowIso() },
@@ -1509,8 +1866,10 @@
     const pick = function (arr) { return arr[Math.floor(rnd() * arr.length)]; };
     const account = mockOrderAccount(n);
     const profile = mockClientProfile(account);
-    const technology = n % 2 === 0 ? 'GPON' : 'HFC';
-    const orderType = ['Visita Técnica', 'Migración', 'Instalación'][n % 3];
+    // Misma regla que ISP Monitor por cuenta (orden y monitor no se contradicen).
+    const technology = mockAccountTechnology(account);
+    // HFC no tiene Migración (como el backend): esas órdenes quedan en Visita Técnica.
+    const orderType = (function (t) { return technology === 'HFC' && t === 'Migración' ? 'Visita Técnica' : t; })(['Visita Técnica', 'Migración', 'Instalación'][n % 3]);
     const sig = { 'Visita Técnica': 'FSM_VISTEC', 'Migración': 'FSM_MIGRA', 'Instalación': 'FSM_INSTAL' }[orderType];
     const open = n % 5 !== 0;           // 4 de cada 5 órdenes con la tarea de hoy pendiente
     const count = 2 + (n % 4);          // 2..5 tareas
@@ -1582,8 +1941,9 @@
         serviceId: String(serviceBase + 1), status: 'Aprovisionado',
         type: 'SERVICE CALL+' + technology, shortName: 'Modem', productName: 'Modem',
         model: isGpon ? 'ONT ZTE ZXHN F6600 WIFI 6' : 'CABLEMODEM ARRIS TG2482A',
-        serial: isGpon ? 'ZTEGD' + String(1000000 + (n % 8999999)).slice(-7) : 'ARR' + String(n).padStart(9, '0'),
-        mac: mac(n + 1),
+        // GPON: el serial que ve ISP Monitor; HFC: la MAC del cablemódem.
+        serial: isGpon ? mockAccountDeviceId(account, technology) : 'ARR' + String(n).padStart(9, '0'),
+        mac: isGpon ? mac(n + 1) : mockAccountDeviceId(account, technology),
       },
       {
         serviceId: String(serviceBase + 2), status: 'Aprovisionado',
@@ -1605,7 +1965,8 @@
         model: 'DECODIFICADOR KAONMEDIA KSTB6077', serial: 'KM' + String(n).padStart(10, '0'), mac: mac(n + 4),
       });
     }
-    const zone = 'QQ' + (n % 9) + 'B' + String.fromCharCode(65 + (n % 26));
+    // NAP del cliente y red de acceso: los mismos que ve ISP Monitor.
+    const topoIsp = mockIspTopology(account, technology);
     return {
       simulated: true,
       source: 'TYTAN',
@@ -1628,8 +1989,8 @@
         address: profile.address || null,
         latitude: typeof profile.latitude === 'number' ? profile.latitude : null,
         longitude: typeof profile.longitude === 'number' ? profile.longitude : null,
-        napCode: 'QQ4JC' + (1 + (n % 9)),
-        zoneCode: zone,
+        napCode: topoIsp.clientNap,
+        zoneCode: topoIsp.accessNetwork,
       },
       tasks: tasks,
       equipment: equipment,
@@ -2204,6 +2565,32 @@
       await delay(100);
       return mockCreateClientLocation(accountNumber, body);
     },
+
+    // ---- ISP Monitor por número de cuenta (contrato 2026-10-06 b) ---------
+    // Fila de búsqueda, plan en bits, ficha ONU Info (GPON) o cablemódem
+    // (HFC). `docsis` solo viene con technology === 'HFC'.
+    // Errores (igual que el backend): 400 cuenta inválida; 404 cuenta fuera
+    // de la whitelist (solo si está activa: en el mock siempre lo está).
+    async getIspMonitor(accountNumber) {
+      if (this.useRealApi) {
+        return fetchJson('GET', '/accounts/' + encodeURIComponent(accountNumber) + '/isp-monitor');
+      }
+      await delay(120);
+      mockIspCheckAccount(accountNumber);
+      return mockIspMonitor(accountNumber);
+    },
+    // Equipos de la red de acceso agrupados por NAP + diagnóstico de la falla
+    // (interna / NAP / red de acceso / sin falla).
+    async getIspAccessNetwork(accountNumber) {
+      if (this.useRealApi) {
+        return fetchJson('GET', '/accounts/' + encodeURIComponent(accountNumber) + '/isp-monitor/access-network');
+      }
+      await delay(160);
+      mockIspCheckAccount(accountNumber);
+      return mockAccessNetwork(accountNumber);
+    },
+    // Regla de tecnología simulada por cuenta (la misma de /orders/context).
+    mockAccountTechnology: mockAccountTechnology,
 
     // ---- ISP Monitor por serial GPON / MAC HFC (campos 9-13) --------------
     // Ficha del equipo: estado del terminal, de la red y evento asociado.
