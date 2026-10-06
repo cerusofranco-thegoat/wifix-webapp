@@ -2010,9 +2010,9 @@ console.log('\n== Ingreso por cédula/RUC (POST /accounts/lookup) ==');
 {
   const api = ctx.WifixAPI;
   const html = readFileSync(base + 'index.html', 'utf8');
-  check('selector "Ingresar por": cuenta, cédula/RUC y orden FSM deshabilitada con "Próximamente"',
+  check('selector "Ingresar por": cuenta, cédula/RUC y orden habilitada (sin "Próximamente")',
     html.includes('role="radiogroup"') && html.includes('data-mode="account"') && html.includes('data-mode="document"')
-    && /data-mode="order"[^>]*aria-disabled="true"/.test(html) && html.includes('Próximamente'));
+    && html.includes('data-mode="order"') && !/data-mode="order"[^>]*aria-disabled/.test(html) && !html.includes('Próximamente'));
   const dos = await api.lookupAccountsByDocument('912345678');   // 9 dígitos → se restituye el 0
   check('mock lookup: cédula con 2 cuentas, sin devolver el documento',
     dos.by === 'document' && dos.documentKind === 'CEDULA' && dos.count === 2
@@ -2063,6 +2063,55 @@ console.log('\n== Ingreso por cédula/RUC (POST /accounts/lookup) ==');
   const fb = vm.runInContext('confirmAccountFeedback', ctx);
   check('0 matches: no confirma nada y avisa', fb.textContent.includes('No hay cuentas')
     && vm.runInContext('validatedAccount', ctx) === null);
+  ctx.setEntryMode('account');
+  input.value = '';
+  ctx.invalidateAccountCache();
+  console.warn = origWarn;
+}
+
+console.log('\n== Ingreso por nº de orden (TYTAN simulado) ==');
+{
+  const api = ctx.WifixAPI;
+  check('normalizador de orden: dígitos → ORDER/n/año; formato completo se respeta; basura → null',
+    api.normalizeOrderNumber('463158') === 'ORDER/463158/' + new Date().getFullYear()
+    && api.normalizeOrderNumber(' order/463158/2026 ') === 'ORDER/463158/2026'
+    && api.normalizeOrderNumber('ORD-463158') === null && api.normalizeOrderNumber('') === null);
+  check('normalizador de task: 6-7 dígitos', api.normalizeTaskId('549487') === 'TASK/549487/' + new Date().getFullYear()
+    && api.normalizeTaskId('TASK/5494870/2026') === 'TASK/5494870/2026' && api.normalizeTaskId('12345') === null);
+  let enviado = null;
+  const origFetch = ctx.fetch;
+  api.useRealApi = true;
+  ctx.fetch = async (url, init) => { enviado = { url: String(url), init }; return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({}), text: async () => '{}' }; };
+  try { await api.lookupAccountsByOrder('ORDER/463158/2026'); } catch (_) { /* solo la petición */ }
+  const lookupReq = enviado;
+  try { await api.getOrderContext('ORDER/463158/2026'); } catch (_) { /* idem */ }
+  const ctxReq = enviado;
+  try { await api.checkOrderTask('ORDER/463158/2026', 'TASK/549487/2026'); } catch (_) { /* idem */ }
+  const taskReq = enviado;
+  api.useRealApi = false;
+  ctx.fetch = origFetch;
+  check('lookup real por orden: POST /accounts/lookup { order }',
+    lookupReq && lookupReq.init.method === 'POST' && /\/accounts\/lookup$/.test(lookupReq.url)
+    && JSON.parse(lookupReq.init.body).order === 'ORDER/463158/2026');
+  check('contexto y task-check reales: workOrder como query param codificado',
+    ctxReq && /\/orders\/context\?workOrder=ORDER%2F463158%2F2026$/.test(ctxReq.url)
+    && taskReq && /\/orders\/task-check\?workOrder=ORDER%2F463158%2F2026&taskId=TASK%2F549487%2F2026$/.test(taskReq.url));
+
+  const origWarn = console.warn;
+  console.warn = () => {};
+  ctx.selectModule('instalaciones');
+  ctx.setEntryMode('order');
+  const input = vm.runInContext('accountInput', ctx);
+  input.value = 'xx';
+  await ctx.lookupByOrderFlow();
+  check('orden con formato inválido: no busca ni confirma', vm.runInContext('validatedAccount', ctx) === null
+    && vm.runInContext('confirmAccountFeedback', ctx).textContent.includes('ORDER/463158/2026'));
+  input.value = '463158';
+  await ctx.lookupByOrderFlow();
+  const cuentaOrden = vm.runInContext('validatedAccount', ctx);
+  check('orden válida: confirma la cuenta de la orden y guarda el workOrder en la sesión',
+    !!cuentaOrden && input.value === cuentaOrden && vm.runInContext('accountEntryMode', ctx) === 'account'
+    && ctx.sessionWorkOrder(cuentaOrden) === 'ORDER/463158/' + new Date().getFullYear(), cuentaOrden);
   ctx.setEntryMode('account');
   input.value = '';
   ctx.invalidateAccountCache();

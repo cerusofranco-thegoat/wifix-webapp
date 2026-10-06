@@ -1124,6 +1124,20 @@ body {
   color: var(--gray-600);
 }
 
+/* Orden de trabajo de la sesión (ingreso por nº de orden / TYTAN simulado). */
+.account-order-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 0 2px;
+  font-size: 12px;
+  color: var(--text-primary);
+}
+.account-order-line[hidden] { display: none; }
+.order-line-key { color: var(--text-secondary); }
+.order-line-value { font-weight: 700; color: var(--brand-dark); }
+
 /* Estado visual: cuenta confirmada — las tarjetas pasan de atenuadas a activas */
 .sub-grid:not(.account-confirmed) .sub-card {
   opacity: 0.55;

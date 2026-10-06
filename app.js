@@ -178,6 +178,8 @@ if (loginLogo) {
 logoutBtn.addEventListener('click', () => {
   WifixAPI.logout();
   _fsmHealth = null;
+  // La orden de trabajo es de la sesión del técnico: no pasa a otra sesión.
+  _orderSession.clear();
   renderIntegrationWarning(null);
   // Cerrar todas las detail screens y el subscreen al cerrar sesión.
   document.querySelectorAll('.detailscreen, .subscreen').forEach((el) => {
@@ -339,6 +341,13 @@ function invalidateAccountCache() {
     feedback.className = 'confirm-account-feedback';
   }
   clearWhitelistLine();
+  // Línea de la orden (se lee del DOM: esta función corre antes de que se
+  // declaren las constantes de la sección de orden).
+  const orderLine = document.getElementById('accountOrderLine');
+  if (orderLine) {
+    orderLine.innerHTML = '';
+    orderLine.hidden = true;
+  }
   accountInput.removeAttribute('aria-invalid');
   accountInput.removeAttribute('aria-describedby');
   // Sin cuenta confirmada no se muestra estado de equipo (el estado por
@@ -401,27 +410,66 @@ const confirmAccountFeedback = document.getElementById('confirmAccountFeedback')
 
 confirmAccountBtn.addEventListener('click', () => {
   if (accountEntryMode === 'document') lookupByDocumentFlow();
+  else if (accountEntryMode === 'order') lookupByOrderFlow();
   else confirmAccountFlow();
 });
 
-// === Ingresar por: Nº de cuenta / Cédula-RUC / Nº de orden FSM ===============
+// === Ingresar por: Nº de cuenta / Cédula-RUC / Nº de orden ===================
 // Por cédula se buscan las cuentas del titular (POST /accounts/lookup) y la
 // elegida sigue EXACTAMENTE el flujo de Confirmar cuenta (whitelist, regla de
 // Cancelaciones, modo limitado ante 503). El documento nunca se guarda: al
 // elegir la cuenta el campo pasa a mostrar el nº de cuenta.
-// El ingreso por nº de orden FSM queda visible pero deshabilitado: el backend
-// responde 501 NOT_IMPLEMENTED (la operadora no expone orden → cuenta).
+// Por nº de orden (POST /accounts/lookup { order }, TYTAN simulado) la orden
+// trae exactamente una cuenta, que sigue el mismo flujo; el workOrder queda
+// en la sesión de esa cuenta para el contexto de orden y la task de la visita.
 const entryModeGroup = document.getElementById('entryMode');
 const accountFieldHint = document.getElementById('accountFieldHint');
 const accountLookupResults = document.getElementById('accountLookupResults');
+const accountOrderLine = document.getElementById('accountOrderLine');
 
 const ENTRY_MODES = Object.freeze({
   account: Object.freeze({ hint: 'Nº de cuenta', placeholder: 'Ingresa el número de cuenta',
     maxlength: 20, inputmode: 'numeric', button: 'Confirmar cuenta' }),
   document: Object.freeze({ hint: 'Cédula o RUC del titular', placeholder: 'Cédula (10 dígitos) o RUC (13)',
     maxlength: 32, inputmode: 'numeric', button: 'Buscar cuentas' }),
+  order: Object.freeze({ hint: 'Nº de orden de trabajo', placeholder: 'ORDER/463158/2026 o 463158',
+    maxlength: 32, inputmode: 'text', button: 'Buscar orden' }),
 });
-const ORDER_ENTRY_UNAVAILABLE = 'El ingreso por nº de orden FSM todavía no está disponible: la operadora no expone la consulta de orden a cuenta. Ingresa con el nº de cuenta o la cédula.';
+
+// === Orden de trabajo de la sesión (TYTAN simulado) ==========================
+// cuenta → { workOrder, source: 'lookup' | 'module' }. Vive mientras dure la
+// sesión: cambiar de módulo NO la borra (la orden sigue siendo de esa cuenta);
+// el técnico puede cambiarla dentro de Visita técnica / Migraciones.
+const _orderSession = new Map();
+
+function sessionWorkOrder(cuenta) {
+  const hit = cuenta ? _orderSession.get(String(cuenta).trim()) : null;
+  return hit ? hit.workOrder : null;
+}
+
+function setSessionWorkOrder(cuenta, workOrder, source) {
+  const c = String(cuenta || '').trim();
+  if (!c) return;
+  if (!workOrder) _orderSession.delete(c);
+  else _orderSession.set(c, { workOrder: String(workOrder), source: source || 'module' });
+  renderAccountOrderLine(c);
+}
+
+/** Línea "Orden ORDER/… · TYTAN (simulado)" bajo Confirmar cuenta. */
+function renderAccountOrderLine(cuenta) {
+  if (!accountOrderLine) return;
+  const confirmada = validatedAccount && validatedAccount === String(cuenta || '').trim();
+  const wo = confirmada ? sessionWorkOrder(cuenta) : null;
+  if (!wo) {
+    accountOrderLine.innerHTML = '';
+    accountOrderLine.hidden = true;
+    return;
+  }
+  accountOrderLine.innerHTML = `<span class="order-line-key">Orden</span>` +
+    `<span class="order-line-value mono">${escapeHtml(wo)}</span>` +
+    `<span class="sim-badge" title="Integración TYTAN simulada">TYTAN simulado</span>`;
+  accountOrderLine.hidden = false;
+}
 
 let accountEntryMode = 'account';
 
@@ -451,6 +499,8 @@ function setEntryMode(mode) {
   accountInput.setAttribute('placeholder', cfg.placeholder);
   accountInput.setAttribute('maxlength', String(cfg.maxlength));
   accountInput.setAttribute('inputmode', cfg.inputmode);
+  // ORDER/… se escribe en mayúsculas; cuenta y cédula son solo dígitos.
+  accountInput.setAttribute('autocapitalize', mode === 'order' ? 'characters' : 'off');
   accountInput.value = '';
   inputWrap.classList.remove('has-value');
   confirmAccountBtn.textContent = cfg.button;
@@ -462,11 +512,7 @@ if (entryModeGroup) {
   entryModeGroup.addEventListener('click', (ev) => {
     const btn = ev.target && ev.target.closest ? ev.target.closest('[data-mode]') : null;
     if (!btn) return;
-    if (btn.getAttribute('aria-disabled') === 'true') {
-      confirmAccountFeedback.textContent = ORDER_ENTRY_UNAVAILABLE;
-      confirmAccountFeedback.className = 'confirm-account-feedback warning';
-      return;
-    }
+    if (btn.getAttribute('aria-disabled') === 'true') return;
     if (btn.dataset.mode !== accountEntryMode) setEntryMode(btn.dataset.mode);
     accountInput.focus();
   });
@@ -591,6 +637,54 @@ async function lookupByDocumentFlow() {
   confirmAccountFeedback.className = 'confirm-account-feedback error';
 }
 
+// Ingreso por nº de orden (TYTAN simulado). Acepta ORDER/463158/2026 o solo
+// los dígitos. La orden trae UNA cuenta: se guarda el workOrder en la sesión de
+// esa cuenta y se sigue exactamente el flujo de Confirmar cuenta.
+async function lookupByOrderFlow() {
+  const raw = (accountInput.value || '').trim();
+  clearLookupResults();
+  const normalizada = WifixAPI.normalizeOrderNumber(raw);
+  if (!normalizada) {
+    confirmAccountFeedback.textContent = 'Ingresa el nº de orden: ORDER/463158/2026 o solo el número (463158).';
+    confirmAccountFeedback.className = 'confirm-account-feedback error';
+    accountInput.setAttribute('aria-invalid', 'true');
+    accountInput.setAttribute('aria-describedby', 'confirmAccountFeedback');
+    accountInput.focus({ preventScroll: true });
+    return;
+  }
+  accountInput.removeAttribute('aria-invalid');
+  accountInput.removeAttribute('aria-describedby');
+  confirmAccountBtn.disabled = true;
+  confirmAccountBtn.textContent = 'Buscando…';
+  confirmAccountFeedback.textContent = '';
+  confirmAccountFeedback.className = 'confirm-account-feedback';
+  let res = null;
+  try {
+    res = await WifixAPI.lookupAccountsByOrder(raw);
+  } catch (err) {
+    console.error('[Wifix] lookup por orden:', err);
+    const infra = isUpstreamOrNetworkFailure(err);
+    confirmAccountFeedback.textContent = infra
+      ? `No se pudo buscar la orden en este momento (${err.message || 'sin conexión'}). Ingresa con el número de cuenta.`
+      : (err.code === 'VALIDATION_ERROR'
+        ? 'Formato de orden inválido. Usa ORDER/463158/2026 o solo el número.'
+        : (err.message || 'No se pudo buscar la orden.'));
+    confirmAccountFeedback.className = `confirm-account-feedback ${infra ? 'warning' : 'error'}`;
+  } finally {
+    confirmAccountBtn.disabled = false;
+    confirmAccountBtn.textContent = ENTRY_MODES[accountEntryMode].button;
+  }
+  if (!res) return;
+  const match = Array.isArray(res.matches) ? res.matches.find(m => m && m.accountNumber) : null;
+  if (!match) {
+    confirmAccountFeedback.textContent = `No se encontró la cuenta de la orden ${normalizada}. Verifica el número o ingresa con el número de cuenta.`;
+    confirmAccountFeedback.className = 'confirm-account-feedback error';
+    return;
+  }
+  setSessionWorkOrder(match.accountNumber, res.workOrder || normalizada, 'lookup');
+  await selectLookupAccount(match.accountNumber);
+}
+
 // Confirma la cuenta: perfil de la operadora + whitelist de Xtrim EN PARALELO.
 // La whitelist se resuelve primero (es local del backend, rápida); si bloquea,
 // no se espera al perfil. Si no bloquea, el flujo sigue exactamente como antes
@@ -640,6 +734,7 @@ async function confirmAccountFlow() {
       confirmAccountFeedback.textContent = `Cuenta confirmada — ${profileDisplayName(profile)}`;
       confirmAccountFeedback.className = 'confirm-account-feedback success';
       renderWhitelistLine(wl, cuenta);
+      renderAccountOrderLine(cuenta);
 
       // Estado del cliente: UNA sola llamada adicional. Si falla no invalida la
       // confirmación — el técnico ya tiene el nombre y puede seguir trabajando.
@@ -663,6 +758,7 @@ async function confirmAccountFlow() {
         // que funcionar igual. Se confirma en modo limitado y se avisa en amarillo.
         confirmAccountInLimitedMode(cuenta, err);
         renderWhitelistLine(wl, cuenta);
+        renderAccountOrderLine(cuenta);
       } else {
         // 404 / cuenta inexistente / credenciales: sí es un error real, no se
         // habilita nada.
