@@ -2790,15 +2790,84 @@ console.log('\n== Equipo a instalar: validación de capacidad vs plan ==');
   check('regla: sin plan → unknown_plan', ev('ZXHN F670L', null).result === 'unknown_plan' && ev('ZXHN F670L', 0).result === 'unknown_plan');
   check('regla: XGS-PON con 1500 → ok', ev('ONT ZTE XGS-PON ZXHN F8605P', 1500).result === 'ok');
 
-  // --- Serial, marca y modelo ---------------------------------------------------
-  const pre = (lines) => ctx.devPreselectModel(ctx.devMatchModelsFromText(lines, cat));
-  check('OCR "ZXHN F670L" preselecciona F670L (no F670Y)', pre(['ZTE', 'ZXHN F670L', 'GPON SN: ZTEGD0BB8294']) === 'ZXHN F670L');
-  check('OCR "HG8145X6" preselecciona la OptiXstar', pre(['HUAWEI', 'OptiXstar HG8145X6']) === 'ONT OptiXstar HG8145X6');
-  check('OCR "F8605P" preselecciona el XGS-PON', pre(['ZXHN F8605P', 'XGS-PON']) === 'ONT ZTE XGS-PON ZXHN F8605P');
-  check('OCR "ZXHN F6600P" gana F6600P sobre F6600 y F660', pre(['ZXHN F6600P']) === 'ONT ZTE ZXHN F6600P');
-  check('OCR "ZXHN F660" no confunde con F6600', pre(['Model: ZXHN F660']) === 'ZXHN F660');
-  check('OCR "AX3" ambiguo (dual/quad) → sin preselección', pre(['HUAWEI WiFi AX3']) === null);
-  check('OCR sin modelo → sin preselección', pre(['GPON SN: ZTEGD0BB8294', 'MAC 001122334455']) === null);
+  // --- Matcher: texto OCR + marca del serial → modelo del catálogo ---------------
+  // Tabla con los 19 modelos reales del catálogo mock. [líneas OCR, serial,
+  // modelo esperado | null, método esperado, ambiguo esperado].
+  const F6600 = 'ONT ZTE ZXHN F6600 WIFI 6';
+  const F6600P = 'ONT ZTE ZXHN F6600P';
+  const F8605P = 'ONT ZTE XGS-PON ZXHN F8605P';
+  const H3601P = 'ROUTER ZXHN H3601P V9 WIFI 6';
+  const HG = 'ONT OptiXstar HG8145X6';
+  const AX3D = 'AX3 DUAL CORE WIFI 6';
+  const AX3Q = 'AX3 QUAD CORE WIFI 6';
+  const PLC = 'POWER LINE TP-LINK TLWPA4220 STARTER KIT';
+  const MATCH_TABLE = [
+    // OCR exacto (con y sin prefijo de marca ZXHN, guiones, espacios, minúsculas)
+    [['ZTE', 'ZXHN F670L', 'GPON SN: ZTEGD0BB8294'], 'ZTEGD0BB8294', 'ZXHN F670L', 'ocr', false],
+    [['ZXHN F670Y'], 'ZTEG12345678', 'ZXHN F670Y', 'ocr', false],
+    [['zxhn f601'], '', 'ZXHN F601', 'ocr', false],
+    [['F612C'], '', 'ZXHN F612C', 'ocr', false],
+    [['Model: ZXHN F660'], 'ZTEG12345678', 'ZXHN F660', 'ocr', false],
+    [['F660'], '', 'ZXHN F660', 'ocr', false],
+    [['F6600'], '', F6600, 'ocr', false],
+    [['ZXHN F6600', 'WiFi 6'], 'ZTEG12345678', F6600, 'ocr', false],
+    [['ZXHNF6600P'], 'ZTEG12345678', F6600P, 'ocr', false],
+    [['ZXHN F688 V9.0'], '', 'ZXHN F688 V9.0', 'ocr', false],
+    [['ZXHN F1611A-1FXS'], '', 'ONT ZXHN F1611A-1FXS', 'ocr', false],
+    [['ZXHN F8605P', 'XGS-PON'], 'ZTEG12345678', F8605P, 'ocr', false],
+    [['ROUTER ZXHN H3601P V9'], 'ZTEL1234567890AB', H3601P, 'ocr', false],
+    [['OptiXstar HG8145X6'], 'HWTC12345678', HG, 'ocr', false],
+    [['HUAWEI WiFi AX3 Quad-core'], 'BWH7A1234567', AX3Q, 'ocr', false],
+    [['AX3 Dual-Core'], 'BWH7A1234567', AX3D, 'ocr', false],
+    [['ONT HUR-2001'], 'STGU12345678', 'ONT HUR 2001', 'ocr', false],
+    [['HUR4101XR'], 'STGU12345678', 'ONU HUR4101XR', 'ocr', false],
+    [['ONU300G-1G'], 'STGU12345678', 'ONU300G-1G', 'ocr', false],
+    [['ONU Bridge TXG-B2000'], 'XPON12345678', 'ONU Bridge TXG-B2000', 'ocr', false],
+    [['Model: TL-WPA4220'], '2219876543210', PLC, 'ocr', false],
+    // Ambiguos: se elige el de mayor puntaje y se marca "revisa"
+    [['HUAWEI', 'WiFi AX3'], 'BWH7A1234567', AX3D, 'ocr', true],
+    [['HG8145'], '', HG, 'ocr', true],
+    // Único modelo de la marca (sin modelo legible)
+    [['HUAWEI', 'GPON SN: HWTC8C4D7E21'], 'HWTC8C4D7E21', HG, 'brand_single', false],
+    [[], '48575443A1B2C3D4', HG, 'brand_single', false],
+    [[], 'ZTEL1234567890AB', H3601P, 'brand_single', false],
+    [[], 'XPON12345678', 'ONU Bridge TXG-B2000', 'brand_single', false],
+    // Sin match → no se selecciona (el técnico elige del menú)
+    [['ZTE', 'GPON SN: ZTEGC8F21A77'], 'ZTEGC8F21A77', null, null, false],
+    [[], 'STGU12345678', null, null, false],
+    [['ARCHER C6'], '', null, null, false],
+    [['AX3000'], '', null, null, false],
+    // Salvaguardas: código de la misma familia fuera de catálogo / otra marca
+    [['EchoLife HG8145V5'], 'HWTC12345678', null, null, false],
+    [['ZXHN F670L'], 'HWTC12345678', null, null, false],
+  ];
+  const badRows = [];
+  MATCH_TABLE.forEach(([lines, serial, model, method, amb]) => {
+    const d = ctx.devDetectModel(lines, serial, cat, 'ocr');
+    if (d.model !== model || d.method !== method || !!d.ambiguous !== amb) {
+      badRows.push(`${JSON.stringify(lines)}/${serial} → ${d.model}/${d.method}/${d.ambiguous}`);
+    }
+  });
+  check(`matcher: tabla de ${MATCH_TABLE.length} textos OCR → modelo esperado`, badRows.length === 0, badRows.join(' ; '));
+  const covered = new Set(MATCH_TABLE.map((r) => r[2]).filter(Boolean));
+  check('matcher: la tabla cubre los 19 modelos del catálogo', cat.every((d) => covered.has(d.model)),
+    cat.filter((d) => !covered.has(d.model)).map((d) => d.model).join());
+  check('matcher: "F660" exacto le gana a F6600/F6600P (solo prefijo, menor puntaje)', (() => {
+    const m = ctx.devMatchModelsFromText(['ZXHN F660'], cat);
+    return m[0].model === 'ZXHN F660' && m[0].exact && m.slice(1).every((x) => !x.exact && x.score < m[0].score);
+  })());
+  check('matcher: restringe a la marca del serial (ZTEG no propone la Huawei aunque el texto la diga)', (() => {
+    const d = ctx.devDetectModel(['HG8145X6'], 'ZTEGD0BB8294', cat);
+    return d.model === null && d.offBrand.join() === HG;
+  })());
+  check('matcher: código de la familia fuera de catálogo se informa (unlistedCode)',
+    ctx.devDetectModel(['EchoLife HG8145V5'], 'HWTC12345678', cat).unlistedCode === 'HG8145V5');
+  check('matcher: fuente barcode → método "barcode"', ctx.devDetectModel(['ZXHN F670L'], '', cat, 'barcode').method === 'barcode');
+  check('matcher: rótulos del método en la UI',
+    ctx.devModelSourceText('ocr') === 'Detectado por foto (OCR)' && ctx.devModelSourceText('brand_single') === 'Único modelo de la marca'
+    && ctx.devModelSourceText('manual') === 'Elegido manualmente'
+    && ctx.devModelSourceText('ocr', true).includes('detectado automáticamente, revisa si no coincide'));
+
   const pk = ctx.devPickSerial(['ZXHN F670L', 'GPON SN: ZTEGD0BB8294', 'D-SN: ZTE0QH8M1234567'], cat);
   check('serial: elige el GPON SN con prefijo del catálogo, no el nombre del modelo',
     pk.serial === 'ZTEGD0BB8294' && pk.confidence === 'ok', JSON.stringify(pk));
@@ -2807,13 +2876,14 @@ console.log('\n== Equipo a instalar: validación de capacidad vs plan ==');
   check('serial: sin prefijo conocido → mejor esfuerzo marcado para verificar',
     ctx.devPickSerial(['SN: 9X81QW77'], cat).confidence === 'warn');
   check('serial: nada legible → vacío', ctx.devPickSerial([], cat).serial === '');
-  check('lista corta: ZTEG → 10 ONT ZTE; STGU → 3; ZTEL → router ZTE',
-    ctx.devShortlist(cat, 'ZTEGD0BB8294', []).length === 10
-    && ctx.devShortlist(cat, 'STGU12345678', []).length === 3
-    && ctx.devShortlist(cat, 'ZTEL1234567890AB', []).map((d) => d.model).join() === 'ROUTER ZXHN H3601P V9 WIFI 6');
-  check('lista corta: lo leído en la etiqueta va primero',
-    ctx.devShortlist(cat, 'ZTEGD0BB8294', ctx.devMatchModelsFromText(['ZXHN F670L'], cat))[0].model === 'ZXHN F670L');
-  check('lista corta: serial sin marca → vacía (la UI muestra todos)', ctx.devShortlist(cat, 'ABCD1234', []).length === 0);
+  check('menú: 19 modelos agrupados por marca en orden alfabético (ZTE 11, HUAWEI 3, INTELLEGO 2)', (() => {
+    const g = ctx.devCatalogByBrand(cat);
+    const n = Object.fromEntries(g.map((x) => [x.brand, x.items.length]));
+    const names = g.map((x) => x.brand);
+    const sorted = names.slice().sort((a, b) => a.localeCompare(b, 'es', { sensitivity: 'base' }));
+    return g.reduce((a, x) => a + x.items.length, 0) === 19 && n.ZTE === 11 && n.HUAWEI === 3 && n.INTELLEGO === 2
+      && names.join() === sorted.join();
+  })());
 
   // --- Flujo con el mock: POST + veredicto + bloqueo ----------------------------
   ctx.selectModule('instalaciones');
@@ -2838,9 +2908,14 @@ console.log('\n== Equipo a instalar: validación de capacidad vs plan ==');
   check('mock ok: el POST lleva el taskId de la visita en curso y serialSource', vOk.taskId && vOk.serialSource === 'barcode');
   check('ok: módulo completado y la guardia no bloquea', ctx.devStateFor('35070291').status === 'ok' && ctx.deviceRecordGuard('35070291') === null);
   const okHtml = ctx.devScreenHtml(ok.dev);
-  check('ok: tarjeta verde "módulo completado" con aria (role=status) y HTML balanceado',
-    okHtml.includes('dev-verdict is-ok') && okHtml.includes('role="status"') && okHtml.includes('módulo completado')
-    && okHtml.includes('aria-live="polite"') && balanced(okHtml) === null, balanced(okHtml));
+  check('ok: el resultado queda en el formulario (con el menú para corregir) en región aria-live, HTML balanceado',
+    okHtml.includes('dev-verdict is-ok') && okHtml.includes('módulo completado') && okHtml.includes('id="devModelSelect"')
+    && /data-slot="dev-result" aria-live="polite"/.test(okHtml) && balanced(okHtml) === null, balanced(okHtml));
+  // Al reabrir (borrador nuevo, estado del servidor/local): resumen con role=status.
+  const okSummary = ctx.devScreenHtml(run("devNewDraft('35070291', 'instalaciones', null)"));
+  check('ok al reabrir: tarjeta verde "módulo completado" con role=status y "Validar otro equipo"',
+    okSummary.includes('dev-verdict is-ok') && okSummary.includes('role="status"') && okSummary.includes('Validar otro equipo')
+    && balanced(okSummary) === null, balanced(okSummary));
 
   const wifi = await validate('40000600', 'ZXHN F670L');
   check('mock blocked wifi: plan 600, razón wifi 500, mensaje del contrato con "600 Mbps"',
@@ -2871,10 +2946,16 @@ console.log('\n== Equipo a instalar: validación de capacidad vs plan ==');
   ctx.selectModule('instalaciones');
   check('bloqueo: al volver a Instalaciones sigue bloqueado', ctx.deviceRecordGuard('35070291') !== null);
 
-  const blkHtml = ctx.devScreenHtml(eth.dev);
-  check('bloqueado: alerta roja (role=alert) con el mensaje del servidor',
+  const blkForm = ctx.devScreenHtml(eth.dev);
+  check('bloqueado en el formulario: alerta roja (role=alert) con el mensaje del servidor, sin override',
+    blkForm.includes('dev-verdict is-blocked') && blkForm.includes('role="alert"') && blkForm.includes(ctx.escapeHtml(eth.v.message))
+    && !/continuar|omitir|ignorar|forzar/i.test(blkForm) && !blkForm.includes('data-action="dev-validate"')
+    && (blkForm.match(/data-action="/g) || []).every(Boolean) && blkForm.includes('Escanea otro equipo'));
+  // Al reabrir con el bloqueo vigente: resumen con una sola acción.
+  const blkHtml = ctx.devScreenHtml(run("devNewDraft('35070291', 'instalaciones', null)"));
+  check('bloqueado al reabrir: alerta roja (role=alert) con el mensaje del servidor',
     blkHtml.includes('dev-verdict is-blocked') && blkHtml.includes('role="alert"') && blkHtml.includes(ctx.escapeHtml(eth.v.message)));
-  check('bloqueado: única acción "Escanear otro equipo" (sin validar/guardar ni inputs)',
+  check('bloqueado al reabrir: única acción "Escanear otro equipo" (sin validar/guardar ni inputs)',
     (blkHtml.match(/data-action="/g) || []).length === 1 && blkHtml.includes('data-action="dev-rescan"')
     && blkHtml.includes('Escanear otro equipo') && !blkHtml.includes('dev-validate') && !blkHtml.includes('data-field="devSerial"'));
   check('bloqueado: tiles plan vs equipo (Ethernet en rojo) y HTML balanceado',
@@ -2890,8 +2971,9 @@ console.log('\n== Equipo a instalar: validación de capacidad vs plan ==');
     banner.hidden === false && banner.innerHTML.includes('Flujo bloqueado') && banner.innerHTML.includes('data-action="open-equipo"'));
 
   // "Escanear otro equipo": el formulario vuelve, pero el bloqueo sigue hasta un ok.
-  eth.dev.rescanning = true;
-  const rescanHtml = ctx.devScreenHtml(eth.dev);
+  const rescanDraft = run("devNewDraft('35070291', 'instalaciones', null)");
+  rescanDraft.rescanning = true;
+  const rescanHtml = ctx.devScreenHtml(rescanDraft);
   check('reescaneo: formulario con aviso de bloqueo vigente y la guardia sigue activa',
     rescanHtml.includes('dev-still-blocked') && rescanHtml.includes('data-field="devSerial"') && ctx.deviceRecordGuard('35070291') !== null
     && balanced(rescanHtml) === null, balanced(rescanHtml));
@@ -2969,25 +3051,193 @@ console.log('\n== Equipo a instalar: validación de capacidad vs plan ==');
   draft.catalog = cat;
   draft.plan = Object.assign(ctx.devPlanFromProfile(await A.getClientProfile('40000600')), { loading: false, error: null });
   ctx.devApplyCapture(draft, ['ZTE', 'ZXHN F670L', 'GPON SN: ZTEGD0BB8294'], 'ocr');
-  check('captura OCR: serial + modelo preseleccionado + fuente ocr',
-    draft.serial === 'ZTEGD0BB8294' && draft.model === 'ZXHN F670L' && draft.serialSource === 'ocr');
+  check('captura OCR: serial + modelo detectado (método ocr) + fuente ocr',
+    draft.serial === 'ZTEGD0BB8294' && draft.model === 'ZXHN F670L' && draft.serialSource === 'ocr'
+    && draft.modelSource === 'ocr' && draft.modelAmbiguous === false);
   const formHtml = ctx.devScreenHtml(draft);
-  check('formulario: label del serial, fieldset con legend, lista corta + "Ver todos" y "no está en la lista"',
-    formHtml.includes('aria-labelledby="devSerialLabel"') && formHtml.includes('<legend') && formHtml.includes('data-action="dev-show-all"')
-    && formHtml.includes('Ver todos los modelos (19)') && formHtml.includes('El modelo no está en la lista')
-    && formHtml.includes('Leído en la etiqueta'));
-  check('formulario: plan con badge "simulado" (como Datos personales) y vista previa no apto por WiFi',
-    formHtml.includes('source-badge') && formHtml.includes('>simulado<') && formHtml.includes('Vista previa: no apto')
-    && formHtml.includes('status-tile fail'));
+  check('formulario: <select> nativo con <label for>, aria-describedby y 19 modelos en <optgroup> por marca',
+    /<label class="form-label" for="devModelSelect">/.test(formHtml) && /<select id="devModelSelect" data-field="devModel" aria-describedby="devModelHint">/.test(formHtml)
+    && (formHtml.match(/<optgroup /g) || []).length === ctx.devCatalogByBrand(cat).length + 1
+    && (formHtml.match(/<option value="(?!__other__)[^"]+"/g) || []).length === 19
+    && formHtml.includes('<optgroup label="ZTE">') && formHtml.includes('<optgroup label="HUAWEI">'));
+  check('formulario: el detectado preseleccionado y marcado "— detectado"; opción "no está en la lista"',
+    formHtml.includes('<option value="ZXHN F670L" selected>ZXHN F670L — detectado</option>')
+    && formHtml.includes('El modelo no está en la lista (no homologado)') && formHtml.includes('Detectado por foto (OCR): ZXHN F670L'));
+  check('formulario: sin la UI vieja (radios, "Ver todos", botón Validar)',
+    !formHtml.includes('type="radio"') && !formHtml.includes('dev-show-all') && !formHtml.includes('Validar equipo')
+    && !formHtml.includes('data-action="dev-validate"'));
+  check('formulario: plan con badge "simulado" y vista previa no apto por WiFi mientras valida',
+    formHtml.includes('source-badge') && formHtml.includes('>simulado<') && formHtml.includes('status-tile fail')
+    && formHtml.includes('Validando el equipo contra el plan'));
   check('formulario: navegador sin escáner nativo → solo "Tomar foto" + nota', !formHtml.includes('data-action="dev-scan"')
     && formHtml.includes('data-action="dev-photo"') && formHtml.includes('Escaneo disponible solo en la app'));
-  check('formulario: botón Validar habilitado y HTML balanceado',
-    /data-action="dev-validate"(?![^>]*disabled)/.test(formHtml) && balanced(formHtml) === null, balanced(formHtml));
+  check('formulario: label del serial y HTML balanceado',
+    formHtml.includes('aria-labelledby="devSerialLabel"') && balanced(formHtml) === null, balanced(formHtml));
   const empty = run("devNewDraft('40000600', 'visitas', null)");
   empty.catalog = cat;
+  empty.plan = { mbps: 600, simulated: true, loading: false, error: null };
   const emptyHtml = ctx.devScreenHtml(empty);
-  check('formulario vacío: Validar deshabilitado con el motivo (aria-describedby)',
-    /data-action="dev-validate" disabled/.test(emptyHtml) && emptyHtml.includes('Falta el número de serie'));
+  check('formulario vacío: dice qué falta y cómo detectar (sin botón)',
+    emptyHtml.includes('Falta el número de serie') && emptyHtml.includes('Toma la foto de la etiqueta para detectarlo automáticamente')
+    && emptyHtml.includes('<option value="" selected>Elige el modelo…</option>'));
+  draft.model = run('DEVICE_OTHER_MODEL');
+  draft.modelSource = 'manual';
+  const otherHtml = ctx.devScreenHtml(draft);
+  check('"no está en la lista": campo de texto con label y pista (se valida al terminar de escribir)',
+    otherHtml.includes('data-field="devOtherModel"') && otherHtml.includes('aria-labelledby="devOtherLabel"')
+    && otherHtml.includes('Escribe el modelo que figura en la etiqueta') && balanced(otherHtml) === null);
+
+  // --- Flujo automático: captura → modelo → validación (sin botón) --------------
+  ctx.selectModule('instalaciones');
+  const countOf = async (acc) => (await A.listDeviceValidations(acc)).items.length;
+  async function flowDraft(account) {
+    const d = run(`devNewDraft(${JSON.stringify(account)}, 'instalaciones', null)`);
+    d.catalog = cat;
+    d.plan = Object.assign(ctx.devPlanFromProfile(await A.getClientProfile(account)), { loading: false, error: null });
+    // Si la cuenta ya tiene veredicto, en la app se entra por "Validar/Escanear otro equipo".
+    if (ctx.devStateFor(account, 'instalaciones')) d.rescanning = true;
+    return d;
+  }
+  // Mismo punto de entrada que el resultado del escáner nativo.
+  const capture = (d, lines, source = 'ocr') => ctx.devProcessCapture(d, lines, source);
+
+  let n0 = await countOf('35070291');
+  const fa = await flowDraft('35070291');
+  const va = await capture(fa, A.mockLabelScan('ocr-f670l').lines);
+  check('auto (detección por OCR, plan 200): F670L detectado y validado solo → ok, 1 POST',
+    va && va.result === 'ok' && va.device.model === 'ZXHN F670L' && fa.modelSource === 'ocr'
+    && (await countOf('35070291')) === n0 + 1 && ctx.deviceRecordGuard('35070291') === null);
+  check('auto: el POST es el de siempre (sin campos nuevos) y lleva taskId y serialSource ocr',
+    va.taskId && va.serialSource === 'ocr' && !('modelSource' in va));
+  const faHtml = ctx.devScreenHtml(fa);
+  check('auto: resultado inmediato con "Modelo: Detectado por foto (OCR)" y HTML balanceado',
+    faHtml.includes('dev-verdict is-ok') && faHtml.includes('Modelo: Detectado por foto (OCR)') && balanced(faHtml) === null, balanced(faHtml));
+  check('auto: misma combinación serial+modelo no se vuelve a registrar',
+    (await ctx.devAutoValidate(fa)) === null && (await countOf('35070291')) === n0 + 1);
+
+  // Cambio en el menú → re-valida con el nuevo modelo (nueva alerta).
+  ctx.devApplyManualModel(fa, 'POWER LINE TP-LINK TLWPA4220 STARTER KIT');
+  const vb = await ctx.devAutoValidate(fa);
+  check('menú: cambiar el modelo re-valida solo → powerline bloqueado por Ethernet, 2º POST, guardia activa',
+    vb && vb.result === 'blocked' && vb.reasons[0].kind === 'ethernet' && (await countOf('35070291')) === n0 + 2
+    && ctx.deviceRecordGuard('35070291') !== null);
+  const fbHtml = ctx.devScreenHtml(fa);
+  check('menú: el resultado dice "Modelo: Elegido manualmente" y la alerta es role=alert',
+    fbHtml.includes('Modelo: Elegido manualmente') && fbHtml.includes('dev-verdict is-blocked') && fbHtml.includes('role="alert"'));
+  // Volver al modelo correcto desbloquea (validar otro equipo/modelo es la salida).
+  ctx.devApplyManualModel(fa, 'ZXHN F670L');
+  const vc = await ctx.devAutoValidate(fa);
+  check('menú: volver a F670L re-valida (3er POST) y libera la guardia',
+    vc && vc.result === 'ok' && (await countOf('35070291')) === n0 + 3 && ctx.deviceRecordGuard('35070291') === null);
+
+  // Cambio de modelo con un POST en curso → al terminar se valida la última elección.
+  n0 = await countOf('40001000');
+  const fq = await flowDraft('40001000');
+  const pq = capture(fq, A.mockLabelScan('ocr-f6600p').lines);
+  check('cola: con un POST en curso el cambio de modelo no dispara otro en paralelo',
+    fq.posting === true && (await ctx.devAutoValidate((ctx.devApplyManualModel(fq, 'ZXHN F670L'), fq))) === null && fq.revalidate === true);
+  await pq;
+  check('cola: al terminar, se validó la última elección (F670L con plan 1000 → bloqueado por WiFi); 2 POST',
+    fq.lastValidation.device.model === 'ZXHN F670L' && fq.lastValidation.result === 'blocked'
+    && fq.validatedKey === 'ZTEGC4A1B2C3|ZXHN F670L' && (await countOf('40001000')) === n0 + 2);
+
+  // Ambigua: AX3 (dual/quad) → elige el de mayor puntaje y avisa.
+  const fx = await flowDraft('40001000');
+  const vx = await capture(fx, A.mockLabelScan('ambigua-ax3').lines);
+  const fxHtml = ctx.devScreenHtml(fx);
+  check('auto (ambigua AX3, plan 1000): elige AX3 DUAL, marca "revisa si no coincide" y valida → ok',
+    vx && vx.result === 'ok' && fx.model === 'AX3 DUAL CORE WIFI 6' && fx.modelAmbiguous === true
+    && fxHtml.includes('Detectado automáticamente — revisa si no coincide') && fxHtml.includes('También podría ser: AX3 QUAD CORE WIFI 6')
+    && fxHtml.includes('dev-source-tag is-review'));
+
+  // Único modelo de la marca: serial HWTC sin modelo legible.
+  const fh = await flowDraft('40000600');
+  const vh = await capture(fh, A.mockLabelScan('marca-hwtc').lines);
+  check('auto (único modelo de la marca HWTC, plan 600): HG8145X6 → ok, método brand_single',
+    vh && vh.result === 'ok' && fh.model === 'ONT OptiXstar HG8145X6' && fh.modelSource === 'brand_single'
+    && ctx.devScreenHtml(fh).includes('Modelo: Único modelo de la marca'));
+
+  // Sin match: ZTEG con 10 modelos y sin texto de modelo → no selecciona ni valida.
+  n0 = await countOf('40000600');
+  const fn = await flowDraft('40000600');
+  const vn = await capture(fn, A.mockLabelScan('sin-match').lines);
+  const fnHtml = ctx.devScreenHtml(fn);
+  check('auto (sin match): no selecciona modelo, no hace POST y pide elegir del menú',
+    vn === null && fn.model === '' && fn.serial === 'ZTEGC8F21A77' && (await countOf('40000600')) === n0
+    && fnHtml.includes('No se reconoció el modelo en la etiqueta') && fnHtml.includes('Elige el modelo en el menú'));
+  ctx.devApplyManualModel(fn, 'ZXHN F670L');
+  const vn2 = await ctx.devAutoValidate(fn);
+  check('sin match → el técnico elige F670L en el menú → valida sola → bloqueado por plan 600 (WiFi 500)',
+    vn2 && vn2.result === 'blocked' && vn2.reasons[0].kind === 'wifi' && ctx.devScreenHtml(fn).includes('Modelo: Elegido manualmente'));
+  ctx.devApplyManualModel(fn, 'ONT ZTE ZXHN F6600P');
+  await ctx.devAutoValidate(fn);
+
+  // Bloqueado por plan detectado por foto: powerline (Ethernet 100) en plan 200.
+  const fp = await flowDraft('35070291');
+  const vp = await capture(fp, A.mockLabelScan('powerline').lines);
+  check('auto (bloqueado por plan): powerline detectado por OCR → blocked Ethernet 100 < 200',
+    vp && vp.result === 'blocked' && fp.modelSource === 'ocr' && vp.reasons[0].deviceMbps === 100
+    && ctx.deviceRecordGuard('35070291') !== null);
+  const fp2 = await flowDraft('35070291');
+  await capture(fp2, A.mockLabelScan('ocr-f670l').lines);
+
+  // Plan desconocido: aviso, no bloquea.
+  const fu = await flowDraft('40000000');
+  const vu = await capture(fu, A.mockLabelScan('ocr-f670l').lines);
+  check('auto (sin plan): unknown_plan, aviso ámbar, no bloquea', vu && vu.result === 'unknown_plan'
+    && ctx.deviceRecordGuard('40000000') === null && ctx.devScreenHtml(fu).includes('dev-verdict is-warn'));
+
+  // Foto (modelo) y después código de barras (serial) del MISMO equipo: el modelo se mantiene.
+  const fs2 = await flowDraft('40001000');
+  ctx.devApplyCapture(fs2, ['ZXHN F8605P', 'XGS-PON'], 'ocr');
+  ctx.devApplyCapture(fs2, ['ZTEGA1B2C3D4'], 'barcode');
+  check('foto sin serial + código del mismo equipo: modelo F8605P se mantiene y el serial se completa',
+    fs2.model === 'ONT ZTE XGS-PON ZXHN F8605P' && fs2.serial === 'ZTEGA1B2C3D4' && fs2.modelSource === 'ocr');
+  // Otro equipo (serial distinto) sin modelo legible → se limpia y pide elegir.
+  ctx.devApplyCapture(fs2, ['ZTEGFFFF0001'], 'barcode');
+  check('código de OTRO equipo sin modelo legible: el modelo anterior se limpia', fs2.model === '' && fs2.serial === 'ZTEGFFFF0001');
+
+  // Teclado como fallback: serial escrito a mano → re-detección por marca.
+  const fk = await flowDraft('40000600');
+  fk.serial = 'HWTC1234ABCD';
+  fk.serialSource = 'manual';
+  ctx.devApplySerialEdit(fk);
+  const vk = await ctx.devAutoValidate(fk);
+  check('teclado: serial HWTC escrito a mano → único modelo de la marca → valida solo con serialSource manual',
+    fk.model === 'ONT OptiXstar HG8145X6' && fk.modelSource === 'brand_single' && vk && vk.serialSource === 'manual');
+  // Elegido a mano + corrección del serial de la misma marca: se respeta la elección.
+  ctx.devApplyManualModel(fn, 'ZXHN F660');
+  fn.serial = 'ZTEGC8F21A78';
+  ctx.devApplySerialEdit(fn);
+  check('teclado: corregir el serial no pisa el modelo elegido a mano', fn.model === 'ZXHN F660' && fn.modelSource === 'manual');
+
+  // Error de red: no reintenta solo; botón "Reintentar validación".
+  const realCreate = A.createDeviceValidation;
+  A.createDeviceValidation = async () => { throw new Error('sin conexión'); };
+  const fe = await flowDraft('40001000');
+  const ve = await capture(fe, A.mockLabelScan('ocr-f670l').lines);
+  const feHtml = ctx.devScreenHtml(fe);
+  check('error de red: veredicto nulo, alerta y botón "Reintentar validación"; no reintenta solo',
+    ve === null && fe.postError && feHtml.includes('Reintentar validación') && feHtml.includes('role="alert"')
+    && (await ctx.devAutoValidate(fe)) === null);
+  A.createDeviceValidation = realCreate;
+  fe.failedKey = null;
+  const ve2 = await ctx.devAutoValidate(fe);
+  check('error de red: al reintentar se registra (plan 1000 → F670L bloqueado por WiFi)', ve2 && ve2.result === 'blocked');
+  ctx.devApplyManualModel(fe, 'ONT ZTE ZXHN F6600P');
+  await ctx.devAutoValidate(fe);
+
+  check('mock: etiquetas simuladas por id y en rotación (6 casos)', (() => {
+    const ids = A.mockLabelScanIds();
+    return ids.length === 6 && A.mockLabelScan('foto-ambigua-ax3.jpg').id === 'ambigua-ax3'
+      && ids.includes(A.mockLabelScan('IMG_0001.jpg').id) && Array.isArray(A.mockLabelScan().lines);
+  })());
+  check('Equipo a instalar sigue fuera de Cancelaciones', (() => {
+    ctx.selectModule('cancelaciones');
+    const r = !ctx.devUsesModule();
+    ctx.selectModule('instalaciones');
+    return r;
+  })());
   const loading = run("devNewDraft('40000600', 'visitas', null)");
   check('estado de carga del catálogo y del plan', ctx.devScreenHtml(loading).includes('Cargando catálogo de equipos')
     && ctx.devScreenHtml(loading).includes('Cargando…'));
