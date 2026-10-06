@@ -191,7 +191,24 @@
     }
   }
 
+  // Guardia del Nº de task (Visita técnica, contrato 2026-10-06 §4): app.js
+  // registra (accountNumber) => null | string. Sin task validada ningún
+  // registro de la visita se guarda (incluida la validación de equipo, que sí
+  // esquiva la guardia de bloqueo de equipo).
+  let taskGuard = null;
+  function assertTaskAllowed(accountNumber) {
+    if (typeof taskGuard !== 'function') return;
+    let msg = null;
+    try { msg = taskGuard(String(accountNumber || '').trim()); } catch (_) { msg = null; }
+    if (msg) {
+      const err = new Error(String(msg));
+      err.code = 'TASK_REQUIRED';
+      throw err;
+    }
+  }
+
   async function withVisitContext(accountNumber, body) {
+    assertTaskAllowed(accountNumber);
     assertRecordAllowed(accountNumber);
     const ctx = withContext(accountNumber, body);
     if (ctx.taskId === undefined || ctx.taskId === null || String(ctx.taskId).trim() === '') {
@@ -1382,6 +1399,320 @@
   }
 
   // ---------------------------------------------------------------------------
+  // Orden de trabajo TYTAN (simulada) — contrato ronda 2026-10-06 §2-§5
+  // ---------------------------------------------------------------------------
+  // Todo es determinístico por nº de orden: la misma orden devuelve siempre la
+  // misma cuenta, tareas y equipos (semilla = dígitos de la orden).
+  function validationError(message) {
+    const err = new Error(message);
+    err.code = 'VALIDATION_ERROR';
+    err.status = 400;
+    return err;
+  }
+
+  // 'ORDER/463158/2026' | '463158' → 'ORDER/463158/2026' (año actual si solo
+  // vienen los dígitos). null si el formato no es válido.
+  function normalizeOrderNumber(raw) {
+    const s = String(raw === null || raw === undefined ? '' : raw).replace(/\s+/g, '').toUpperCase();
+    let m = /^ORDER\/(\d{4,9})\/(\d{4})$/.exec(s);
+    if (m) return 'ORDER/' + m[1] + '/' + m[2];
+    m = /^(\d{4,9})$/.exec(s);
+    if (m) return 'ORDER/' + m[1] + '/' + new Date().getFullYear();
+    return null;
+  }
+
+  // 'TASK/549487/2026' | '549487' → 'TASK/549487/2026'. 6-7 dígitos (§4).
+  function normalizeTaskId(raw) {
+    const s = String(raw === null || raw === undefined ? '' : raw).replace(/\s+/g, '').toUpperCase();
+    let m = /^TASK\/(\d{6,7})\/(\d{4})$/.exec(s);
+    if (m) return 'TASK/' + m[1] + '/' + m[2];
+    m = /^(\d{6,7})$/.exec(s);
+    if (m) return 'TASK/' + m[1] + '/' + new Date().getFullYear();
+    return null;
+  }
+
+  // PRNG determinístico (mulberry32) para que la orden "no baile".
+  function seededRandom(seed) {
+    let a = (Number(seed) >>> 0) || 1;
+    return function () {
+      a = (a + 0x6D2B79F5) >>> 0;
+      let t = a;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  function orderDigits(workOrder) {
+    const m = /^ORDER\/(\d+)\//.exec(String(workOrder || ''));
+    return m ? Number(m[1]) : 0;
+  }
+  function orderYear(workOrder) {
+    const m = /\/(\d{4})$/.exec(String(workOrder || ''));
+    return m ? Number(m[1]) : new Date().getFullYear();
+  }
+  // Cuenta de la orden: sale de la whitelist mock (pasa el bloqueo aguas abajo).
+  // Se excluyen las cuentas de prueba "sin datos en FSM": la orden TYTAN sí
+  // trae al cliente. Object.keys ordena numéricamente: el orden es estable.
+  function mockOrderAccount(n) {
+    const keys = Object.keys(MOCK_WHITELIST).filter(function (k) { return !MOCK_FSM_NO_DATA[k]; });
+    return keys.length ? keys[n % keys.length] : '40123456';
+  }
+  function mockOrderClientName(account) {
+    const docs = Object.keys(MOCK_LOOKUP);
+    for (let i = 0; i < docs.length; i++) {
+      const hit = MOCK_LOOKUP[docs[i]].filter(function (m) { return m.n === account; })[0];
+      if (hit) return hit.fullName;
+    }
+    const p = mockClientProfile(account);
+    return p.fullName || 'CLIENTE XTRIM';
+  }
+
+  const MOCK_ORDER_CREWS = [
+    'CONN-154 GYE MIGRA | LLANOS SANCHEZ RODNEY ALBERTO',
+    'CONN-087 GYE VISTEC | MORAN QUIMI JOSE LUIS',
+    'CONN-212 GYE INSTAL | VERA CASTRO ANDRES FELIPE',
+    'CONN-033 GYE VISTEC | PINCAY TOMALA KEVIN DAVID',
+  ];
+  const MOCK_ORDER_REASONS_OK = [
+    'CAMBIO DE MATERIAL EXTERNO DAÑO POR TERCEROS',
+    'CAMBIO DE CONECTOR EN ROSETA',
+    'REUBICACIÓN DE EQUIPO A PEDIDO DEL CLIENTE',
+    'CAMBIO DE EQUIPO POR FALLA',
+  ];
+  const MOCK_ORDER_REASONS_KO = [
+    'CLIENTE NO SE ENCUENTRA EN DOMICILIO',
+    'FALLA MASIVA EN RED DE ACCESO',
+    'NAP SIN PUERTOS DISPONIBLES',
+  ];
+  const MOCK_ORDER_MATERIALS = [
+    { name: 'CONECTOR SC APC SM PARA FUSION [MIN-CON-033]', type: 'Material' },
+    { name: 'DROP FIBRA OPTICA 1 HILO (METROS) [MIN-FIB-010]', type: 'Material' },
+    { name: 'ROSETA OPTICA 1 PUERTO [MIN-ROS-002]', type: 'Material' },
+    { name: 'GRAPA PLASTICA PARA DROP [MIN-GRA-005]', type: 'Material' },
+    { name: 'CABLE COAXIAL RG6 (METROS) [MIN-COA-001]', type: 'Material' },
+    { name: 'PATCH CORD UTP CAT6 1.5M [MIN-PAT-004]', type: 'Material' },
+  ];
+  const DAY_MS = 86400000;
+  // Medianoche de hoy en Ecuador (UTC-5), como instante UTC: las fechas mock
+  // son estables durante el día (misma orden → mismos datos).
+  function ecuadorMidnightUtcMs() {
+    const ec = new Date(Date.now() - 5 * 3600000);
+    return Date.UTC(ec.getUTCFullYear(), ec.getUTCMonth(), ec.getUTCDate()) + 5 * 3600000;
+  }
+
+  function mockOrderContext(workOrder) {
+    const wo = normalizeOrderNumber(workOrder);
+    if (!wo) throw validationError('Formato de orden inválido. Usa ORDER/463158/2026 o solo el número.');
+    const n = orderDigits(wo);
+    const year = orderYear(wo);
+    const rnd = seededRandom(n);
+    const pick = function (arr) { return arr[Math.floor(rnd() * arr.length)]; };
+    const account = mockOrderAccount(n);
+    const profile = mockClientProfile(account);
+    const technology = n % 2 === 0 ? 'GPON' : 'HFC';
+    const orderType = ['Visita Técnica', 'Migración', 'Instalación'][n % 3];
+    const sig = { 'Visita Técnica': 'FSM_VISTEC', 'Migración': 'FSM_MIGRA', 'Instalación': 'FSM_INSTAL' }[orderType];
+    const open = n % 5 !== 0;           // 4 de cada 5 órdenes con la tarea de hoy pendiente
+    const count = 2 + (n % 4);          // 2..5 tareas
+    const midnight = ecuadorMidnightUtcMs();
+    const tasks = [];
+    for (let i = 0; i < count; i++) {
+      // i = 0 es la más reciente (hoy si la orden sigue abierta).
+      const daysAgo = i === 0 ? (open ? 0 : 1 + Math.floor(rnd() * 2)) : i * 2 + Math.floor(rnd() * 2);
+      const schedFrom = midnight - daysAgo * DAY_MS + (8 + Math.floor(rnd() * 6)) * 3600000;
+      const schedTo = schedFrom + 2 * 3600000;
+      const taskNum = 500000 + ((n * 37 + i * 1009) % 99999);
+      const pendiente = open && i === 0;
+      const cancelado = !pendiente && rnd() < 0.3;
+      const status = pendiente ? 'Pendiente' : (cancelado ? 'Cancelado' : 'Realizado');
+      const doneFrom = status === 'Realizado' ? schedFrom + Math.floor(rnd() * 40) * 60000 : null;
+      const doneTo = doneFrom ? doneFrom + (35 + Math.floor(rnd() * 70)) * 60000 : null;
+      let closure = null;
+      if (status === 'Realizado') {
+        const ok = rnd() < 0.7;
+        const nMat = ok ? 1 + Math.floor(rnd() * 3) : Math.floor(rnd() * 2);
+        const mats = [];
+        for (let k = 0; k < nMat; k++) {
+          const mt = MOCK_ORDER_MATERIALS[(n + i + k * 2) % MOCK_ORDER_MATERIALS.length];
+          if (mats.some(function (x) { return x.name === mt.name; })) continue;
+          mats.push({ name: mt.name, type: mt.type, quantity: 1 + Math.floor(rnd() * 6) });
+        }
+        const napLvl = -(13 + Math.floor(rnd() * 5));
+        const ptoLvl = napLvl - (2 + Math.floor(rnd() * 5));
+        closure = {
+          result: ok ? 'Satisfactoria' : 'Insatisfactoria',
+          reason: ok ? pick(MOCK_ORDER_REASONS_OK) : pick(MOCK_ORDER_REASONS_KO),
+          notes: 'CTO: QQ4JC1 PTO ' + (1 + Math.floor(rnd() * 8)) + '. NIVELES EN EL PUNTO: ' + ptoLvl +
+            ' NIVELES EN LA NAP ' + napLvl + '. ' + (ok ? 'SE DEJA SERVICIO OPERATIVO, CLIENTE CONFORME.' : 'SE REAGENDA VISITA.'),
+          materials: mats,
+        };
+      } else if (status === 'Cancelado') {
+        closure = {
+          result: 'Insatisfactoria',
+          reason: pick(MOCK_ORDER_REASONS_KO),
+          notes: 'TAREA CANCELADA. SE NOTIFICA A CALL CENTER PARA REAGENDAR.',
+          materials: [],
+        };
+      }
+      tasks.push({
+        taskId: 'TASK/' + taskNum + '/' + year,
+        taskType: orderType + ' ' + technology,
+        status: status,
+        doneFrom: doneFrom ? new Date(doneFrom).toISOString() : null,
+        doneTo: doneTo ? new Date(doneTo).toISOString() : null,
+        scheduledFrom: new Date(schedFrom).toISOString(),
+        scheduledTo: new Date(schedTo).toISOString(),
+        assignedTo: pick(MOCK_ORDER_CREWS),
+        priority: 1 + (i % 3),
+        closure: closure,
+      });
+    }
+    const oldest = tasks[tasks.length - 1];
+    const createdAt = new Date(Date.parse(oldest.scheduledFrom) - DAY_MS).toISOString();
+    const isGpon = technology === 'GPON';
+    const serviceBase = 156000000 + (n % 99999);
+    const mac = function (seed) {
+      let s = '';
+      const r = seededRandom(seed);
+      for (let k = 0; k < 6; k++) s += ('0' + Math.floor(r() * 256).toString(16)).slice(-2);
+      return s.toUpperCase();
+    };
+    const equipment = [
+      {
+        serviceId: String(serviceBase + 1), status: 'Aprovisionado',
+        type: 'SERVICE CALL+' + technology, shortName: 'Modem', productName: 'Modem',
+        model: isGpon ? 'ONT ZTE ZXHN F6600 WIFI 6' : 'CABLEMODEM ARRIS TG2482A',
+        serial: isGpon ? 'ZTEGD' + String(1000000 + (n % 8999999)).slice(-7) : 'ARR' + String(n).padStart(9, '0'),
+        mac: mac(n + 1),
+      },
+      {
+        serviceId: String(serviceBase + 2), status: 'Aprovisionado',
+        type: 'INTERNET ' + technology, shortName: 'Internet', productName: 'Internet ' + (profile.contractedDownloadMbps || 200) + ' Mbps',
+        model: null, serial: null, mac: null,
+      },
+    ];
+    if (n % 3 !== 1) {
+      equipment.push({
+        serviceId: String(serviceBase + 3), status: 'Aprovisionado',
+        type: 'EXTENSOR WIFI', shortName: 'Extensor', productName: 'Extensor WiFi',
+        model: 'EXTENSOR TP-LINK DECO X20', serial: '22' + String(n).padStart(10, '0'), mac: mac(n + 3),
+      });
+    }
+    if (n % 4 === 0) {
+      equipment.push({
+        serviceId: String(serviceBase + 4), status: 'Aprovisionado',
+        type: 'TELEVISION ' + technology, shortName: 'Decodificador', productName: 'Decodificador HD',
+        model: 'DECODIFICADOR KAONMEDIA KSTB6077', serial: 'KM' + String(n).padStart(10, '0'), mac: mac(n + 4),
+      });
+    }
+    const zone = 'QQ' + (n % 9) + 'B' + String.fromCharCode(65 + (n % 26));
+    return {
+      simulated: true,
+      source: 'TYTAN',
+      order: {
+        workOrder: wo,
+        orderType: orderType,
+        technology: technology,
+        status: open ? 'En curso' : (tasks[0].status === 'Cancelado' ? 'Cancelado' : 'Realizado'),
+        createdAt: createdAt,
+        closedAt: open ? null : (tasks[0].doneTo || tasks[0].scheduledTo),
+        slaAt: new Date(Date.parse(createdAt) + 3 * DAY_MS).toISOString(),
+        externalSystem: 'TYTAN',
+        externalId: String(38000000 + (n % 999999)),
+        signatureProcess: sig + '/' + (100000 + (n % 899999)) + '/' + year,
+      },
+      client: {
+        accountNumber: account,
+        fullName: mockOrderClientName(account),
+        phones: Array.isArray(profile.phones) ? profile.phones.slice() : [],
+        address: profile.address || null,
+        latitude: typeof profile.latitude === 'number' ? profile.latitude : null,
+        longitude: typeof profile.longitude === 'number' ? profile.longitude : null,
+        napCode: 'QQ4JC' + (1 + (n % 9)),
+        zoneCode: zone,
+      },
+      tasks: tasks,
+      equipment: equipment,
+      registeredAddress: profile.address || null,
+      observations: [
+        'Cliente reporta ' + (isGpon ? 'intermitencia en la fibra' : 'lentitud en el cablemódem') + ' en horario nocturno.',
+        'Llamar antes de llegar. Referencia: casa esquinera, portón ' + pick(['verde', 'negro', 'blanco']) + '.',
+      ].join(' '),
+    };
+  }
+
+  function mockLookupByOrder(order) {
+    const wo = normalizeOrderNumber(order);
+    if (!wo) throw validationError('Formato de orden inválido. Usa ORDER/463158/2026 o solo el número.');
+    const ctx = mockOrderContext(wo);
+    const acc = ctx.client.accountNumber;
+    const w = MOCK_WHITELIST[acc] || {};
+    return {
+      by: 'order',
+      workOrder: wo,
+      simulated: true,
+      source: 'TYTAN',
+      matches: [{
+        accountNumber: acc, status: w.status || 'ACTIVO', city: w.city || null, node: w.node || null,
+        businessType: w.businessType || null, accountType: w.accountType || null,
+        accessType: w.accessType || null, fullName: ctx.client.fullName,
+      }],
+      count: 1,
+      truncated: false,
+      importedAt: MOCK_WHITELIST_IMPORTED_AT,
+    };
+  }
+
+  function mockTaskCheck(workOrder, taskId) {
+    const wo = normalizeOrderNumber(workOrder);
+    const tid = normalizeTaskId(taskId);
+    if (!wo) throw validationError('Formato de orden inválido. Usa ORDER/463158/2026 o solo el número.');
+    if (!tid) throw validationError('Formato de task inválido. Usa TASK/549487/2026 o solo el número (6-7 dígitos).');
+    const ctx = mockOrderContext(wo);
+    const task = ctx.tasks.filter(function (t) { return t.taskId === tid; })[0];
+    if (!task) return { valid: false, reason: 'TASK_NOT_IN_ORDER', taskId: tid, workOrder: wo, simulated: true };
+    return { valid: true, taskId: tid, workOrder: wo, task: task, simulated: true };
+  }
+
+  // NAP elegida en Instalación (append-only en memoria, como el resto del mock).
+  const MOCK_NAP_ASSIGNMENTS = {};
+  const NAP_ASSIGNMENT_SOURCES = ['FSM', 'TEC', 'MOCK'];
+  function mockCreateNapAssignment(accountNumber, body) {
+    const cuenta = String(accountNumber || '').trim();
+    const b = body || {};
+    const numOrNull = function (v) { return v === null || v === undefined || (typeof v === 'number' && isFinite(v)); };
+    const napCode = typeof b.napCode === 'string' ? b.napCode.trim() : '';
+    if (!cuenta || !napCode || NAP_ASSIGNMENT_SOURCES.indexOf(b.source) === -1 ||
+        !numOrNull(b.latitude) || !numOrNull(b.longitude) || !numOrNull(b.distanceMeters) ||
+        !(b.port === null || b.port === undefined || (Number.isInteger(b.port) && b.port > 0))) {
+      throw validationError('Datos de la NAP elegida inválidos.');
+    }
+    const user = getUser() || { id: 'mock-user-1', email: 'franco@tulpasolutions.com' };
+    const row = {
+      id: uuidMock(),
+      accountNumber: cuenta,
+      napId: b.napId === undefined || b.napId === null ? null : String(b.napId),
+      napCode: napCode,
+      napName: b.napName || null,
+      port: b.port === undefined ? null : b.port,
+      latitude: b.latitude === undefined ? null : b.latitude,
+      longitude: b.longitude === undefined ? null : b.longitude,
+      distanceMeters: b.distanceMeters === undefined ? null : b.distanceMeters,
+      source: b.source,
+      taskId: b.taskId || null,
+      workOrder: b.workOrder || null,
+      technicianId: user.id,
+      createdAt: nowIso(),
+    };
+    MOCK_NAP_ASSIGNMENTS[cuenta] = [row].concat(MOCK_NAP_ASSIGNMENTS[cuenta] || []);
+    return row;
+  }
+  function mockNapAssignmentList(accountNumber) {
+    const items = (MOCK_NAP_ASSIGNMENTS[String(accountNumber || '').trim()] || []).slice();
+    return { latest: items[0] || null, items: items };
+  }
+
+  // ---------------------------------------------------------------------------
   // API pública
   // ---------------------------------------------------------------------------
   const WifixAPI = {
@@ -1583,6 +1914,7 @@
     // NO pasa por la guardia de registros: validar otro equipo es justamente la
     // salida de un bloqueo.
     async createDeviceValidation(accountNumber, body) {
+      assertTaskAllowed(accountNumber);
       const b = Object.assign({}, body || {});
       if (b.taskId === undefined || b.taskId === null || String(b.taskId).trim() === '') {
         delete b.taskId;
@@ -1615,6 +1947,10 @@
     // Registra la guardia de registros de la visita (ver assertRecordAllowed).
     setRecordGuard(fn) {
       recordGuard = typeof fn === 'function' ? fn : null;
+    },
+    // Registra la guardia del Nº de task de la visita (ver assertTaskAllowed).
+    setTaskGuard(fn) {
+      taskGuard = typeof fn === 'function' ? fn : null;
     },
 
     // ---- Datos del Cliente (campos 1-5, 7) ---------------------------------
@@ -1656,14 +1992,71 @@
     // Ingreso por cédula/RUC. POST (no GET): el documento viaja en el cuerpo,
     // nunca en la URL. Respuesta: { by, documentKind, matches[], count,
     // truncated, importedAt, reason? }; el documento nunca vuelve.
-    // (El ingreso por nº de orden FSM responde 501 NOT_IMPLEMENTED: la UI lo
-    // muestra deshabilitado y no lo llama.)
     async lookupAccountsByDocument(document) {
       if (this.useRealApi) {
         return fetchJson('POST', '/accounts/lookup', { document: String(document || '').trim() });
       }
       await delay(70);
       return mockLookup(document);
+    },
+
+    // ---- Orden de trabajo TYTAN (simulada; contrato 2026-10-06) -----------
+    // Ingreso por nº de orden (§2). Acepta 'ORDER/463158/2026' o '463158'.
+    // 200 { by:'order', workOrder, simulated, source:'TYTAN', matches:[1],
+    // count, truncated, importedAt, reason? }. Formato inválido → 400.
+    async lookupAccountsByOrder(order) {
+      if (this.useRealApi) {
+        return fetchJson('POST', '/accounts/lookup', { order: String(order || '').trim() });
+      }
+      await delay(90);
+      return mockLookupByOrder(order);
+    },
+    // Contexto completo de la orden (§3): { order, client, tasks[], equipment[],
+    // registeredAddress, observations, simulated, source }. workOrder siempre
+    // como query param (lleva barras).
+    async getOrderContext(workOrder) {
+      if (this.useRealApi) {
+        return fetchJson('GET', '/orders/context?workOrder=' + encodeURIComponent(workOrder));
+      }
+      await delay(120);
+      return mockOrderContext(workOrder);
+    },
+    // Validación del Nº de task de la visita (§4): { valid, taskId, workOrder,
+    // task } o { valid:false, reason:'TASK_NOT_IN_ORDER' }. Formato inválido → 400.
+    async checkOrderTask(workOrder, taskId) {
+      if (this.useRealApi) {
+        return fetchJson('GET', '/orders/task-check?workOrder=' + encodeURIComponent(workOrder) +
+          '&taskId=' + encodeURIComponent(taskId));
+      }
+      await delay(80);
+      return mockTaskCheck(workOrder, taskId);
+    },
+    // Normalizadores puros (misma regla que el backend) para validar en la UI.
+    normalizeOrderNumber: normalizeOrderNumber,
+    normalizeTaskId: normalizeTaskId,
+
+    // ---- NAP elegida en Instalación (§5, append-only) ----------------------
+    // body = { napId, napCode, napName, port, latitude, longitude,
+    // distanceMeters, source:'FSM'|'TEC'|'MOCK', taskId, workOrder }.
+    // 201 → fila guardada { id, accountNumber, ..., technicianId, createdAt }.
+    async createNapAssignment(accountNumber, body) {
+      assertTaskAllowed(accountNumber);
+      assertRecordAllowed(accountNumber);
+      if (this.useRealApi) {
+        return fetchJson('POST', '/accounts/' + encodeURIComponent(accountNumber) + '/nap-assignment', body);
+      }
+      await delay(100);
+      return mockCreateNapAssignment(accountNumber, body);
+    },
+    // { latest: row|null, items: row[] } (más reciente primero).
+    async getNapAssignment(accountNumber) {
+      if (this.useRealApi) {
+        const r = await fetchJson('GET', '/accounts/' + encodeURIComponent(accountNumber) + '/nap-assignment');
+        const items = r && Array.isArray(r.items) ? r.items : [];
+        return { latest: (r && r.latest) || items[0] || null, items: items };
+      }
+      await delay(60);
+      return mockNapAssignmentList(accountNumber);
     },
 
     // ---- Integración FSM ---------------------------------------------------
@@ -1675,8 +2068,9 @@
       return mockFsmHealth();
     },
 
-    // Estado de varias cuentas en una sola acción del técnico (campo 8, paso 2).
-    // NUNCA se llama de forma automática: solo por gesto explícito.
+    // Estado de varias cuentas (campo 8, paso 2). Desde la ronda 2026-10-06
+    // (contrato §6) la app lo pide SOLA para los clientes de las NAPs cuyos
+    // puertos ya se cargan automáticamente; el backend cachea 5 min.
     // Si llegan más cuentas que el tope, se parte en lotes SECUENCIALES para no
     // abusar de la operadora (todo su tráfico es producción).
     async getAccountsStatusBatch(accounts) {
@@ -1802,6 +2196,7 @@
     // accuracyMeters, label:'CASA_CLIENTE', source:'GPS'|'MANUAL', napCode,
     // napPort, taskId?, capturedAt, notes? }. Va tal cual: sin clientId/contractId.
     async createClientLocation(accountNumber, body) {
+      assertTaskAllowed(accountNumber);
       assertRecordAllowed(accountNumber);
       if (this.useRealApi) {
         return fetchJson('POST', '/accounts/' + encodeURIComponent(accountNumber) + '/client-location', body);
@@ -1936,6 +2331,7 @@
     ['wifiSignal', 'Medición de señal WiFi'],
     ['distance', 'Medición de distancia'],
     ['clientLocation', 'Ubicación casa cliente'],
+    ['napAssignment', 'NAP elegida (instalación)'],
     ['retiredEquipment', 'Equipos retirados'],
     ['deviceValidation', 'Validación de equipo vs plan'],
   ];
@@ -1948,7 +2344,7 @@
     const base = function (min, by) {
       return Object.assign({ id: uuidMock(), accountNumber: acct, createdAt: at(min - 1), measuredAt: at(min) }, link(by));
     };
-    const r = { speedtests: [], pingTests: [], tracerouteTests: [], wifiHeatmaps: [], distanceMeasurements: [], clientLocations: [], retiredEquipment: [], deviceValidations: [] };
+    const r = { speedtests: [], pingTests: [], tracerouteTests: [], wifiHeatmaps: [], distanceMeasurements: [], clientLocations: [], napAssignments: [], retiredEquipment: [], deviceValidations: [] };
     (spec || []).forEach(function (k) {
       if (k === 'ext') {
         r.speedtests.push(Object.assign(base(40, 'TASK_ID'), {
@@ -2000,6 +2396,13 @@
           distanceToRegisteredMeters: 30.6, distanceToNapMeters: 41.2,
         }));
       }
+      if (k === 'napas') {
+        r.napAssignments.push(Object.assign(base(17, 'TASK_ID'), {
+          napId: '11542', napCode: 'NAP-14-03', napName: 'OLT-GYE-03/1/2', port: 5,
+          latitude: -2.247512, longitude: -79.903980, distanceMeters: 61, source: 'FSM',
+          workOrder: visit.workOrder, technicianId: 'mock-user-1',
+        }));
+      }
       if (k === 'devval') {
         const wifiReason = [{ kind: 'wifi', deviceMbps: 500, planMbps: 600 }];
         r.deviceValidations.push(Object.assign(base(45, 'TASK_ID'), {
@@ -2033,10 +2436,11 @@
       wifiSignal: r.wifiHeatmaps.length,
       distance: r.distanceMeasurements.length,
       clientLocation: r.clientLocations.length,
+      napAssignment: r.napAssignments.length,
       retiredEquipment: r.retiredEquipment.length,
       deviceValidation: r.deviceValidations.length,
     };
-    const all = [].concat(r.speedtests, r.pingTests, r.tracerouteTests, r.wifiHeatmaps, r.distanceMeasurements, r.clientLocations, r.retiredEquipment, r.deviceValidations);
+    const all = [].concat(r.speedtests, r.pingTests, r.tracerouteTests, r.wifiHeatmaps, r.distanceMeasurements, r.clientLocations, r.napAssignments, r.retiredEquipment, r.deviceValidations);
     const kinds = all.map(function (x) { return x.linkedBy; })
       .filter(function (v, i, arr) { return arr.indexOf(v) === i; });
     const until = visit.endedAt
@@ -2067,7 +2471,7 @@
       { seed: 14, result: 'SATISFACTORIA',   reason: 'WiFi débil en habitaciones',    notesLoaded: false, recs: ['wifi', 'dist', 'loc', 'retired', 'devval'] },
       { seed: 27, result: 'CANCELADA',       reason: 'Cliente ausente',               notesLoaded: true, closingNotes: 'Cliente no se encontraba en el domicilio.', recs: [] },
       { seed: 41, result: 'REALIZADA',       reason: 'Cambio de equipo',              notesLoaded: false, recs: ['app'] },
-      { seed: 63, result: 'SATISFACTORIA',   reason: 'Instalación',                   notesLoaded: false, recs: [] },
+      { seed: 63, result: 'SATISFACTORIA',   reason: 'Instalación',                   notesLoaded: false, recs: ['loc', 'napas'] },
     ].map(function (v) {
       const t = mockClosedTask(v.seed);
       t.result = v.result;

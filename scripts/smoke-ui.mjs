@@ -1378,9 +1378,10 @@ check('notas HTML balanceado', balanced(notes) === null, balanced(notes));
 console.log('\n== Visitas con registros de la app (include=records) ==');
 {
   const conReg = await WifixAPI.getVisits('35070291', { includeRecords: true });
-  check('mock include=records: cada visita trae checklist de 9 tipos (con clientLocation y deviceValidation)',
-    conReg.items.every((t) => t.records && t.records.checklist.length === 9
+  check('mock include=records: cada visita trae checklist de 10 tipos (con clientLocation, napAssignment y deviceValidation)',
+    conReg.items.every((t) => t.records && t.records.checklist.length === 10
       && t.records.checklist.some((c) => c.type === 'clientLocation' && c.label === 'Ubicación casa cliente')
+      && t.records.checklist.some((c) => c.type === 'napAssignment' && c.label === 'NAP elegida (instalación)')
       && t.records.checklist.some((c) => c.type === 'deviceValidation' && c.label === 'Validación de equipo vs plan'))
     && conReg.recordsSummary);
   const html = ctx.renderVisitsList(conReg);
