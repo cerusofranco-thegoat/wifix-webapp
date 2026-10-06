@@ -5179,12 +5179,8 @@ function _ispEmptyMetricNote(metric, technology, skipped) {
   if (reason) {
     return `<div class="detail-empty port-note">${escapeHtml(reason)} No se consultó.</div>`;
   }
-  return `
-    <div class="detail-empty port-note">
-      ${technology === 'GPON'
-        ? 'Métrica DOCSIS: la operadora solo la publica para equipos HFC (cablemódem). Este equipo es GPON.'
-        : 'La operadora no devolvió datos de esta métrica para este equipo.'}
-    </div>`;
+  // Solo se llama en HFC: en GPON no existe ningún camino DOCSIS.
+  return '<div class="detail-empty port-note">La operadora no devolvió datos de esta métrica para este equipo.</div>';
 }
 
 /** Series de una métrica en ambos ámbitos, o la nota si no hay datos. */
@@ -5573,16 +5569,577 @@ function renderIspDiagnostics(data) {
     </div>`;
 }
 
+// ============================================================================
+// ISP Monitor por NÚMERO DE CUENTA (contrato 2026-10-06 b)
+//
+// Flujo principal del panel: la cuenta de la sesión viene prellenada (se puede
+// editar) y una sola consulta trae la fila de búsqueda, el plan contratado en
+// bits y la ficha del equipo — "ONU Info" en GPON, cablemódem en HFC — más los
+// equipos de la red de acceso agrupados por NAP con el diagnóstico de la falla.
+//
+// Regla dura por tecnología: DOCSIS (SNR, codewords, potencias por canal) SOLO
+// con technology === 'HFC'; óptica GPON SOLO con technology === 'GPON'. Si el
+// backend mandara un bloque de la otra tecnología, se ignora.
+// La búsqueda por serial (flujo anterior) queda como opción secundaria.
+// ============================================================================
+
+// Última consulta por cuenta: se repinta al reabrir el panel sin reconsultar.
+let _ispAcctState = { account: null, monitor: null, access: null, accessError: null };
+
+/** "300000" → "300.000" (separador de miles de Ecuador). */
+function _ispFmtInt(n) {
+  if (n === null || n === undefined || !isFinite(n)) return '—';
+  return String(Math.round(Number(n))).replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+}
+
+/** Número decimal con coma (es-EC): -17.5 → "-17,5". */
+function _ispFmtDec(v, dec = 2) {
+  if (v === null || v === undefined || !isFinite(v)) return null;
+  return _fmtNum(v, dec).replace('.', ',');
+}
+
+const _ISP_ACCOUNT_STATUS = Object.freeze({
+  A: { cls: 'ok', text: 'Activo' },
+  S: { cls: 'warn', text: 'Suspendido' },
+  T: { cls: 'fail', text: 'Terminado' },
+});
+
+/** Estado de la cuenta A/S/T: letra + texto (nunca solo color). */
+function _ispAccountStatusChip(code) {
+  const c = String(code || '').toUpperCase();
+  const st = _ISP_ACCOUNT_STATUS[c];
+  if (!st) return `<span class="isp-chip unknown">${escapeHtml(c || '—')}</span>`;
+  return `<span class="isp-chip ${st.cls}" title="${escapeHtml(st.text)}"><strong>${escapeHtml(c)}</strong> ${escapeHtml(st.text)}</span>`;
+}
+
+/** Estado del equipo en ISP Monitor: working (verde) / lost (rojo), con ícono. */
+function _ispDeviceStateChip(state) {
+  const s = String(state || '').toLowerCase();
+  if (s === 'working') return `<span class="isp-chip ok">${_ISP_OUTAGE_ICONS.up}working</span>`;
+  if (s === 'lost') return `<span class="isp-chip fail">${_ISP_OUTAGE_ICONS.down}lost</span>`;
+  return `<span class="isp-chip unknown">${escapeHtml(s || 'sin dato')}</span>`;
+}
+
+/** Chip up/down (admin, service ports). */
+function _ispUpDownChip(state) {
+  const s = String(state || '').toLowerCase();
+  if (s === 'up') return '<span class="isp-chip ok">up</span>';
+  if (s === 'down') return '<span class="isp-chip fail">down</span>';
+  return `<span class="isp-chip unknown">${escapeHtml(s || '—')}</span>`;
+}
+
+/** Fila etiqueta / valor de una tarjeta. `valueHtml` ya viene escapado. */
+function _ispKv(label, valueHtml, opts = {}) {
+  const v = valueHtml === null || valueHtml === undefined || valueHtml === '' ? '<span class="isp-kv-empty">—</span>' : valueHtml;
+  return `<div class="isp-kv${opts.cls ? ' ' + opts.cls : ''}"><dt>${escapeHtml(label)}</dt><dd>${v}</dd></div>`;
+}
+function _ispText(value, mono) {
+  if (value === null || value === undefined || value === '') return '';
+  return mono ? `<span class="mono">${escapeHtml(String(value))}</span>` : escapeHtml(String(value));
+}
+
+/** Tarjeta de sección (título + lista dl de filas). */
+function _ispCard(title, bodyHtml, opts = {}) {
+  return `
+    <section class="isp-card${opts.cls ? ' ' + opts.cls : ''}" aria-label="${escapeHtml(title)}">
+      <div class="isp-card-head">
+        <h4 class="isp-card-title">${escapeHtml(title)}</h4>
+        ${opts.aside || ''}
+      </div>
+      ${bodyHtml}
+    </section>`;
+}
+
+/** Etiqueta del punto de distribución según la tecnología. */
+function _ispNapLabel(technology) {
+  return technology === 'HFC' ? 'Tap / derivador' : 'NAP';
+}
+
+// --- Plan contratado en bits -------------------------------------------------
+
+function renderIspPlan(plan) {
+  if (!plan || !plan.profile) {
+    return _ispCard('Plan contratado', '<p class="isp-card-note">La cuenta no tiene un plan contratado registrado.</p>', { cls: 'isp-plan' });
+  }
+  const down = Number(plan.downloadKbps);
+  const up = Number(plan.uploadKbps);
+  const downM = Number(plan.downloadMbps);
+  const upM = Number(plan.uploadMbps);
+  const sym = isFinite(down) && down === up;
+  const mbpsTxt = isFinite(downM) && isFinite(upM)
+    ? (sym ? `${_ispFmtInt(downM)} Mbps simétrico` : `${_ispFmtInt(downM)} / ${_ispFmtInt(upM)} Mbps`)
+    : '';
+  return _ispCard('Plan contratado', `
+      <p class="isp-plan-profile mono">${escapeHtml(plan.profile)}</p>
+      <p class="isp-plan-bits">
+        <span><strong>${escapeHtml(_ispFmtInt(down))} kbps</strong> <span aria-hidden="true">↓</span><span class="sr-only">de bajada</span></span>
+        <span class="isp-plan-sep" aria-hidden="true">/</span>
+        <span><strong>${escapeHtml(_ispFmtInt(up))} kbps</strong> <span aria-hidden="true">↑</span><span class="sr-only">de subida</span></span>
+      </p>
+      ${mbpsTxt ? `<p class="isp-plan-mbps">(${escapeHtml(mbpsTxt)})${plan.name ? ` · ${escapeHtml(plan.name)}` : ''}</p>` : ''}`,
+    { cls: 'isp-plan' });
+}
+
+// --- Fila de resultado -------------------------------------------------------
+
+function renderIspSearchRow(row, technology) {
+  if (!row) return '';
+  return _ispCard('Resultado de la búsqueda', `
+      <dl class="isp-kv-list">
+        ${_ispKv('Serial', _ispText(row.serial, true))}
+        ${_ispKv('Ciudad', _ispText(row.city))}
+        ${_ispKv('Red de acceso', _ispText(row.accessNetwork, true))}
+        ${_ispKv('Profile', _ispText(row.profile, true))}
+        ${_ispKv('Cuenta', _ispText(row.accountNumber, true))}
+        ${_ispKv('Estado', _ispAccountStatusChip(row.accountStatus))}
+        ${_ispKv('Cliente', _ispText(row.clientName))}
+      </dl>`,
+    { aside: technology ? `<span class="isp-badge tech">${escapeHtml(technology)}</span>` : '' });
+}
+
+// --- Ficha del equipo --------------------------------------------------------
+
+function _ispDateKv(label, iso) {
+  return _ispKv(label, iso ? dateTimeHtml(iso, { seconds: false }) : '');
+}
+
+function _ispClientCard(device, technology) {
+  const c = device.client || {};
+  return _ispCard('Información del cliente', `
+      <dl class="isp-kv-list">
+        ${_ispKv('Cuenta', _ispText(c.accountNumber, true))}
+        ${_ispKv(_ispNapLabel(technology), _ispText(device.nap, true))}
+        ${_ispKv('Cliente', _ispText(c.name))}
+        ${_ispKv('Dirección', _ispText(c.address))}
+      </dl>`);
+}
+
+function _ispServicePortsHtml(ports) {
+  if (!Array.isArray(ports) || ports.length === 0) return '<p class="isp-card-note">Sin service ports configurados.</p>';
+  return `<ul class="isp-subitems" aria-label="Service ports">${ports.map(p => `
+      <li class="isp-subitem">
+        <div class="isp-subitem-head">
+          <span class="isp-subitem-title">#${escapeHtml(String(p.id))} · ${escapeHtml(p.service || 'Servicio')}</span>
+          ${_ispUpDownChip(p.state)}
+        </div>
+        <dl class="isp-kv-list isp-kv-compact">
+          ${_ispKv('Modo', _ispText(p.mode))}
+          ${_ispKv('VLAN in / out', _ispText([p.vlanIn, p.vlanOut].map(v => (v === null || v === undefined ? '—' : v)).join(' / '), true))}
+          ${_ispKv('Traffic profile', _ispText(p.trafficProfile, true))}
+          ${_ispKv('MAC aprendidas', _ispText(p.macLearned))}
+        </dl>
+      </li>`).join('')}</ul>`;
+}
+
+function _ispCpesHtml(cpes) {
+  if (!Array.isArray(cpes) || cpes.length === 0) return '<p class="isp-card-note">Sin CPEs detectados detrás del equipo.</p>';
+  return `<ul class="isp-subitems" aria-label="CPEs">${cpes.map(c => `
+      <li class="isp-subitem">
+        <dl class="isp-kv-list isp-kv-compact">
+          ${_ispKv('IP', _ispText(c.ip, true))}
+          ${_ispKv('MAC', _ispText(c.mac ? fmtMac(c.mac) : '', true))}
+          ${_ispKv('Fabricante', _ispText(c.vendor))}
+        </dl>
+      </li>`).join('')}</ul>`;
+}
+
+function _ispConfigCard(device, plan, technology) {
+  return _ispCard('Configuración', `
+      <dl class="isp-kv-list">
+        ${_ispKv('Tipo', _ispText(device.model, true))}
+        ${_ispKv('Admin', _ispUpDownChip(device.adminState))}
+        ${_ispKv('Profile', _ispText(plan && plan.profile, true))}
+        ${_ispKv('WAN IP', _ispText(device.wanIp, true))}
+      </dl>
+      ${technology === 'GPON' ? `<h5 class="isp-card-subtitle">Service ports</h5>${_ispServicePortsHtml(device.servicePorts)}` : ''}
+      <h5 class="isp-card-subtitle">CPEs</h5>
+      ${_ispCpesHtml(device.cpes)}`);
+}
+
+// Umbrales ópticos GPON del contrato (ok = verde).
+const _ISP_OPTIC_RANGES = Object.freeze({
+  rxDbm: 'Rango OK: -27 a -8 dBm',
+  rxOltDbm: 'Rango OK: -28 a -8 dBm',
+  txDbm: 'Rango OK: 0,5 a 5 dBm',
+});
+
+/** Semáforo de una lectura óptica según el flag *Ok del backend. */
+function _ispOpticKv(label, value, unit, ok, rangeText, lost) {
+  const txt = _ispFmtDec(value, 2);
+  if (txt === null) {
+    return _ispKv(label, `<span class="isp-light unknown"><span class="isp-light-dot" aria-hidden="true"></span>${lost ? 'Sin lectura (equipo lost)' : 'Sin lectura'}</span>
+      ${rangeText ? `<span class="isp-kv-sub">${escapeHtml(rangeText)}</span>` : ''}`);
+  }
+  const cls = ok === true ? 'ok' : ok === false ? 'bad' : 'unknown';
+  const word = ok === true ? 'OK' : ok === false ? 'Fuera de rango' : 'Sin evaluar';
+  return _ispKv(label, `
+      <span class="isp-light ${cls}"><span class="isp-light-dot" aria-hidden="true"></span><strong>${escapeHtml(txt)} ${escapeHtml(unit)}</strong> · ${word}</span>
+      ${rangeText ? `<span class="isp-kv-sub">${escapeHtml(rangeText)}</span>` : ''}`);
+}
+
+// `deviceState`: con el equipo lost el backend manda las lecturas en null y
+// los flags *Ok en false: se muestra "Sin lectura (equipo lost)", no rojo.
+function renderIspOptics(optics, deviceState) {
+  if (!optics) {
+    return _ispCard('Óptica', '<p class="isp-card-note">ISP Monitor no devolvió lecturas ópticas de este equipo.</p>');
+  }
+  const dist = optics.distanceMeters;
+  const lost = String(deviceState || '').toLowerCase() === 'lost';
+  const noRead = lost ? '<span class="isp-kv-empty">Sin lectura (equipo lost)</span>' : '';
+  const distTxt = dist === null || dist === undefined || !isFinite(dist)
+    ? noRead : `${escapeHtml(_ispFmtInt(dist))} m${dist >= 1000 ? ` <span class="isp-kv-sub-inline">(${escapeHtml(_ispFmtDec(dist / 1000, 2))} km)</span>` : ''}`;
+  const plain = (v, unit, dec) => {
+    const t = _ispFmtDec(v, dec);
+    return t === null ? noRead : `${escapeHtml(t)} ${escapeHtml(unit)}`;
+  };
+  const has = (v) => v !== null && v !== undefined && isFinite(v);
+  const anyRead = [optics.rxOltDbm, optics.txDbm, optics.rxDbm].some(has);
+  // Un flag en false solo es "fuera de rango" si hay lectura.
+  const anyBad = (has(optics.rxOltDbm) && optics.rxOltOk === false) || (has(optics.txDbm) && optics.txOk === false)
+    || (has(optics.rxDbm) && optics.rxOk === false);
+  return _ispCard('Óptica', `
+      <dl class="isp-kv-list">
+        ${_ispKv('Distancia', distTxt)}
+        ${_ispOpticKv('Potencia Rx OLT', optics.rxOltDbm, 'dBm', optics.rxOltOk, _ISP_OPTIC_RANGES.rxOltDbm, lost)}
+        ${_ispOpticKv('Potencia Tx', optics.txDbm, 'dBm', optics.txOk, _ISP_OPTIC_RANGES.txDbm, lost)}
+        ${_ispOpticKv('Potencia Rx', optics.rxDbm, 'dBm', optics.rxOk, _ISP_OPTIC_RANGES.rxDbm, lost)}
+        ${_ispKv('Voltaje', plain(optics.voltage, 'V', 2))}
+        ${_ispKv('Temperatura', plain(optics.temperatureC, '°C', 2))}
+      </dl>`,
+    { aside: !anyRead
+      ? `<span class="isp-light unknown"><span class="isp-light-dot" aria-hidden="true"></span>${lost ? 'Sin lectura (equipo lost)' : 'Sin lectura'}</span>`
+      : anyBad
+        ? `<span class="isp-light bad"><span class="isp-light-dot" aria-hidden="true"></span>Revisar</span>`
+        : `<span class="isp-light ok"><span class="isp-light-dot" aria-hidden="true"></span>En rango</span>` });
+}
+
+/** Ficha "ONU Info" (GPON): equipo, estado, puerto, tiempos, causa, speed mode. */
+function renderIspOnuInfo(device, plan) {
+  const portHtml = device.port
+    ? `<span class="mono">${escapeHtml(device.port)}</span>${device.headend ? `<span class="isp-kv-sub">${escapeHtml(device.headend)}</span>` : ''}`
+    : _ispText(device.headend);
+  return `
+    ${_ispCard('ONU Info', `
+      <dl class="isp-kv-list">
+        ${_ispKv('Equipo', _ispText(device.serial, true))}
+        ${_ispKv('Estado', _ispDeviceStateChip(device.state))}
+        ${_ispKv('Versión', _ispText(device.version, true))}
+        ${_ispKv('Software', _ispText(device.software, true))}
+        ${_ispKv('Puerto', portHtml)}
+        ${_ispKv('ID', _ispText(device.onuId, true))}
+        ${_ispDateKv('En línea', device.lastOnline)}
+        ${_ispDateKv('Fuera de línea', device.lastOffline)}
+        ${_ispKv('Causa', _ispText(device.offlineCause))}
+        ${_ispKv('Speed Mode', _ispText(device.speedMode))}
+      </dl>`, { cls: `isp-device ${device.state === 'lost' ? 'is-lost' : 'is-working'}`, aside: _ispDeviceStateChip(device.state) })}
+    ${_ispClientCard(device, 'GPON')}
+    ${_ispConfigCard(device, plan, 'GPON')}
+    ${renderIspOptics(device.optics, device.state)}`;
+}
+
+/** Ficha del cablemódem (HFC): sin óptica GPON. */
+function renderIspCableModem(device, plan) {
+  return `
+    ${_ispCard('Cablemódem', `
+      <dl class="isp-kv-list">
+        ${_ispKv('Equipo (MAC)', _ispText(device.serial ? fmtMac(device.serial) : '', true))}
+        ${_ispKv('Estado', _ispDeviceStateChip(device.state))}
+        ${_ispKv('Modelo', _ispText(device.model, true))}
+        ${_ispKv('Software', _ispText(device.software, true))}
+        ${_ispKv('Interfaz CMTS', _ispText(device.port, true))}
+        ${_ispKv('CMTS', _ispText(device.headend))}
+        ${_ispKv('Red de acceso', _ispText(device.accessNetwork, true))}
+        ${_ispDateKv('En línea', device.lastOnline)}
+        ${_ispDateKv('Fuera de línea', device.lastOffline)}
+        ${_ispKv('Causa', _ispText(device.offlineCause))}
+        ${_ispKv('Speed Mode', _ispText(device.speedMode))}
+      </dl>`, { cls: `isp-device ${device.state === 'lost' ? 'is-lost' : 'is-working'}`, aside: _ispDeviceStateChip(device.state) })}
+    ${_ispClientCard(device, 'HFC')}
+    ${_ispConfigCard(device, plan, 'HFC')}`;
+}
+
+// Umbrales DOCSIS usuales (los mismos del panel por serial).
+const _ISP_DOCSIS_RANGES = Object.freeze({
+  downstream: { power: { min: -7, max: 7 }, snrMin: 33 },
+  upstream: { power: { min: 35, max: 51 }, snrMin: 27 },
+});
+
+function _ispDocsisCell(value, ok) {
+  const t = _ispFmtDec(value, 1);
+  if (t === null) return '<td>—</td>';
+  return ok
+    ? `<td>${escapeHtml(t)}</td>`
+    : `<td class="is-bad">${escapeHtml(t)} <span aria-hidden="true">!</span><span class="sr-only">(fuera de rango)</span></td>`;
+}
+
+function _ispDocsisTable(title, channels, ranges) {
+  if (!Array.isArray(channels) || channels.length === 0) {
+    return `<h5 class="isp-card-subtitle">${escapeHtml(title)}</h5><p class="isp-card-note">Sin lectura de canales.</p>`;
+  }
+  const rows = channels.map(c => {
+    const p = Number(c.powerDbmv);
+    const s = Number(c.snrDb);
+    const pOk = isFinite(p) && p >= ranges.power.min && p <= ranges.power.max;
+    const sOk = isFinite(s) && s >= ranges.snrMin;
+    return `<tr><th scope="row">${escapeHtml(String(c.channel))}</th>
+      <td>${escapeHtml(_ispFmtDec(c.frequencyMHz, 1) || '—')}</td>
+      ${_ispDocsisCell(c.powerDbmv, pOk)}${_ispDocsisCell(c.snrDb, sOk)}</tr>`;
+  }).join('');
+  return `
+    <h5 class="isp-card-subtitle">${escapeHtml(title)}</h5>
+    <div class="isp-table-wrap">
+      <table class="isp-table isp-docsis-table">
+        <caption class="sr-only">${escapeHtml(title)}: frecuencia, potencia y SNR por canal</caption>
+        <thead><tr><th scope="col">Canal</th><th scope="col">MHz</th><th scope="col">Potencia (dBmV)</th><th scope="col">SNR (dB)</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+    <p class="isp-kv-sub">Rango OK: potencia ${ranges.power.min} a ${ranges.power.max} dBmV · SNR ≥ ${ranges.snrMin} dB</p>`;
+}
+
+/** DOCSIS por cuenta (SOLO HFC): canales down/up con potencia/SNR + codewords. */
+function renderIspDocsisAccount(docsis) {
+  if (!docsis) {
+    return _ispCard('Señal DOCSIS', '<p class="isp-card-note">ISP Monitor no devolvió métricas DOCSIS de este cablemódem.</p>');
+  }
+  const cw = docsis.codewords || {};
+  const aside = docsis.ok === true
+    ? '<span class="isp-light ok"><span class="isp-light-dot" aria-hidden="true"></span>En rango</span>'
+    : docsis.ok === false
+      ? '<span class="isp-light bad"><span class="isp-light-dot" aria-hidden="true"></span>Revisar</span>' : '';
+  return _ispCard('Señal DOCSIS', `
+      ${_ispDocsisTable('Canales downstream', docsis.downstream, _ISP_DOCSIS_RANGES.downstream)}
+      ${_ispDocsisTable('Canales upstream', docsis.upstream, _ISP_DOCSIS_RANGES.upstream)}
+      <h5 class="isp-card-subtitle">Codewords</h5>
+      <dl class="isp-kv-list">
+        ${_ispKv('Corregidos', cw.corrected === null || cw.corrected === undefined ? '' : escapeHtml(_ispFmtInt(cw.corrected)))}
+        ${_ispKv('Sin corregir', cw.uncorrected === null || cw.uncorrected === undefined ? '' : escapeHtml(_ispFmtInt(cw.uncorrected)))}
+      </dl>`, { aside: aside });
+}
+
+// --- Red de acceso: diagnóstico y equipos por NAP ---------------------------
+
+const _ISP_DIAGNOSIS = Object.freeze({
+  INTERNAL: { cls: 'warn', title: 'Falla interna (domicilio/drop/equipo)' },
+  EXTERNAL_NAP: { cls: 'bad', title: 'Falla externa en la NAP' },
+  EXTERNAL_NETWORK: { cls: 'bad', title: 'Falla externa en la red de acceso' },
+  NONE: { cls: 'ok', title: 'Sin falla' },
+});
+
+/** Bloque destacado del diagnóstico. `access` = respuesta de access-network. */
+function renderIspDiagnosis(access) {
+  const d = (access && access.diagnosis) || {};
+  const meta = _ISP_DIAGNOSIS[d.scope];
+  if (!meta) {
+    return `<div class="isp-diagnosis unknown" role="status"><p class="isp-diagnosis-title">Sin diagnóstico</p>
+      <p class="isp-diagnosis-msg">ISP Monitor no devolvió un diagnóstico para esta red de acceso.</p></div>`;
+  }
+  const icon = meta.cls === 'ok' ? _ISP_RANGE_ICONS.ok : meta.cls === 'warn' ? _ISP_RANGE_ICONS.warn : _ISP_RANGE_ICONS.bad;
+  const tech = access.technology;
+  const clientNap = (access.naps || []).find(n => n.nap === access.clientNap);
+  const t = access.totals || {};
+  const facts = [
+    clientNap ? `${_ispNapLabel(tech)} ${escapeHtml(clientNap.nap)}: <strong>${clientNap.summary.lost}</strong> de ${clientNap.summary.total} lost` : '',
+    isFinite(t.devices) ? `Red de acceso ${escapeHtml(access.accessNetwork || '')}: <strong>${t.lost}</strong> de ${t.devices} lost` : '',
+  ].filter(Boolean);
+  return `
+    <div class="isp-diagnosis ${meta.cls}" role="status">
+      <p class="isp-diagnosis-eyebrow">Diagnóstico ${_ispSimBadge(access.simulated === true, 'Diagnóstico simulado: ISP Monitor en modo demo')}</p>
+      <p class="isp-diagnosis-title">${icon}${escapeHtml(meta.title)}</p>
+      ${d.message ? `<p class="isp-diagnosis-msg">${escapeHtml(d.message)}</p>` : ''}
+      ${facts.length ? `<ul class="isp-diagnosis-facts">${facts.map(f => `<li>${f}</li>`).join('')}</ul>` : ''}
+      <button type="button" class="isp-diagnosis-link" data-action="isp-goto-access">Ver equipos de la red de acceso</button>
+    </div>`;
+}
+
+const _ISP_SERVICE_ICONS = Object.freeze({
+  internet: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg>',
+  phone: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1.9.4 1.8.7 2.7a2 2 0 0 1-.5 2.1L8 9.8a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.7.7a2 2 0 0 1 1.7 2z"/></svg>',
+  tv: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="2" y="7" width="20" height="13" rx="2"/><path d="M17 2l-5 5-5-5"/></svg>',
+});
+const _ISP_SERVICE_TEXT = Object.freeze({ internet: 'Internet', phone: 'Teléfono', tv: 'TV' });
+
+function _ispServicesHtml(services) {
+  const s = services || {};
+  const on = ['internet', 'phone', 'tv'].filter(k => s[k] === true);
+  if (!on.length) return '<span class="isp-services isp-kv-empty">Sin servicios</span>';
+  return `<span class="isp-services" role="img" aria-label="Servicios: ${escapeHtml(on.map(k => _ISP_SERVICE_TEXT[k]).join(', '))}">${
+    on.map(k => `<span class="isp-service" title="${escapeHtml(_ISP_SERVICE_TEXT[k])}">${_ISP_SERVICE_ICONS[k]}</span>`).join('')}</span>`;
+}
+
+const _ISP_NAP_STATE = Object.freeze({
+  OK: { cls: 'ok', text: 'OK' },
+  PARTIAL: { cls: 'warn', text: 'PARCIAL' },
+  DOWN: { cls: 'fail', text: 'CAÍDA' },
+});
+
+function _ispAccessDeviceHtml(d, technology) {
+  const id = technology === 'HFC' && /^[0-9A-F]{12}$/i.test(String(d.serial || '')) ? fmtMac(d.serial) : d.serial;
+  return `
+    <li class="isp-net-dev${d.isClient ? ' is-client' : ''}${d.state === 'lost' ? ' is-lost' : ''}">
+      <div class="isp-net-dev-head">
+        <span class="mono isp-net-dev-serial">${escapeHtml(id || '—')}</span>
+        ${_ispDeviceStateChip(d.state)}
+      </div>
+      ${d.isClient ? '<span class="isp-client-mark">Equipo del cliente</span>' : ''}
+      <div class="isp-net-dev-name">${escapeHtml(d.clientName || '—')}</div>
+      <div class="isp-net-dev-meta">
+        <span>Cuenta <span class="mono">${escapeHtml(d.accountNumber || '—')}</span></span>
+        ${_ispAccountStatusChip(d.accountStatus)}
+        ${_ispServicesHtml(d.services)}
+      </div>
+    </li>`;
+}
+
+function _ispNapGroupHtml(nap, isClientNap, technology) {
+  const s = nap.summary || { total: 0, working: 0, lost: 0, state: null };
+  const st = _ISP_NAP_STATE[s.state] || { cls: 'unknown', text: s.state || '—' };
+  const devices = Array.isArray(nap.devices) ? nap.devices : [];
+  return `
+    <details class="isp-nap${isClientNap ? ' is-client-nap' : ''}"${isClientNap ? ' open' : ''}>
+      <summary>
+        <span class="isp-nap-name">
+          <span class="isp-nap-code mono">${escapeHtml(nap.nap)}</span>
+          ${isClientNap ? `<span class="isp-client-mark">${escapeHtml(_ispNapLabel(technology))} del cliente</span>` : ''}
+        </span>
+        <span class="isp-nap-summary">
+          <span class="isp-chip ${st.cls}">${escapeHtml(st.text)}</span>
+          <span class="isp-nap-counts"><strong>${s.working}</strong> working · <strong>${s.lost}</strong> lost</span>
+        </span>
+      </summary>
+      ${devices.length
+        ? `<ul class="isp-net-devs">${devices.map(d => _ispAccessDeviceHtml(d, technology)).join('')}</ul>`
+        : '<p class="isp-card-note">Sin equipos registrados en esta NAP.</p>'}
+    </details>`;
+}
+
+/** Equipos de la red de acceso agrupados por NAP (la del cliente primero y abierta). */
+function renderIspAccessNetwork(access) {
+  const naps = Array.isArray(access && access.naps) ? access.naps.slice() : [];
+  const tech = access && access.technology;
+  const t = (access && access.totals) || {};
+  // La NAP del cliente primero aunque el backend no la ordene.
+  naps.sort((a, b) => (b.nap === access.clientNap) - (a.nap === access.clientNap));
+  const head = `
+    <div class="isp-section-title isp-section-with-badge" id="isp-access-list" tabindex="-1">
+      Equipos de la red de acceso ${escapeHtml(access && access.accessNetwork ? access.accessNetwork : '')}
+      ${_ispSimBadge(!!(access && access.simulated), 'Equipos simulados: ISP Monitor en modo demo')}
+    </div>`;
+  if (!naps.length) {
+    return `${head}<div class="detail-empty">ISP Monitor no devolvió equipos para esta red de acceso.</div>`;
+  }
+  return `
+    ${head}
+    <p class="isp-net-totals">${isFinite(t.devices) ? `<strong>${t.devices}</strong> equipos · <strong>${t.working}</strong> working · <strong>${t.lost}</strong> lost · ` : ''}${naps.length} ${tech === 'HFC' ? 'taps' : 'NAPs'}</p>
+    <div class="isp-naps">${naps.map(n => _ispNapGroupHtml(n, n.nap === access.clientNap, tech)).join('')}</div>`;
+}
+
+/** Estado de carga/error de la red de acceso (diagnóstico y lista). */
+function renderIspAccessSlot(state, which) {
+  if (!state || state.loading) {
+    return which === 'diagnosis'
+      ? '<div class="detail-loading" role="status">Analizando la red de acceso…</div>'
+      : '';
+  }
+  if (state.error) {
+    return which === 'diagnosis'
+      ? `<div class="detail-error" role="alert">No se pudo consultar la red de acceso: ${escapeHtml(_ispAccountErrorMessage(state.error, state.account || ''))}
+           <button type="button" class="add-row-btn isp-retry-btn" data-action="isp-access-retry">Reintentar</button></div>`
+      : '';
+  }
+  return which === 'diagnosis' ? renderIspDiagnosis(state.data) : renderIspAccessNetwork(state.data);
+}
+
+/**
+ * Resultado completo de la consulta por cuenta. `accessState` =
+ * { loading } | { error } | { data }.
+ */
+function renderIspAccountResult(monitor, accessState) {
+  const m = monitor || {};
+  const tech = m.technology === 'GPON' || m.technology === 'HFC' ? m.technology : null;
+  const device = m.device || null;
+  const head = `
+    <div class="isp-section-title isp-section-first isp-section-with-badge">ISP Monitor · cuenta ${escapeHtml((m.searchRow && m.searchRow.accountNumber) || '')}
+      ${_ispSimBadge(m.simulated === true, 'Datos simulados: ISP Monitor por cuenta en modo demo')}</div>`;
+  if (!m.searchRow && !device) {
+    return `<div class="isp-results isp-acct-results">${head}
+      <div class="detail-empty">ISP Monitor no tiene equipos asociados a esta cuenta. Prueba con <strong>Buscar por serial</strong>.</div></div>`;
+  }
+  let deviceHtml = '';
+  if (!device) {
+    deviceHtml = '<div class="detail-empty">ISP Monitor no devolvió la ficha del equipo de esta cuenta.</div>';
+  } else if (tech === 'GPON') {
+    deviceHtml = renderIspOnuInfo(device, m.plan);             // nada DOCSIS
+  } else if (tech === 'HFC') {
+    deviceHtml = `${renderIspCableModem(device, m.plan)}${renderIspDocsisAccount(m.docsis)}`; // sin óptica GPON
+  } else {
+    deviceHtml = '<div class="detail-empty">ISP Monitor no informó la tecnología del equipo (GPON / HFC).</div>';
+  }
+  return `
+    <div class="isp-results isp-acct-results" data-technology="${escapeHtml(tech || '')}">
+      ${head}
+      ${renderIspSearchRow(m.searchRow, tech)}
+      ${renderIspPlan(m.plan)}
+      <div data-slot="isp-diagnosis">${renderIspAccessSlot(accessState, 'diagnosis')}</div>
+      <div class="isp-section-title">${tech === 'HFC' ? 'Ficha del cablemódem' : 'Ficha del equipo'}</div>
+      ${deviceHtml}
+      <div data-slot="isp-access">${renderIspAccessSlot(accessState, 'list')}</div>
+    </div>`;
+}
+
+/** Cuenta válida para ISP Monitor: solo dígitos (4 a 12). */
+function _ispNormalizeAccount(raw) {
+  const s = String(raw || '').replace(/[\s.-]/g, '');
+  if (!/^\d+$/.test(s)) return null;
+  const significant = s.replace(/^0+/, '').length;
+  return significant >= 4 && significant <= 12 ? s : null;
+}
+
+/** Mensaje claro para los errores de la consulta por cuenta (400 / 404). */
+function _ispAccountErrorMessage(err, account) {
+  const status = err && err.status;
+  const code = err && err.code;
+  if (status === 400 || code === 'VALIDATION_ERROR') {
+    return 'Número de cuenta inválido: usa solo dígitos (de 4 a 12, sin contar ceros a la izquierda).';
+  }
+  if (status === 404 || code === 'NOT_FOUND' || code === 'HTTP_404') {
+    return `La cuenta ${account} no está en la base de clientes Xtrim: ISP Monitor no la consulta. Revisa el número o usa «Buscar por serial».`;
+  }
+  return (err && err.message) || 'No se pudo consultar ISP Monitor para esta cuenta.';
+}
+
 // --- Panel -----------------------------------------------------------------
 
 function renderIspPanel(cuenta) {
   const remembered = _ispRecallId(cuenta);
   const canScan = serialScannerAvailable();
+  // Cuenta prellenada con la de la sesión (editable).
+  const acct = cuenta || '';
+  const serialOpen = !!(_ispState.data || remembered);
   return `
     <div class="isp-panel" data-panel="isp-monitor">
+      <form class="isp-acct-form" data-form="isp-account" novalidate>
+        <label class="form-row" for="ispAccountInput">
+          <span class="form-label">Número de cuenta</span>
+          <input type="text" id="ispAccountInput" data-field="isp-account" class="isp-input"
+            inputmode="numeric" autocomplete="off" spellcheck="false" maxlength="14"
+            aria-describedby="ispAccountHelp ispAccountError" value="${escapeHtml(acct)}">
+        </label>
+        <span class="form-hint" id="ispAccountHelp">Viene con la cuenta de la sesión; puedes cambiarla. Con ONT instalada se ve la ficha GPON; con cablemódem, la DOCSIS.</span>
+        <span class="field-error isp-field-error" id="ispAccountError" data-slot="isp-acct-error"></span>
+        <div class="isp-actions">
+          <button type="submit" class="save-btn isp-consult-btn" data-action="isp-consult-account">Consultar cuenta</button>
+        </div>
+      </form>
+      <div class="isp-feedback" data-slot="isp-acct-feedback" role="alert"></div>
+      <div data-slot="isp-acct-results" aria-live="polite"></div>
+
+      <details class="isp-by-serial" data-slot="isp-by-serial"${serialOpen ? ' open' : ''}>
+      <summary>Buscar por serial</summary>
+      <div class="isp-by-serial-body">
       <p class="isp-hint">
-        ISP Monitor consulta por <strong>serial GPON</strong> (fibra) o
-        <strong>MAC del cablemódem</strong> (HFC), no por número de cuenta.
+        Opción secundaria: consulta por <strong>serial GPON</strong> (fibra) o
+        <strong>MAC del cablemódem</strong> (HFC), escaneado o escrito.
       </p>
       <details class="isp-labels">
         <summary>¿Cuál de los códigos de la etiqueta?</summary>
@@ -5619,13 +6176,139 @@ function renderIspPanel(cuenta) {
         data-slot="isp-photo-input" style="display:none" aria-hidden="true" tabindex="-1">` : ''}
       <div class="isp-feedback" data-slot="isp-feedback" role="alert" aria-live="polite"></div>
       <div data-slot="isp-results"></div>
+      </div>
+      </details>
     </div>`;
+}
+
+/**
+ * Búsqueda por cuenta: consulta isp-monitor y access-network en paralelo. La
+ * ficha se pinta en cuanto llega; el diagnóstico y la lista por NAP llegan
+ * aparte (con su propio cargando / error + Reintentar). Una respuesta vieja
+ * (el técnico cambió de cuenta mientras tanto) se descarta.
+ */
+function _bootIspAccountSearch(panel) {
+  const form = panel.querySelector('[data-form="isp-account"]');
+  if (!form) return;
+  const input = form.querySelector('[data-field="isp-account"]');
+  const btn = form.querySelector('[data-action="isp-consult-account"]');
+  const errEl = form.querySelector('[data-slot="isp-acct-error"]');
+  const feedback = panel.querySelector('[data-slot="isp-acct-feedback"]');
+  const results = panel.querySelector('[data-slot="isp-acct-results"]');
+  let seq = 0;
+
+  function setError(msg) {
+    errEl.textContent = msg || '';
+    if (msg) input.setAttribute('aria-invalid', 'true');
+    else input.removeAttribute('aria-invalid');
+  }
+  function paintAccess(state) {
+    const d = results.querySelector('[data-slot="isp-diagnosis"]');
+    const l = results.querySelector('[data-slot="isp-access"]');
+    if (d) d.innerHTML = renderIspAccessSlot(state, 'diagnosis');
+    if (l) l.innerHTML = renderIspAccessSlot(state, 'list');
+  }
+  async function loadAccess(account, mySeq) {
+    paintAccess({ loading: true });
+    try {
+      const access = await WifixAPI.getIspAccessNetwork(account);
+      if (mySeq !== seq) return;
+      _ispAcctState.access = access;
+      _ispAcctState.accessError = null;
+      paintAccess({ data: access });
+    } catch (err) {
+      if (mySeq !== seq) return;
+      console.error('[Wifix] ISP Monitor red de acceso', err);
+      _ispAcctState.access = null;
+      _ispAcctState.accessError = err;
+      paintAccess({ error: err, account: _ispAcctState.account });
+    }
+  }
+
+  async function consult() {
+    const account = _ispNormalizeAccount(input.value);
+    if (!account) {
+      setError('Ingresa un número de cuenta válido (solo dígitos).');
+      input.focus();
+      return;
+    }
+    setError('');
+    feedback.textContent = '';
+    const mySeq = ++seq;
+    btn.disabled = true;
+    btn.setAttribute('aria-busy', 'true');
+    btn.textContent = 'Consultando…';
+    results.innerHTML = '<div class="detail-loading" role="status">Consultando ISP Monitor…</div>';
+    // Las dos llamadas salen juntas; la de la red no espera a la ficha.
+    const accessPromise = WifixAPI.getIspAccessNetwork(account);
+    accessPromise.catch(() => {});  // se maneja abajo; evita unhandled rejection
+    try {
+      const monitor = await WifixAPI.getIspMonitor(account);
+      if (mySeq !== seq) return;
+      _ispAcctState = { account: account, monitor: monitor, access: null, accessError: null };
+      results.innerHTML = renderIspAccountResult(monitor, { loading: true });
+      try {
+        const access = await accessPromise;
+        if (mySeq !== seq) return;
+        _ispAcctState.access = access;
+        paintAccess({ data: access });
+      } catch (err) {
+        if (mySeq !== seq) return;
+        console.error('[Wifix] ISP Monitor red de acceso', err);
+        _ispAcctState.accessError = err;
+        paintAccess({ error: err, account: _ispAcctState.account });
+      }
+    } catch (err) {
+      if (mySeq !== seq) return;
+      console.error('[Wifix] ISP Monitor por cuenta', err);
+      const msg = _ispAccountErrorMessage(err, account);
+      if (err && (err.status === 400 || err.code === 'VALIDATION_ERROR')) {
+        results.innerHTML = '';
+        setError(msg);
+        input.focus();
+      } else {
+        results.innerHTML = renderPanelError(Object.assign(new Error(msg), { code: err && err.code }), msg);
+      }
+    } finally {
+      if (mySeq === seq) {
+        btn.disabled = false;
+        btn.removeAttribute('aria-busy');
+        btn.textContent = 'Consultar cuenta';
+      }
+    }
+  }
+
+  form.addEventListener('submit', (ev) => { ev.preventDefault(); consult(); });
+  input.addEventListener('input', () => { if (errEl.textContent) setError(''); });
+  results.addEventListener('click', (ev) => {
+    const b = ev.target && ev.target.closest ? ev.target.closest('[data-action]') : null;
+    if (!b) return;
+    if (b.dataset.action === 'isp-access-retry' && _ispAcctState.account) {
+      loadAccess(_ispAcctState.account, seq);
+    } else if (b.dataset.action === 'isp-goto-access') {
+      const target = results.querySelector('#isp-access-list');
+      if (target) {
+        target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        target.focus({ preventScroll: true });
+      }
+    }
+  });
+
+  // Reabrir el panel: se repinta lo último consultado sin volver a pedir.
+  if (_ispAcctState.monitor && _ispAcctState.account === _ispNormalizeAccount(input.value)) {
+    const st = _ispAcctState.access ? { data: _ispAcctState.access }
+      : _ispAcctState.accessError ? { error: _ispAcctState.accessError, account: _ispAcctState.account } : { loading: true };
+    results.innerHTML = renderIspAccountResult(_ispAcctState.monitor, st);
+    if (!_ispAcctState.access && !_ispAcctState.accessError) loadAccess(_ispAcctState.account, seq);
+  }
 }
 
 /** Activa el panel de ISP Monitor una vez insertado en el DOM. */
 function _bootIspPanel(body, cuenta) {
   const panel = body.querySelector('[data-panel="isp-monitor"]');
   if (!panel) return;
+
+  _bootIspAccountSearch(panel);
 
   const input = panel.querySelector('[data-field="terminalId"]');
   const feedback = panel.querySelector('[data-slot="isp-feedback"]');
@@ -6897,7 +7580,7 @@ const SERVICIO_ITEMS = [
     load: (cuenta) => loadNapPanel(cuenta) },
   { id: 'status',  icon: SERVICIO_ICONS.user,    title: 'Status del cliente por contrato/cuenta',
     load: (cuenta) => WifixAPI.getContractStatus(cuenta).then(c => renderStatusFromContract(c, cuenta)) },
-  { id: 'isp',     icon: SERVICIO_ICONS.metrics, title: 'ISP Monitor — señal (fibra o cable) y caídas 24 h',
+  { id: 'isp',     icon: SERVICIO_ICONS.metrics, title: 'ISP Monitor — equipo, plan y red de acceso de la cuenta',
     load: (cuenta) => renderIspPanel(cuenta) },
   // "Red de acceso" y no "nodo", igual que en el panel de ISP Monitor: la
   // operadora aclaró que ese concepto no existe (los datos salen de tarjetas de

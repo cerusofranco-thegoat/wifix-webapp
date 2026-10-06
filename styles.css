@@ -5327,3 +5327,244 @@ ul.nap-map-legend li { display: inline-flex; align-items: center; }
 .nap-assign-hint { margin: 0; font-size: 12px; color: var(--text-secondary); }
 .nap-assign-hint.is-ok { color: var(--success-text); font-weight: 600; }
 .nap-assign-save-btn { width: 100%; }
+
+/* ==========================================================================
+ * ISP Monitor por cuenta (2026-10-06): tarjetas etiqueta/valor para móvil,
+ * plan en bits, diagnóstico de la red de acceso y NAPs colapsables.
+ * Estado siempre con texto/ícono además del color.
+ * ========================================================================*/
+.isp-acct-form .isp-actions { margin-top: 8px; }
+.isp-field-error { display: block; margin-top: 4px; font-size: 12px; color: var(--error-text); }
+.isp-field-error:empty { display: none; }
+.isp-input[aria-invalid="true"] { border-color: var(--error-border); }
+
+/* Búsqueda por serial: opción secundaria plegada. */
+.isp-by-serial {
+  margin-top: 16px;
+  border: 1px solid var(--border-lavender);
+  border-radius: var(--radius-btn);
+  background: var(--surface-card);
+}
+.isp-by-serial > summary {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 12px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--brand-primary);
+  list-style: none;
+}
+.isp-by-serial > summary::-webkit-details-marker { display: none; }
+.isp-by-serial > summary::before { content: '＋'; margin-right: 8px; }
+.isp-by-serial[open] > summary::before { content: '－'; }
+.isp-by-serial > summary:focus-visible { outline: 3px solid var(--brand-primary); outline-offset: 2px; border-radius: var(--radius-btn); }
+.isp-by-serial-body { padding: 0 12px 12px; }
+
+/* Tarjetas */
+.isp-card {
+  background: var(--surface-card);
+  border: 1px solid var(--border-lavender);
+  border-radius: var(--radius-card);
+  padding: 12px 14px;
+  margin-bottom: 10px;
+  box-shadow: var(--shadow-soft);
+}
+.isp-card-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 10px;
+  margin-bottom: 4px;
+}
+.isp-card-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--brand-dark);
+}
+.isp-card-subtitle {
+  margin: 12px 0 6px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  color: var(--brand-primary);
+}
+.isp-card-note { margin: 4px 0; font-size: 12px; color: var(--text-secondary); }
+.isp-device.is-lost { border-left: 4px solid var(--error-fill); }
+.isp-device.is-working { border-left: 4px solid var(--success-fill); }
+
+/* Filas etiqueta / valor (dl) */
+.isp-kv-list { margin: 0; }
+.isp-kv {
+  display: grid;
+  grid-template-columns: minmax(96px, 38%) 1fr;
+  gap: 10px;
+  align-items: baseline;
+  padding: 8px 0;
+  border-bottom: 1px dashed var(--border-lavender);
+  font-size: 13px;
+}
+.isp-kv:last-child { border-bottom: 0; }
+.isp-kv dt {
+  color: var(--text-secondary);
+  font-size: 11px;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+}
+.isp-kv dd {
+  margin: 0;
+  min-width: 0;
+  color: var(--text-primary);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.isp-kv dd .mono, .isp-net-dev .mono, .isp-plan-profile.mono { font-family: var(--font-mono); letter-spacing: 0.3px; }
+.isp-kv-empty { color: var(--text-secondary); font-weight: 400; }
+.isp-kv-sub { display: block; margin-top: 2px; font-size: 11px; font-weight: 400; color: var(--text-secondary); }
+.isp-kv-sub-inline { font-weight: 400; color: var(--text-secondary); }
+.isp-kv-compact .isp-kv { padding: 5px 0; font-size: 12px; }
+@media (max-width: 340px) {
+  .isp-kv { grid-template-columns: 1fr; gap: 2px; }
+}
+
+/* Chips de estado: working/lost, A/S/T, up/down, OK/PARCIAL/CAÍDA */
+.isp-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 9px;
+  border-radius: var(--radius-pill);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.5;
+  white-space: nowrap;
+  border: 1px solid transparent;
+}
+.isp-chip svg { width: 13px; height: 13px; }
+.isp-chip.ok { background: var(--success-bg); color: var(--success-text); border-color: var(--success-border); }
+.isp-chip.fail { background: var(--error-bg); color: var(--error-text); border-color: var(--error-border); }
+.isp-chip.warn { background: var(--warn-bg); color: var(--warn-text); border-color: var(--warn-border); }
+.isp-chip.unknown { background: var(--gray-50); color: var(--text-primary); border-color: var(--gray-200); }
+
+/* Semáforo óptico / DOCSIS: punto + texto */
+.isp-light { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 600; }
+.isp-light-dot { flex: none; width: 10px; height: 10px; border-radius: 50%; background: var(--gray-400); }
+.isp-light.ok { color: var(--success-text); }
+.isp-light.ok .isp-light-dot { background: var(--success-fill); box-shadow: 0 0 0 2px var(--success-bg); }
+.isp-light.bad { color: var(--error-text); }
+.isp-light.bad .isp-light-dot { background: var(--error-fill); box-shadow: 0 0 0 2px var(--error-bg); }
+.isp-light.unknown { color: var(--text-secondary); }
+
+/* Plan contratado en bits */
+.isp-plan { background: var(--surface-tint); }
+.isp-plan-profile { margin: 4px 0 2px; font-size: 17px; font-weight: 700; color: var(--brand-dark); overflow-wrap: anywhere; }
+.isp-plan-bits { display: flex; flex-wrap: wrap; gap: 4px 8px; margin: 0; font-size: 14px; color: var(--text-primary); }
+.isp-plan-bits strong { font-weight: 700; }
+.isp-plan-sep { color: var(--text-secondary); }
+.isp-plan-mbps { margin: 2px 0 0; font-size: 12.5px; color: var(--text-secondary); }
+
+/* Service ports / CPEs */
+.isp-subitems { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.isp-subitem { padding: 6px 10px; border-radius: var(--radius-btn); background: var(--surface-app); border: 1px solid var(--border-lavender); }
+.isp-subitem-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 8px; }
+.isp-subitem-title { font-size: 12.5px; font-weight: 700; color: var(--text-primary); }
+
+/* Tabla DOCSIS (solo HFC) */
+.isp-docsis-table th, .isp-docsis-table td { text-align: right; }
+.isp-docsis-table th:first-child { text-align: left; }
+.isp-docsis-table td.is-bad { color: var(--error-text); font-weight: 700; }
+
+/* Diagnóstico destacado */
+.isp-diagnosis {
+  margin: 4px 0 12px;
+  padding: 12px 14px;
+  border-radius: var(--radius-card);
+  border: 2px solid var(--gray-200);
+  background: var(--gray-50);
+}
+.isp-diagnosis.ok { background: var(--success-bg); border-color: var(--success-border); }
+.isp-diagnosis.warn { background: var(--warn-bg); border-color: var(--warn-border); }
+.isp-diagnosis.bad { background: var(--error-bg); border-color: var(--error-border); }
+.isp-diagnosis-eyebrow {
+  display: flex; align-items: center; gap: 8px;
+  margin: 0 0 4px; font-size: 10.5px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase;
+  color: var(--text-secondary);
+}
+.isp-diagnosis-title { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 16px; font-weight: 700; line-height: 1.3; }
+.isp-diagnosis-title svg { flex: none; width: 20px; height: 20px; }
+.isp-diagnosis.ok .isp-diagnosis-title { color: var(--success-text); }
+.isp-diagnosis.warn .isp-diagnosis-title { color: var(--warn-text); }
+.isp-diagnosis.bad .isp-diagnosis-title { color: var(--error-text); }
+.isp-diagnosis-msg { margin: 6px 0 0; font-size: 13px; line-height: 1.45; color: var(--text-primary); }
+.isp-diagnosis-facts { margin: 8px 0 0; padding-left: 18px; font-size: 12.5px; color: var(--text-primary); }
+.isp-diagnosis-link {
+  margin-top: 8px; padding: 6px 0; min-height: 36px;
+  background: none; border: 0; cursor: pointer;
+  font: inherit; font-size: 13px; font-weight: 700; color: var(--brand-primary); text-decoration: underline;
+}
+.isp-diagnosis-link:focus-visible { outline: 3px solid var(--brand-primary); outline-offset: 2px; border-radius: 4px; }
+.isp-retry-btn { margin-left: 8px; }
+
+/* Equipos de la red de acceso por NAP */
+.isp-net-totals { margin: 0 0 8px; font-size: 12.5px; color: var(--text-secondary); }
+.isp-net-totals strong { color: var(--text-primary); }
+.isp-naps { display: flex; flex-direction: column; gap: 8px; }
+.isp-nap {
+  border: 1px solid var(--border-lavender);
+  border-radius: var(--radius-btn);
+  background: var(--surface-card);
+}
+.isp-nap.is-client-nap { border: 2px solid var(--brand-primary); background: var(--surface-app); }
+.isp-nap > summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 10px;
+  min-height: 48px;
+  padding: 8px 12px;
+  cursor: pointer;
+  list-style: none;
+}
+.isp-nap > summary::-webkit-details-marker { display: none; }
+.isp-nap > summary:focus-visible { outline: 3px solid var(--brand-primary); outline-offset: 2px; border-radius: var(--radius-btn); }
+.isp-nap-name { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+.isp-nap-name::before { content: '▸'; color: var(--brand-primary); font-size: 12px; }
+.isp-nap[open] .isp-nap-name::before { content: '▾'; }
+.isp-nap-code { font-family: var(--font-mono); font-size: 14px; font-weight: 700; color: var(--text-primary); }
+.isp-nap-summary { display: flex; align-items: center; gap: 8px; }
+.isp-nap-counts { font-size: 12px; color: var(--text-secondary); white-space: nowrap; }
+.isp-nap-counts strong { color: var(--text-primary); }
+.isp-client-mark {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: var(--radius-pill);
+  background: var(--brand-primary);
+  color: var(--text-on-brand);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+}
+.isp-net-devs { list-style: none; margin: 0; padding: 0 10px 10px; display: flex; flex-direction: column; gap: 6px; }
+.isp-net-dev {
+  padding: 8px 10px;
+  border-radius: var(--radius-btn);
+  background: var(--surface-card);
+  border: 1px solid var(--border-lavender);
+  border-left: 4px solid var(--success-fill);
+}
+.isp-net-dev.is-lost { border-left-color: var(--error-fill); }
+.isp-net-dev.is-client { box-shadow: 0 0 0 2px var(--brand-primary); }
+.isp-net-dev-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 8px; }
+.isp-net-dev-serial { font-size: 13px; font-weight: 700; color: var(--text-primary); overflow-wrap: anywhere; }
+.isp-net-dev .isp-client-mark { margin-top: 4px; }
+.isp-net-dev-name { margin-top: 2px; font-size: 12.5px; color: var(--text-primary); }
+.isp-net-dev-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-top: 4px; font-size: 12px; color: var(--text-secondary); }
+.isp-services { display: inline-flex; align-items: center; gap: 6px; color: var(--brand-primary); }
+.isp-service { display: inline-flex; }
+#isp-access-list:focus { outline: none; }
+#isp-access-list:focus-visible { outline: 3px solid var(--brand-primary); outline-offset: 2px; }
