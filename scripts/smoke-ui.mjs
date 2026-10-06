@@ -1133,14 +1133,27 @@ console.log('\n== Ubicación "Casa cliente" (Visita técnica / Migración) ==');
   check('mapa: marcador Casa cliente (sin guardar) + ubicación registrada',
     pts.casa && pts.casa.unsaved === true && pts.registered && pts.registered.latitude === -2.247946);
 
-  // Guardar → POST con el taskId de la visita pendiente y respuesta 201.
+  // Visita técnica: sin Nº de task validado NO se guarda (guardia TASK_REQUIRED).
+  let sinTask = null;
+  try { await WifixAPI.createClientLocation('35070291', { latitude: -2.2, longitude: -79.9, label: 'CASA_CLIENTE', source: 'GPS' }); } catch (e) { sinTask = e; }
+  check('visita sin task validada: el POST se bloquea antes de llamar (TASK_REQUIRED)',
+    sinTask && sinTask.code === 'TASK_REQUIRED' && sinTask.message.includes('Nº de task'));
+  // Se valida la task Pendiente de la orden de la sesión (prefill sugerido).
+  ctx.setSessionWorkOrder('35070291', 'ORDER/463158/2026', 'module');
+  const ctxOrden = await WifixAPI.getOrderContext('ORDER/463158/2026');
+  const sugerida = ctx.suggestedVisitTask(ctxOrden);
+  const valida = await ctx.validateVisitTask('35070291', sugerida.taskId.split('/')[1]);
+  check('task de la visita: la sugerida (Pendiente) se valida con task-check',
+    sugerida.status === 'Pendiente' && valida.ok === true && ctx.visitTaskIdFor('35070291') === sugerida.taskId);
+
+  // Guardar → POST con la task validada de la visita y respuesta 201.
   let enviado = null;
   const createOrig = WifixAPI.createClientLocation;
   WifixAPI.createClientLocation = async function (cuenta, body) { enviado = { cuenta, body }; return createOrig.call(this, cuenta, body); };
   sc.slots['[data-field="client-loc-notes"]'].value = 'Casa esquinera';
   const saved = await ctx._clientLocSave(sc, sc.slots['[data-action="client-loc-save"]']);
-  check('guardar: POST con cuenta, taskId de la visita pendiente, NAP y puerto del cliente',
-    enviado && enviado.cuenta === '35070291' && enviado.body.taskId === 'ORDER/424900/2026'
+  check('guardar: POST con cuenta, taskId = task validada de la visita, NAP y puerto del cliente',
+    enviado && enviado.cuenta === '35070291' && enviado.body.taskId === sugerida.taskId
     && enviado.body.napPort === 7 && typeof enviado.body.napCode === 'string' && enviado.body.source === 'GPS'
     && enviado.body.accuracyMeters === 42.4 && enviado.body.notes === 'Casa esquinera', JSON.stringify(enviado && enviado.body));
   const savedHtml = sc.slots['[data-slot="client-loc-saved"]'].innerHTML;

@@ -182,6 +182,7 @@ logoutBtn.addEventListener('click', () => {
   _fsmHealth = null;
   // La orden de trabajo es de la sesión del técnico: no pasa a otra sesión.
   _orderSession.clear();
+  _visitTasks.clear();
   renderIntegrationWarning(null);
   // Cerrar todas las detail screens y el subscreen al cerrar sesión.
   document.querySelectorAll('.detailscreen, .subscreen').forEach((el) => {
@@ -298,6 +299,7 @@ function selectModule(type) {
   subHeading.textContent = meta.title;
   applyModuleLabels();
   applyModuleVisibility();
+  renderVisitTaskGate();
   return true;
 }
 
@@ -349,6 +351,12 @@ function invalidateAccountCache() {
   if (orderLine) {
     orderLine.innerHTML = '';
     orderLine.hidden = true;
+  }
+  // Tarjeta del Nº de task (Visita técnica): sin cuenta confirmada no se ve.
+  const taskGate = document.getElementById('visitTaskGate');
+  if (taskGate) {
+    taskGate.innerHTML = '';
+    taskGate.hidden = true;
   }
   accountInput.removeAttribute('aria-invalid');
   accountInput.removeAttribute('aria-describedby');
@@ -455,6 +463,8 @@ function setSessionWorkOrder(cuenta, workOrder, source) {
   if (!workOrder) _orderSession.delete(c);
   else _orderSession.set(c, { workOrder: String(workOrder), source: source || 'module' });
   renderAccountOrderLine(c);
+  // La task validada es de la orden: si la orden cambió, se vuelve a pedir.
+  if (validatedAccount === c) renderVisitTaskGate();
 }
 
 /** Línea "Orden ORDER/… · TYTAN (simulado)" bajo Confirmar cuenta. */
@@ -737,6 +747,7 @@ async function confirmAccountFlow() {
       confirmAccountFeedback.className = 'confirm-account-feedback success';
       renderWhitelistLine(wl, cuenta);
       renderAccountOrderLine(cuenta);
+      visitTaskOnAccountConfirmed(cuenta);
 
       // Estado del cliente: UNA sola llamada adicional. Si falla no invalida la
       // confirmación — el técnico ya tiene el nombre y puede seguir trabajando.
@@ -761,6 +772,7 @@ async function confirmAccountFlow() {
         confirmAccountInLimitedMode(cuenta, err);
         renderWhitelistLine(wl, cuenta);
         renderAccountOrderLine(cuenta);
+        visitTaskOnAccountConfirmed(cuenta);
       } else {
         // 404 / cuenta inexistente / credenciales: sí es un error real, no se
         // habilita nada.
@@ -3415,12 +3427,16 @@ function renderNapPanel() {
     _napPanelState.openedAt = new Date().toISOString();
   }
 
-  const taskId = _napPanelState.taskId;
+  // Visita técnica: la cabecera muestra la task validada de la visita (la que
+  // viaja en los registros), no el identificador local del panel.
+  const enVisita = visitTaskUsesModule();
+  const taskVisita = enVisita ? visitTaskIdFor(_napPanelState.account) : null;
+  const taskId = enVisita ? (taskVisita || 'Task sin validar') : _napPanelState.taskId;
   const fechaHora = formatDate(_napPanelState.openedAt);
   const cabecera = `
       <!-- 1) Cabecera de tarea -->
       <div class="nap-task-header">
-        <span class="nap-task-badge">${escapeHtml(taskId)}</span>
+        <span class="nap-task-badge${enVisita && !taskVisita ? ' is-missing' : ''}">${escapeHtml(taskId)}</span>
         <span class="nap-task-date">${escapeHtml(fechaHora)}</span>
       </div>`;
 
@@ -5787,16 +5803,22 @@ function rememberVisits(cuenta, result) {
   _pendingVisitCache.set(cuenta, { taskId: pendingVisitTaskId(result), at: Date.now(), ttl: PENDING_VISIT_TTL_MS });
 }
 
-/** taskId ya conocido (sin red), o null. */
+/** taskId ya conocido (sin red), o null. En Visita técnica: la task validada. */
 function peekCurrentVisitTaskId(cuenta) {
+  if (visitTaskUsesModule()) return visitTaskIdFor(cuenta);
   const hit = cuenta ? _pendingVisitCache.get(cuenta) : null;
   if (!hit || hit.promise || Date.now() - hit.at > hit.ttl) return null;
   return hit.taskId || null;
 }
 
-/** taskId de la visita en curso; consulta /visits una vez si hace falta. */
+/**
+ * taskId de la visita en curso. En Visita técnica es SIEMPRE la task que el
+ * técnico validó (§4); en los demás módulos, la visita pendiente de /visits
+ * (consulta una vez si hace falta).
+ */
 function resolveCurrentVisitTaskId(cuenta) {
   if (!cuenta) return Promise.resolve(null);
+  if (visitTaskUsesModule()) return Promise.resolve(visitTaskIdFor(cuenta));
   const hit = _pendingVisitCache.get(cuenta);
   if (hit && Date.now() - hit.at <= hit.ttl) {
     return hit.promise || Promise.resolve(hit.taskId || null);
@@ -5813,6 +5835,261 @@ function resolveCurrentVisitTaskId(cuenta) {
 }
 
 WifixAPI.setTaskIdResolver(resolveCurrentVisitTaskId);
+
+// ---------------------------------------------------------------------------
+// Visita técnica: Nº de task OBLIGATORIO (contrato 2026-10-06 §4)
+// ---------------------------------------------------------------------------
+// Al entrar a Visita técnica el técnico escribe el nº de task asignado a esta
+// visita (TASK/549487/2026 o solo los dígitos) y se valida contra la orden con
+// GET /orders/task-check. Se sugiere la tarea Pendiente de la orden, pero el
+// técnico tiene que confirmarla. Sin task válida NINGÚN registro de la visita
+// se guarda (guardia TASK_REQUIRED de api.js) y esa taskId es la que viaja como
+// `taskId` en todos los registros (reemplaza al workOrder de la visita pendiente).
+const VISIT_TASK_MODULE = 'visitas';
+const VISIT_TASK_GUARD_MSG = 'Falta el Nº de task: valídalo arriba, en la pantalla de Visita técnica.';
+const _visitTasks = new Map();   // cuenta → { taskId, workOrder, task, at }
+// Estado de la tarjeta (por cuenta): borrador, error y "cambiando".
+const _visitTaskUi = { account: null, draft: null, error: null, busy: false, changing: false, loadingCtx: false, ctxError: null };
+
+function visitTaskUsesModule(category = currentCategory) {
+  return category === VISIT_TASK_MODULE;
+}
+
+/** Task validada vigente de la cuenta (debe ser de la orden actual de la sesión). */
+function visitTaskFor(cuenta) {
+  const c = String(cuenta || '').trim();
+  const hit = c ? _visitTasks.get(c) : null;
+  if (!hit) return null;
+  return hit.workOrder === sessionWorkOrder(c) ? hit : null;
+}
+
+function visitTaskIdFor(cuenta) {
+  const t = visitTaskFor(cuenta);
+  return t ? t.taskId : null;
+}
+
+/** Guardia de api.js: solo en Visita técnica, y solo si falta la task. */
+function visitTaskGuard(accountNumber) {
+  if (!visitTaskUsesModule()) return null;
+  return visitTaskIdFor(accountNumber) ? null : VISIT_TASK_GUARD_MSG;
+}
+WifixAPI.setTaskGuard(visitTaskGuard);
+
+/** Tarea sugerida: la Pendiente más reciente de la orden (el técnico la confirma). */
+function suggestedVisitTask(context) {
+  const pendientes = orderTasksSorted(context && context.tasks).filter(t => t.status === 'Pendiente');
+  return pendientes[0] || null;
+}
+
+/** Valida la task contra la orden. { ok, entry } o { ok:false, error }. */
+async function validateVisitTask(cuenta, raw) {
+  const wo = sessionWorkOrder(cuenta);
+  if (!wo) return { ok: false, error: 'Primero ingresa el Nº de orden de la visita.' };
+  const tid = WifixAPI.normalizeTaskId(raw);
+  if (!tid) return { ok: false, error: 'Formato inválido. Usa TASK/549487/2026 o solo el número (6 o 7 dígitos).' };
+  let r;
+  try {
+    r = await WifixAPI.checkOrderTask(wo, tid);
+  } catch (err) {
+    console.error('[Wifix] task-check:', err);
+    if (err && err.code === 'VALIDATION_ERROR') return { ok: false, error: 'Formato inválido. Usa TASK/549487/2026 o solo el número.' };
+    return { ok: false, error: `No se pudo validar la task: ${(err && err.message) || 'error del servidor'}.` };
+  }
+  if (!r || r.valid !== true) {
+    return { ok: false, error: `La task ${tid} no pertenece a la orden ${wo}. Revisa el número asignado a esta visita.` };
+  }
+  const entry = { taskId: r.taskId || tid, workOrder: wo, task: r.task || null, at: Date.now() };
+  _visitTasks.set(String(cuenta).trim(), entry);
+  return { ok: true, entry };
+}
+
+function _visitTaskUiReset(cuenta) {
+  Object.assign(_visitTaskUi, { account: cuenta || null, draft: null, error: null, busy: false, changing: false, loadingCtx: false, ctxError: null });
+}
+
+/** Cabecera con la task validada (taskId + tipo + estado). Pura. */
+function visitTaskValidHtml(entry) {
+  const t = entry.task || {};
+  return `
+    <div class="visit-task-ok" role="status">
+      <span class="visit-task-ok-label">Task de esta visita</span>
+      <span class="visit-task-ok-main">
+        <span class="visit-task-id mono">${escapeHtml(entry.taskId)}</span>
+        ${t.status ? orderStatusChip(t.status) : ''}
+      </span>
+      ${t.taskType ? `<span class="visit-task-type">${escapeHtml(t.taskType)}</span>` : ''}
+      <span class="visit-task-wo">Orden <span class="mono">${escapeHtml(entry.workOrder)}</span></span>
+      <button type="button" class="link-btn" data-action="visit-task-change">Cambiar task</button>
+    </div>`;
+}
+
+/** Formulario de la task (orden ya conocida). Pura. */
+function visitTaskFormHtml(wo, opts = {}) {
+  const sug = opts.suggested;
+  let hint;
+  if (opts.loadingCtx) hint = 'Buscando la tarea pendiente de la orden…';
+  else if (sug) hint = `Sugerida: ${sug.taskId} (tarea Pendiente de la orden). Confírmala con el Nº que te asignaron.`;
+  else if (opts.ctxError) hint = 'No se pudo cargar la orden para sugerir la task: escríbela a mano.';
+  else hint = 'La orden no tiene una tarea pendiente: escribe el Nº de task asignado.';
+  return `
+    <form class="visit-task-form" data-form="visit-task" novalidate>
+      <p class="visit-task-wo">Orden <span class="mono">${escapeHtml(wo)}</span>
+        <button type="button" class="link-btn" data-action="visit-task-order-change">Cambiar orden</button></p>
+      <label class="form-label" for="visitTaskInput">Nº de task de esta visita</label>
+      <input type="text" id="visitTaskInput" class="order-input" data-field="visit-task"
+        inputmode="text" autocapitalize="characters" autocomplete="off" maxlength="24"
+        placeholder="TASK/549487/2026 o 549487" value="${escapeHtml(opts.value || '')}"
+        aria-describedby="visitTaskHint visitTaskError" aria-required="true"${opts.error ? ' aria-invalid="true"' : ''}>
+      <p class="visit-task-hint" id="visitTaskHint">${escapeHtml(hint)}</p>
+      <p class="order-field-error" id="visitTaskError" role="alert">${escapeHtml(opts.error || '')}</p>
+      <button type="submit" class="save-btn" ${opts.busy ? 'disabled aria-busy="true"' : ''}>${opts.busy ? 'Validando…' : 'Validar task'}</button>
+    </form>`;
+}
+
+/** Pinta la tarjeta de la task bajo Confirmar cuenta (solo Visita técnica). */
+function renderVisitTaskGate(focusSel) {
+  const gate = document.getElementById('visitTaskGate');
+  if (!gate) return;
+  const cuenta = validatedAccount;
+  if (!visitTaskUsesModule() || !cuenta) {
+    gate.hidden = true;
+    gate.innerHTML = '';
+    return;
+  }
+  if (_visitTaskUi.account !== cuenta) _visitTaskUiReset(cuenta);
+  const ui = _visitTaskUi;
+  const wo = sessionWorkOrder(cuenta);
+  const entry = visitTaskFor(cuenta);
+  let body;
+  if (entry && !ui.changing) {
+    body = visitTaskValidHtml(entry);
+  } else if (!wo || ui.changing === 'order') {
+    body = orderPromptHtml({
+      value: ui.changing === 'order' ? (wo || '') : '',
+      intro: 'Ingresa el Nº de orden de esta visita para validar la task asignada.',
+      error: ui.error,
+      submitLabel: 'Cargar orden',
+    });
+  } else {
+    const ctxData = peekOrderContext(wo);
+    const sug = suggestedVisitTask(ctxData);
+    const value = ui.draft !== null ? ui.draft : (sug ? sug.taskId : '');
+    body = visitTaskFormHtml(wo, {
+      value, suggested: sug, loadingCtx: ui.loadingCtx, ctxError: ui.ctxError, error: ui.error, busy: ui.busy,
+    });
+  }
+  const falta = !entry
+    ? '<p class="visit-task-required">Obligatorio: sin task validada no se puede registrar nada de esta visita.</p>'
+    : '';
+  gate.innerHTML = `
+    <h3 class="visit-task-title" id="visitTaskGateTitle">Nº de task de la visita</h3>
+    ${falta}
+    ${body}`;
+  gate.hidden = false;
+  gate.classList.toggle('is-valid', !!entry && !ui.changing);
+  if (focusSel) {
+    const el = gate.querySelector(focusSel);
+    if (el && el.focus) {
+      if (!/^(INPUT|BUTTON|TEXTAREA|SELECT)$/.test(el.tagName || '')) el.setAttribute('tabindex', '-1');
+      el.focus({ preventScroll: true });
+    }
+  }
+}
+
+/** Carga el contexto de la orden para sugerir la tarea Pendiente. */
+async function _visitTaskPrefetchContext(cuenta) {
+  const wo = sessionWorkOrder(cuenta);
+  if (!wo || peekOrderContext(wo)) return;
+  _visitTaskUi.loadingCtx = true;
+  _visitTaskUi.ctxError = null;
+  renderVisitTaskGate();
+  try {
+    await loadOrderContext(wo);
+  } catch (err) {
+    console.warn('[Wifix] contexto para sugerir task:', err);
+    if (_visitTaskUi.account === cuenta) _visitTaskUi.ctxError = err;
+  }
+  if (_visitTaskUi.account !== cuenta) return;
+  _visitTaskUi.loadingCtx = false;
+  if (validatedAccount === cuenta) renderVisitTaskGate();
+}
+
+/** Llamado al confirmar la cuenta (y al entrar al módulo con cuenta confirmada). */
+function visitTaskOnAccountConfirmed(cuenta) {
+  if (!visitTaskUsesModule()) {
+    renderVisitTaskGate();
+    return;
+  }
+  if (_visitTaskUi.account !== cuenta) _visitTaskUiReset(cuenta);
+  renderVisitTaskGate();
+  _visitTaskPrefetchContext(cuenta);
+}
+
+(function wireVisitTaskGate() {
+  const gate = document.getElementById('visitTaskGate');
+  if (!gate || !gate.addEventListener) return;
+  gate.addEventListener('click', (ev) => {
+    const btn = ev.target && ev.target.closest ? ev.target.closest('[data-action]') : null;
+    if (!btn) return;
+    const cuenta = validatedAccount;
+    if (btn.dataset.action === 'visit-task-change') {
+      _visitTaskUi.changing = 'task';
+      _visitTaskUi.error = null;
+      _visitTaskUi.draft = visitTaskIdFor(cuenta) || null;
+      renderVisitTaskGate('[data-field="visit-task"]');
+    } else if (btn.dataset.action === 'visit-task-order-change') {
+      _visitTaskUi.changing = 'order';
+      _visitTaskUi.error = null;
+      renderVisitTaskGate('[data-field="order-number"]');
+    }
+  });
+  gate.addEventListener('input', (ev) => {
+    if (ev.target && ev.target.dataset && ev.target.dataset.field === 'visit-task') {
+      _visitTaskUi.draft = ev.target.value;
+    }
+  });
+  gate.addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    const cuenta = validatedAccount;
+    if (!cuenta || _visitTaskUi.busy) return;
+    const form = ev.target;
+    if (form.dataset.form === 'order-prompt') {
+      const input = form.querySelector('[data-field="order-number"]');
+      _visitTaskUi.busy = true;
+      const btn = form.querySelector('button[type="submit"]');
+      if (btn) { btn.disabled = true; btn.textContent = 'Consultando…'; }
+      const r = await submitOrderNumber(cuenta, input ? input.value : '');
+      _visitTaskUi.busy = false;
+      if (!r.ok) {
+        _visitTaskUi.error = r.error;
+        renderVisitTaskGate('[data-field="order-number"]');
+        return;
+      }
+      _visitTaskUi.changing = false;
+      _visitTaskUi.error = null;
+      _visitTaskUi.draft = null;
+      renderVisitTaskGate('[data-field="visit-task"]');
+      return;
+    }
+    if (form.dataset.form === 'visit-task') {
+      const input = form.querySelector('[data-field="visit-task"]');
+      _visitTaskUi.draft = input ? input.value : '';
+      _visitTaskUi.busy = true;
+      _visitTaskUi.error = null;
+      renderVisitTaskGate();
+      const r = await validateVisitTask(cuenta, _visitTaskUi.draft);
+      _visitTaskUi.busy = false;
+      if (!r.ok) {
+        _visitTaskUi.error = r.error;
+        renderVisitTaskGate('[data-field="visit-task"]');
+        return;
+      }
+      _visitTaskUi.changing = false;
+      _visitTaskUi.draft = null;
+      renderVisitTaskGate('.visit-task-id');
+    }
+  });
+})();
 
 // Notas de cierre de una orden, cargadas solo cuando el técnico las pide.
 function wireTaskNotesButtons(scope) {
@@ -6197,7 +6474,7 @@ function _bootOrderPanel(body, cuenta, opts = {}) {
 const SERVICIO_ITEMS = [
   // Visita técnica / Migraciones: contexto de la orden (TYTAN simulado).
   { id: 'order',   icon: SERVICIO_ICONS.history, title: 'Orden de trabajo — tareas, cierres y equipos',
-    load: (cuenta) => loadOrderPanel(cuenta) },
+    load: (cuenta) => loadOrderPanel(cuenta, { currentTaskId: visitTaskIdFor(cuenta) }) },
   { id: 'naps',    icon: SERVICIO_ICONS.nap,     title: 'NAPs cercanas y seleccion GPON Xtreme',
     // Visita técnica / Migración: solo la NAP contratada (sin búsqueda).
     titleContracted: 'NAP del cliente (contratada)',
@@ -6291,7 +6568,7 @@ function openDatosServicio() {
           if (id === 'naps') {
             _bootNapPanel(body);
           } else if (id === 'order') {
-            _bootOrderPanel(body, cuenta);
+            _bootOrderPanel(body, cuenta, { currentTaskId: () => visitTaskIdFor(cuenta) });
           } else if (id === 'isp') {
             _bootIspPanel(body, cuenta);
           } else {
