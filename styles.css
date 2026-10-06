@@ -4981,97 +4981,45 @@ ul.nap-map-legend li { display: inline-flex; align-items: center; }
   color: var(--brand-dark);
 }
 
-.dev-models {
-  margin: 0;
-  padding: 0;
-  border: 0;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.dev-models-hint { margin: 0; }
-.dev-model-list {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.dev-model-option {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  min-height: 48px;
-  padding: 10px 12px;
-  border-radius: var(--radius-btn);
-  border: 1px solid var(--border-lavender);
-  background: var(--surface-card);
-  cursor: pointer;
-  transition: border-color 0.15s, background 0.15s;
-}
-.dev-model-option:hover { background: var(--surface-tint); }
-.dev-model-option.is-selected {
-  border-color: var(--brand-primary);
-  background: var(--surface-tint);
-  box-shadow: inset 0 0 0 1px var(--brand-primary);
-}
-.dev-model-option input[type="radio"] {
-  flex-shrink: 0;
-  width: 18px;
-  height: 18px;
-  margin: 2px 0 0;
-  accent-color: var(--brand-primary);
-}
-.dev-model-option:focus-within {
-  outline: 2px solid var(--brand-primary);
-  outline-offset: 2px;
-}
-.dev-model-text {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  flex: 1;
-  min-width: 0;
-}
-.dev-model-name {
-  font-size: 13px;
-  font-weight: 700;
-  color: var(--text-primary);
-  overflow-wrap: anywhere;
-}
-.dev-model-meta {
-  font-size: 11px;
-  color: var(--text-secondary);
-  overflow-wrap: anywhere;
-}
-.dev-model-tag {
-  flex-shrink: 0;
-  align-self: center;
-  padding: 2px 8px;
-  border-radius: var(--radius-pill);
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 0.4px;
-  text-transform: uppercase;
-  color: var(--brand-deep);
-  background: var(--surface-card);
-  border: 1px solid var(--border-lavender);
-}
-.dev-model-other .dev-model-name { font-weight: 500; }
-.dev-show-all { width: 100%; margin-top: 2px; }
+/* Menú desplegable de modelos (select nativo de .tool-form) */
+.dev-model-row { gap: 6px; }
+.dev-model-row select { width: 100%; min-height: 48px; }
+.dev-model-hint { margin: 0; }
+.dev-model-hint strong { color: var(--warn-text); }
 .dev-retry-btn { display: flex; margin: 10px auto 0; }
 
 .dev-capacity { margin-top: 0; }
 .dev-plan-tile { grid-column: 1 / -1; }
 .dev-plan-tile .source-badge { margin-left: 4px; }
-.dev-preview {
+.dev-missing { margin: 8px 0 0; }
+.dev-validating {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 6px 8px;
+  gap: 8px;
   margin: 0;
+  padding: 10px 12px;
+  border-radius: var(--radius-btn);
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--brand-deep);
+  background: var(--surface-tint);
+  border: 1px solid var(--border-lavender);
 }
-.dev-preview .event-badge { margin-bottom: 0; }
-.dev-preview-note { font-size: 10.5px; color: var(--text-secondary); }
+.dev-validating-dot {
+  flex-shrink: 0;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--brand-primary);
+  animation: dev-pulse 1s ease-in-out infinite;
+}
+@keyframes dev-pulse { 50% { opacity: 0.25; } }
+.dev-demo-note {
+  display: block;
+  margin-top: 4px;
+  font-size: 10.5px;
+  color: var(--text-secondary);
+}
 
 /* Veredicto del servidor */
 .dev-verdict {
@@ -5101,6 +5049,20 @@ ul.nap-map-legend li { display: inline-flex; align-items: center; }
   line-height: 1.5;
   color: var(--text-primary);
 }
+.dev-verdict-source { margin: 8px 0 0; }
+.dev-source-tag {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 1.5;
+  color: var(--brand-deep);
+  background: var(--surface-card);
+  border: 1px solid var(--border-lavender);
+  overflow-wrap: anywhere;
+}
+.dev-source-tag.is-review { color: var(--warn-text); border-color: var(--warn-border); }
 .dev-verdict-device,
 .dev-verdict-when {
   margin: 6px 0 0;
@@ -5118,12 +5080,8 @@ ul.nap-map-legend li { display: inline-flex; align-items: center; }
   border: 1px solid var(--error-border);
 }
 
-@media (max-width: 359px) {
-  .dev-model-option { flex-wrap: wrap; }
-  .dev-model-tag { align-self: flex-start; margin-left: 28px; }
-}
 @media (prefers-reduced-motion: reduce) {
-  .dev-model-option { transition: none; }
+  .dev-validating-dot { animation: none; }
 }
 
 /* ==========================================================================

@@ -10554,10 +10554,13 @@ async function openRetirados() {
 // ============================================================================
 // Equipo a instalar — Validación de capacidad vs plan contratado
 // ----------------------------------------------------------------------------
-// Instalaciones, Migraciones y Visita técnica. El técnico escanea la etiqueta
-// del equipo que va a instalar (mismo escáner que Equipos Retirados: ML Kit
-// barcode + OCR, serial editable), confirma el modelo exacto del catálogo y se
-// compara el plan contratado con la capacidad Ethernet/WiFi del equipo.
+// Instalaciones, Migraciones y Visita técnica. El técnico toma la foto de la
+// etiqueta del equipo que va a instalar (mismo escáner que Equipos Retirados:
+// ML Kit barcode + OCR, serial editable). El modelo del catálogo se DETECTA
+// solo (devDetectModel: texto de la etiqueta + marca del prefijo del serial)
+// y la validación contra el plan se dispara sola (devAutoValidate, sin botón).
+// El modelo queda en un menú desplegable (<select> por marca): si el técnico
+// lo cambia, se re-valida con el nuevo. Cada validación es un POST (alerta).
 //
 //   ok           → verde, módulo completado.
 //   unknown_plan → ámbar, no bloquea (el backend deja la alerta "sin plan").
@@ -10615,12 +10618,16 @@ function devStatusFromResult(result) {
   return null;
 }
 
-/** Guarda el veredicto (respuesta del POST o del historial) y repinta indicadores. */
-function devApplyValidation(account, category, validation) {
+/**
+ * Guarda el veredicto (respuesta del POST o del historial) y repinta
+ * indicadores. `how` = cómo se eligió el modelo (solo local, ver
+ * devSubmitValidation); del historial del servidor llega null.
+ */
+function devApplyValidation(account, category, validation, how = null) {
   const status = devStatusFromResult(validation && validation.result);
   if (!status || !account) return null;
   const at = Date.parse(validation.createdAt) || Date.now();
-  const st = { status, validation, at };
+  const st = { status, validation, at, how };
   _devStates.set(devKey(account, category), st);
   devRefreshIndicators();
   return st;
@@ -10712,7 +10719,9 @@ function devNormalize(s) {
 function devModelTokens(item) {
   const raw = `${item.model || ''} ${item.displayName || ''}`.toUpperCase()
     .split(/[\s\-()/,.]+/).filter(Boolean);
-  const useful = (t) => t.length >= 3 && /[A-Z]/.test(t) && /\d/.test(t) && !/^V\d+$/.test(t) && !/^WIFI\d*$/.test(t);
+  // '1FXS' / '1G' (empiezan con dígito y son cortos) son sufijos genéricos, no el modelo.
+  const useful = (t) => t.length >= 3 && /[A-Z]/.test(t) && /\d/.test(t) && !/^V\d+$/.test(t) && !/^WIFI\d*$/.test(t)
+    && !(/^\d/.test(t) && t.length <= 4);
   const out = new Set();
   raw.forEach((t, i) => {
     const n = devNormalize(t);
@@ -10726,27 +10735,129 @@ function devModelTokens(item) {
 }
 
 /**
- * Modelos cuyo código aparece en el texto leído (OCR o códigos). Devuelve
- * [{ model, score }] por puntaje: el token más largo que coincide gana, así
- * 'F6600P' le gana a 'F6600' y éste a 'F660'.
+ * Lo leído en la etiqueta, por línea: palabras ('ZXHN', 'F670L') y las uniones
+ * de 2-3 palabras vecinas de la misma línea ('ZXHNF670L', 'TLWPA4220',
+ * 'HUR2001'), porque el OCR separa o junta según la tipografía. Sin
+ * separadores no hay falsos positivos por cruce de palabras ('F6600' NO
+ * contiene a 'F660' como palabra).
  */
-function devMatchModelsFromText(lines, catalog) {
-  const text = (Array.isArray(lines) ? lines : []).map(devNormalize).filter(Boolean).join('|');
-  if (!text) return [];
-  return (catalog || [])
-    .map((item) => {
-      const score = devModelTokens(item).reduce((best, tok) => (text.includes(tok) && tok.length > best ? tok.length : best), 0);
-      return { model: item.model, score };
-    })
-    .filter((m) => m.score > 0)
-    .sort((a, b) => b.score - a.score);
+function devLabelCodes(rawValues) {
+  const codes = new Set();
+  const words = new Set();
+  (Array.isArray(rawValues) ? rawValues : []).forEach((line) => {
+    const w = String(line ?? '').toUpperCase().split(/[^A-Z0-9]+/).filter(Boolean);
+    w.forEach((x, i) => {
+      words.add(x);
+      codes.add(x);
+      if (i + 1 < w.length) codes.add(x + w[i + 1]);
+      if (i + 2 < w.length) codes.add(x + w[i + 1] + w[i + 2]);
+    });
+  });
+  return { codes, words };
 }
 
-/** Modelo a preseleccionar: solo si la mejor coincidencia es única. */
-function devPreselectModel(matches) {
-  if (!matches || !matches.length) return null;
-  if (matches.length > 1 && matches[1].score === matches[0].score) return null;
-  return matches[0].model;
+/**
+ * Palabras sin dígitos que aparecen en UN solo modelo del catálogo ('DUAL',
+ * 'QUAD', 'OPTIXSTAR', 'BRIDGE'): desempatan, pero nunca detectan solas.
+ */
+function devDistinctWords(catalog) {
+  const count = new Map();
+  (catalog || []).forEach((d) => {
+    const own = new Set(`${d.model || ''} ${d.displayName || ''}`.toUpperCase().split(/[^A-Z0-9]+/)
+      .filter((x) => x.length >= 4 && !/\d/.test(x)));
+    own.forEach((x) => count.set(x, (count.get(x) || 0) + 1));
+  });
+  return new Set([...count].filter(([, n]) => n === 1).map(([x]) => x));
+}
+
+/**
+ * Modelos de `pool` cuyo código aparece en lo leído (OCR o códigos de barras).
+ * Devuelve [{ model, score, exact }] de mayor a menor puntaje (empate: orden
+ * del catálogo). Puntaje:
+ *   código exacto ('F670L' = 'F670L')                 100 + largo del código
+ *   código truncado en la etiqueta ('HG8145' → 'HG8145X6', mín. 4 caracteres
+ *   con letra y dígito)                                50 + largo de lo leído
+ *   + 10 por cada palabra exclusiva del modelo presente ('QUAD', 'DUAL')
+ * Así 'F6600P' le gana a 'F6600' y 'F660' no se confunde con 'F6600'.
+ * `catalog` (completo) define las palabras exclusivas; `pool` es la marca.
+ */
+function devMatchModelsFromText(lines, catalog, pool = catalog) {
+  const { codes, words } = devLabelCodes(lines);
+  if (!codes.size) return [];
+  const distinct = devDistinctWords(catalog);
+  const partialOk = (w) => w.length >= 4 && /[A-Z]/.test(w) && /\d/.test(w);
+  return (pool || [])
+    .map((item, idx) => {
+      let score = 0;
+      let exact = false;
+      devModelTokens(item).forEach((c) => {
+        if (codes.has(c)) {
+          if (100 + c.length > score) score = 100 + c.length;
+          exact = true;
+          return;
+        }
+        codes.forEach((w) => {
+          if (w.length < c.length && partialOk(w) && c.startsWith(w) && 50 + w.length > score) score = 50 + w.length;
+        });
+      });
+      if (score > 0) {
+        const own = `${item.model || ''} ${item.displayName || ''}`.toUpperCase().split(/[^A-Z0-9]+/);
+        new Set(own).forEach((x) => { if (distinct.has(x) && words.has(x)) score += 10; });
+      }
+      return { model: item.model, score, exact, idx };
+    })
+    .filter((m) => m.score > 0)
+    .sort((a, b) => b.score - a.score || a.idx - b.idx)
+    .map(({ model, score, exact }) => ({ model, score, exact }));
+}
+
+/**
+ * Detección AUTOMÁTICA del modelo tras la foto/escaneo (pedido 2026-10-06):
+ *   1. Marca por el prefijo del serial (ZTEG/ZTEL/HWTC/BWH/STGU/XPON): los
+ *      candidatos se restringen a esa marca (sin prefijo conocido: todos).
+ *   2. Texto de la etiqueta contra los códigos de esos modelos. El de mayor
+ *      puntaje gana; si empata o la coincidencia es parcial queda
+ *      `ambiguous` ("detectado automáticamente — revisa si no coincide").
+ *   3. Sin coincidencia y la marca tiene UN solo modelo → ése.
+ *   4. Nada → model null: el técnico elige en el menú.
+ * Pura. method: 'ocr' | 'barcode' (texto leído) | 'brand_single' | null.
+ * `offBrand`: modelos leídos en la etiqueta que NO son de la marca del serial
+ * (pista para el técnico; nunca se eligen solos).
+ */
+function devDetectModel(rawValues, serial, catalog, source = 'ocr') {
+  const cat = catalog || [];
+  const prefix = devSerialPrefix(serial, cat);
+  const brand = devModelsForPrefix(prefix, cat);
+  const pool = brand.length ? brand : cat;
+  const matches = devMatchModelsFromText(rawValues, cat, pool);
+  const base = { prefix, brandCount: brand.length, candidates: matches.map((m) => m.model), offBrand: [] };
+  if (matches.length) {
+    const top = matches[0];
+    const tie = matches.length > 1 && matches[1].score === top.score;
+    return Object.assign(base, {
+      model: top.model,
+      method: source === 'barcode' ? 'barcode' : 'ocr',
+      ambiguous: tie || !top.exact,
+    });
+  }
+  // Salvaguarda: la etiqueta trae un código de la MISMA familia que no está en
+  // el catálogo ('HG8145V5' vs 'HG8145X6'): es otro equipo, no se adivina.
+  const { words } = devLabelCodes(rawValues);
+  const brandTokens = brand.flatMap(devModelTokens);
+  const lcp = (a, b) => { let i = 0; while (i < a.length && i < b.length && a[i] === b[i]) i++; return i; };
+  const unlisted = [...words].find((w) => w.length >= 4 && /[A-Z]/.test(w) && /\d/.test(w)
+    && brandTokens.some((c) => c !== w && lcp(c, w) >= 4)) || null;
+  base.unlistedCode = unlisted;
+  // Conflicto: la etiqueta trae un modelo de OTRA marca que la del serial
+  // (serial mal leído o etiqueta de otro equipo): tampoco se adivina.
+  if (brand.length) {
+    const inBrand = new Set(brand.map((d) => d.model));
+    base.offBrand = devMatchModelsFromText(rawValues, cat, cat).map((m) => m.model).filter((m) => !inBrand.has(m));
+  }
+  if (brand.length === 1 && !unlisted && !base.offBrand.length) {
+    return Object.assign(base, { model: brand[0].model, method: 'brand_single', ambiguous: false });
+  }
+  return Object.assign(base, { model: null, method: null, ambiguous: false });
 }
 
 /** Prefijo del serial reconocido en el catálogo (o null). */
@@ -10768,22 +10879,21 @@ function devModelsForPrefix(prefix, catalog) {
   return (catalog || []).filter((d) => (d.serialPrefixes || []).some((p) => devNormalize(p) === prefix));
 }
 
-/**
- * Lista corta: primero lo leído en la etiqueta (por puntaje), luego la marca
- * del prefijo. Vacía = no hay pista (la UI muestra todos).
- */
-function devShortlist(catalog, serial, textMatches) {
-  const byModel = new Map((catalog || []).map((d) => [d.model, d]));
-  const out = [];
-  const seen = new Set();
-  (textMatches || []).forEach((m) => {
-    const d = byModel.get(m.model);
-    if (d && !seen.has(d.model)) { seen.add(d.model); out.push(d); }
+/** Catálogo agrupado por marca para el menú: [{ brand, items }] ordenado. */
+function devCatalogByBrand(catalog) {
+  const groups = new Map();
+  (catalog || []).forEach((d) => {
+    const b = String(d.brand || 'Otras marcas').trim() || 'Otras marcas';
+    if (!groups.has(b)) groups.set(b, []);
+    groups.get(b).push(d);
   });
-  devModelsForPrefix(devSerialPrefix(serial, catalog), catalog).forEach((d) => {
-    if (!seen.has(d.model)) { seen.add(d.model); out.push(d); }
-  });
-  return out;
+  const cmp = (a, b) => a.localeCompare(b, 'es', { sensitivity: 'base' });
+  return [...groups]
+    .sort(([a], [b]) => cmp(a, b))
+    .map(([brand, items]) => ({
+      brand,
+      items: items.slice().sort((x, y) => cmp(x.displayName || x.model, y.displayName || y.model)),
+    }));
 }
 
 /**
@@ -10906,77 +11016,103 @@ function devSimBadge() {
   return ' <span class="source-badge" title="Dato simulado: la operadora todavía no expone el plan">simulado</span>';
 }
 
-function devCurrentModels(dev) {
-  const catalog = (dev && dev.catalog) || [];
-  const short = devShortlist(catalog, dev.serial, dev.textMatches);
-  const showAll = dev.showAll || short.length === 0;
-  const list = showAll ? catalog.slice() : short.slice();
-  const sel = catalog.find((d) => d.model === dev.model);
-  if (sel && !list.includes(sel)) list.unshift(sel);
-  return { list, short, showAll };
-}
-
 function devSelectedDevice(dev) {
   if (!dev || !dev.model || dev.model === DEVICE_OTHER_MODEL) return null;
   return (dev.catalog || []).find((d) => d.model === dev.model) || null;
 }
 
+/** Cómo se eligió el modelo (se muestra en el resultado; el contrato no lo recibe). */
+const DEVICE_MODEL_SOURCE_TEXT = Object.freeze({
+  ocr: 'Detectado por foto (OCR)',
+  barcode: 'Detectado en el código escaneado',
+  brand_single: 'Único modelo de la marca',
+  manual: 'Elegido manualmente',
+});
+
+function devModelSourceText(source, ambiguous) {
+  const base = DEVICE_MODEL_SOURCE_TEXT[source];
+  if (!base) return '';
+  return ambiguous ? `${base} — detectado automáticamente, revisa si no coincide` : base;
+}
+
+/** Texto de la opción del menú; el modelo detectado lleva la marca "detectado". */
+function devOptionText(d, dev) {
+  const name = d.displayName || d.model;
+  const auto = dev && dev.model === d.model && dev.modelSource && dev.modelSource !== 'manual';
+  return auto ? `${name} — detectado` : name;
+}
+
+/**
+ * Menú desplegable nativo (<select> con <optgroup> por marca). Se pinta una
+ * vez por catálogo; después solo se sincroniza (devSyncModelSelect) para no
+ * perder el foco ni cerrar el picker del técnico.
+ */
 function devModelsHtml(dev) {
   if (dev.catalogError) {
     return `<div class="detail-error" role="alert">${escapeHtml(dev.catalogError)}
       <button type="button" class="save-btn outline dev-retry-btn" data-action="dev-retry-catalog">Reintentar</button></div>`;
   }
   if (!dev.catalog) return '<div class="detail-loading" role="status">Cargando catálogo de equipos…</div>';
-  const { list, short, showAll } = devCurrentModels(dev);
-  const suggested = new Set((dev.textMatches || []).map((m) => m.model));
-  const prefix = devSerialPrefix(dev.serial, dev.catalog);
-  let hint;
-  if (!dev.catalog.length) {
-    hint = 'El catálogo de equipos homologados está vacío: indica el modelo de la etiqueta.';
-  } else if (short.length && !showAll) {
-    hint = prefix
-      ? `Modelos de la marca del serial (${escapeHtml(prefix)}…). Elige el modelo exacto de la etiqueta.`
-      : 'Modelos leídos en la etiqueta. Confirma el modelo exacto.';
-  } else if (devNormalize(dev.serial).length >= 4 && !short.length) {
-    hint = 'El serial no permite reconocer la marca: elige el modelo exacto entre todos.';
-  } else {
-    hint = 'Elige el modelo exacto que figura en la etiqueta del equipo.';
-  }
-  const option = (d) => {
-    const checked = dev.model === d.model;
-    return `
-      <label class="dev-model-option${checked ? ' is-selected' : ''}">
-        <input type="radio" name="devModel" value="${escapeHtml(d.model)}"${checked ? ' checked' : ''}>
-        <span class="dev-model-text">
-          <span class="dev-model-name">${escapeHtml(d.displayName || d.model)}</span>
-          <span class="dev-model-meta">${escapeHtml(d.brand || '—')} · ${escapeHtml(d.category || d.deviceType || '')}</span>
-          <span class="dev-model-meta">Ethernet ${escapeHtml(devFmtMbps(d.ethernetMaxMbps))} · ${d.wifiStatus === 'none' ? 'Sin WiFi' : `WiFi ${escapeHtml(devWifiText(d))}`}</span>
-        </span>
-        ${suggested.has(d.model) ? '<span class="dev-model-tag">Leído en la etiqueta</span>' : ''}
-      </label>`;
-  };
+  const opt = (d) => `<option value="${escapeHtml(d.model)}"${dev.model === d.model ? ' selected' : ''}>${escapeHtml(devOptionText(d, dev))}</option>`;
+  const groups = devCatalogByBrand(dev.catalog)
+    .map((g) => `<optgroup label="${escapeHtml(g.brand)}">${g.items.map(opt).join('')}</optgroup>`).join('');
   const other = dev.model === DEVICE_OTHER_MODEL;
   return `
-    <fieldset class="dev-models">
-      <legend class="form-label">Modelo exacto del equipo *</legend>
-      <p class="form-note dev-models-hint">${hint}</p>
-      <div class="dev-model-list">${list.map(option).join('')}
-        <label class="dev-model-option dev-model-other${other ? ' is-selected' : ''}">
-          <input type="radio" name="devModel" value="${DEVICE_OTHER_MODEL}"${other ? ' checked' : ''}>
-          <span class="dev-model-text"><span class="dev-model-name">El modelo no está en la lista</span>
-            <span class="dev-model-meta">Equipo no homologado: se registrará y quedará bloqueado</span></span>
-        </label>
-      </div>
-      ${other ? `
-      <label class="form-row dev-other-row">
-        <span class="form-label">Modelo según la etiqueta *</span>
-        <input type="text" data-field="devOtherModel" value="${escapeHtml(dev.otherModel || '')}"
-          autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="80" placeholder="Ej. ROUTER TP-LINK ARCHER C6">
-      </label>` : ''}
-      ${!showAll && short.length < dev.catalog.length ? `
-      <button type="button" class="save-btn outline dev-show-all" data-action="dev-show-all"
-        aria-label="Ver todos los modelos del catálogo (${dev.catalog.length})">Ver todos los modelos (${dev.catalog.length})</button>` : ''}
-    </fieldset>`;
+    <div class="form-row dev-model-row">
+      <label class="form-label" for="devModelSelect">Modelo del equipo *</label>
+      <select id="devModelSelect" data-field="devModel" aria-describedby="devModelHint">
+        <option value=""${dev.model ? '' : ' selected'}>Elige el modelo…</option>
+        ${groups}
+        <optgroup label="Fuera del catálogo">
+          <option value="${DEVICE_OTHER_MODEL}"${other ? ' selected' : ''}>El modelo no está en la lista (no homologado)</option>
+        </optgroup>
+      </select>
+      <p class="form-note dev-model-hint" id="devModelHint" data-slot="dev-model-hint" aria-live="polite">${devModelHintHtml(dev)}</p>
+    </div>
+    <div data-slot="dev-other">${devOtherModelHtml(dev)}</div>`;
+}
+
+function devOtherModelHtml(dev) {
+  if (dev.model !== DEVICE_OTHER_MODEL) return '';
+  return `
+    <label class="form-row dev-other-row">
+      <span class="form-label" id="devOtherLabel">Modelo según la etiqueta *</span>
+      <input type="text" data-field="devOtherModel" aria-labelledby="devOtherLabel" aria-describedby="devOtherHint"
+        value="${escapeHtml(dev.otherModel || '')}" autocomplete="off" autocapitalize="characters" spellcheck="false"
+        maxlength="80" placeholder="Ej. ROUTER TP-LINK ARCHER C6" enterkeyhint="done">
+      <span class="form-note" id="devOtherHint">Equipo no homologado: se valida al terminar de escribir y quedará bloqueado.</span>
+    </label>`;
+}
+
+/** Pista bajo el menú: cómo se eligió el modelo o qué falta. */
+function devModelHintHtml(dev) {
+  if (!dev.catalog) return '';
+  if (!dev.catalog.length) return 'El catálogo de equipos homologados está vacío: elige «El modelo no está en la lista».';
+  const det = dev.detection;
+  const sel = devSelectedDevice(dev);
+  const name = sel ? escapeHtml(sel.displayName || sel.model) : '';
+  if (sel && dev.modelSource === 'brand_single') {
+    return `Único modelo de la marca del serial (${escapeHtml((det && det.prefix) || devSerialPrefix(dev.serial, dev.catalog) || '')}…): ${name}. Si no coincide con la etiqueta, cámbialo.`;
+  }
+  if (sel && (dev.modelSource === 'ocr' || dev.modelSource === 'barcode')) {
+    const how = DEVICE_MODEL_SOURCE_TEXT[dev.modelSource];
+    if (dev.modelAmbiguous) {
+      const others = ((det && det.candidates) || []).filter((m) => m !== dev.model).slice(0, 2)
+        .map((m) => { const d = dev.catalog.find((x) => x.model === m); return escapeHtml(d ? (d.displayName || d.model) : m); });
+      return `<strong>Detectado automáticamente — revisa si no coincide.</strong> ${how}: ${name}.${others.length ? ` También podría ser: ${others.join(' o ')}.` : ''}`;
+    }
+    return `${how}: ${name}. Si no coincide con la etiqueta, cámbialo en el menú.`;
+  }
+  if (dev.model === DEVICE_OTHER_MODEL) return 'Elegido manualmente: equipo fuera del catálogo de homologados.';
+  if (sel) return 'Elegido manualmente.';
+  if (det && det.unlistedCode) {
+    return `La etiqueta dice «${escapeHtml(det.unlistedCode)}», que no está en el catálogo: elige el modelo en el menú (o «El modelo no está en la lista»).`;
+  }
+  if (det && det.offBrand && det.offBrand.length) {
+    return 'El modelo leído en la etiqueta no corresponde a la marca del serial: revisa el serial y elige el modelo en el menú.';
+  }
+  if (det) return 'No se reconoció el modelo en la etiqueta: elígelo en el menú.';
+  return 'Toma la foto de la etiqueta para detectarlo automáticamente, o elígelo en el menú.';
 }
 
 /** Tiles plan vs equipo. `outcome` = vista previa o veredicto del servidor. */
@@ -11024,48 +11160,36 @@ function devCapacityTilesHtml({ device, planMbps, planSimulated, planLoading, ou
     ${tile(wifiCls, `WiFi del equipo${device.wifiTech ? ` · ${escapeHtml(device.wifiTech)}` : ''}`, escapeHtml(devWifiText(device)), wifiSub)}</div>`;
 }
 
-const DEVICE_PREVIEW_TEXT = Object.freeze({
-  ok: { cls: 'badge-resolved', text: 'Vista previa: apto' },
-  blocked: { cls: 'badge-fail', text: 'Vista previa: no apto' },
-  unknown_plan: { cls: 'badge-pending', text: 'Vista previa: sin plan para comparar' },
-});
-
 function devPreviewOutcome(dev) {
   if (!dev.model || (dev.model === DEVICE_OTHER_MODEL && !String(dev.otherModel || '').trim())) return null;
   return evaluateDeviceCapacity(devSelectedDevice(dev), dev.plan.mbps);
 }
 
-function devCapacityHtml(dev) {
-  const outcome = devPreviewOutcome(dev);
-  const preview = outcome ? DEVICE_PREVIEW_TEXT[outcome.result] : null;
+/** Tiles con la vista previa (misma regla del servidor) mientras no hay veredicto. */
+function devPreviewTilesHtml(dev) {
   return `
     ${devCapacityTilesHtml({
       device: devSelectedDevice(dev),
       planMbps: dev.plan.mbps,
       planSimulated: dev.plan.simulated,
       planLoading: dev.plan.loading,
-      outcome,
+      outcome: devPreviewOutcome(dev),
     })}
-    ${dev.plan.error ? `<p class="form-note">${escapeHtml(dev.plan.error)}</p>` : ''}
-    ${preview ? `<p class="dev-preview"><span class="event-badge ${preview.cls}">${preview.text}</span>
-      <span class="dev-preview-note">El veredicto final lo da el servidor al validar.</span></p>` : ''}`;
+    ${dev.plan.error ? `<p class="form-note">${escapeHtml(dev.plan.error)}</p>` : ''}`;
 }
 
 function devMissingText(dev) {
   if (!dev.catalog) return 'Esperando el catálogo de equipos.';
-  if (devNormalize(dev.serial).length < 4) return 'Falta el número de serie del equipo.';
-  if (!dev.model) return 'Falta confirmar el modelo exacto.';
+  if (devNormalize(dev.serial).length < 4) return 'Falta el número de serie: toma la foto de la etiqueta o escríbelo.';
+  if (!dev.model) return 'Elige el modelo en el menú: la validación se hace sola.';
   if (dev.model === DEVICE_OTHER_MODEL && !String(dev.otherModel || '').trim()) return 'Escribe el modelo que figura en la etiqueta.';
   return '';
 }
 
-function devFormActionsHtml(dev) {
-  const missing = devMissingText(dev);
-  return `
-    ${dev.postError ? `<div class="detail-error" role="alert">${escapeHtml(dev.postError)}</div>` : ''}
-    <button type="button" class="save-btn" data-action="dev-validate"${missing || dev.posting ? ' disabled' : ''}
-      ${dev.posting ? 'aria-busy="true"' : ''} aria-describedby="devValidateHint">${dev.posting ? 'Validando…' : (dev.postError ? 'Reintentar validación' : 'Validar equipo')}</button>
-    <p class="form-note" id="devValidateHint">${escapeHtml(missing || 'Se registra la validación (también si el equipo resulta no apto).')}</p>`;
+/** Clave serial+modelo de lo que hay en pantalla (null si falta algo). */
+function devValidationKey(dev) {
+  const b = buildDeviceValidationPayload(dev);
+  return b ? `${b.serial}|${b.model.toUpperCase()}` : null;
 }
 
 const DEVICE_VERDICT = Object.freeze({
@@ -11074,19 +11198,29 @@ const DEVICE_VERDICT = Object.freeze({
   blocked: { cls: 'is-blocked', title: 'Equipo bloqueado: no soporta el plan contratado' },
 });
 
-/** Tarjeta del veredicto del servidor (ok / unknown_plan / blocked). */
-function devVerdictCardHtml(validation) {
+/**
+ * Tarjeta del veredicto del servidor (ok / unknown_plan / blocked).
+ * `how` = { modelSource, modelAmbiguous } cuando se conoce (validación hecha
+ * en este teléfono); del historial del servidor no viene.
+ * `live`: dentro de la región aria-live del formulario solo el bloqueo lleva
+ * role=alert (los demás los anuncia la región).
+ */
+function devVerdictCardHtml(validation, how = null, live = false) {
   const v = validation || {};
   const meta = DEVICE_VERDICT[v.result];
   if (!meta) return '';
   const serial = v.serial ? `Serie ${escapeHtml(v.serial)}` : '';
   const model = v.device ? escapeHtml(v.device.displayName || v.device.model) : (v.model ? escapeHtml(v.model) : '');
-  const role = v.result === 'blocked' ? 'alert' : 'status';
+  let roleAttr;
+  if (v.result === 'blocked') roleAttr = ' role="alert"';
+  else roleAttr = live ? '' : ' role="status"';
+  const source = how ? devModelSourceText(how.modelSource, how.modelAmbiguous) : '';
   return `
-    <div class="dev-verdict ${meta.cls}" role="${role}">
+    <div class="dev-verdict ${meta.cls}"${roleAttr}>
       <h3 class="dev-verdict-title" tabindex="-1">${meta.title}</h3>
       <p class="dev-verdict-msg">${escapeHtml(v.message || WifixAPI.deviceValidationMessage(v))}</p>
       ${serial || model ? `<p class="dev-verdict-device">${[model, serial].filter(Boolean).join(' · ')}</p>` : ''}
+      ${source ? `<p class="dev-verdict-source"><span class="dev-source-tag${how.modelAmbiguous ? ' is-review' : ''}">Modelo: ${escapeHtml(source)}</span></p>` : ''}
       ${v.createdAt ? `<p class="dev-verdict-when">Registrado ${dateTimeHtml(v.createdAt)}</p>` : ''}
     </div>
     ${devCapacityTilesHtml({
@@ -11097,24 +11231,52 @@ function devVerdictCardHtml(validation) {
     })}`;
 }
 
+/**
+ * Paso 3 del formulario: qué falta, "Validando…", error con reintento o el
+ * veredicto del servidor de la combinación serial+modelo que está en pantalla.
+ */
+function devResultHtml(dev) {
+  if (!dev.catalog) return devPreviewTilesHtml(dev);
+  const missing = devMissingText(dev);
+  if (missing) {
+    return `${devPreviewTilesHtml(dev)}<p class="form-note dev-missing">${escapeHtml(missing)}</p>`;
+  }
+  const key = devValidationKey(dev);
+  if (dev.postError && key === dev.failedKey && !dev.posting) {
+    return `
+      <div class="detail-error" role="alert">${escapeHtml(dev.postError)}</div>
+      <button type="button" class="save-btn" data-action="dev-validate">Reintentar validación</button>
+      ${devPreviewTilesHtml(dev)}`;
+  }
+  if (dev.posting || key !== dev.validatedKey || !dev.lastValidation) {
+    return `
+      <p class="dev-validating" aria-busy="true"><span class="dev-validating-dot" aria-hidden="true"></span>Validando el equipo contra el plan del cliente…</p>
+      ${devPreviewTilesHtml(dev)}`;
+  }
+  const v = dev.lastValidation;
+  return `
+    ${devVerdictCardHtml(v, dev.validatedHow, true)}
+    ${v.result === 'blocked' ? '<p class="form-note">No se puede completar el módulo ni guardar registros de la visita con este equipo. Escanea otro equipo, o corrige el modelo en el menú si no coincide con la etiqueta.</p>' : ''}`;
+}
+
 function devScannerHtml(nativeAvailable) {
   const scanIcon = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3m0 4h4v-4m-7 4h3"/></svg>';
   const camIcon = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>';
   return `
     <div class="serial-detect-block">
       <p class="serial-browser-note">${nativeAvailable
-        ? 'Escanea el código de la etiqueta o toma una foto (la foto también lee el modelo)'
+        ? 'Toma una foto de la etiqueta: lee el serial y el modelo y valida solo. El código de barras solo lee el serial.'
         : 'Escaneo disponible solo en la app: toma una foto o escribe el serial'}</p>
       <div class="serial-actions">
-        ${nativeAvailable ? `<button type="button" class="serial-action-btn" data-action="dev-scan">${scanIcon} Escanear código</button>` : ''}
         <button type="button" class="serial-action-btn" data-action="dev-photo">${camIcon} Tomar foto</button>
+        ${nativeAvailable ? `<button type="button" class="serial-action-btn" data-action="dev-scan">${scanIcon} Escanear código</button>` : ''}
       </div>
       <input type="file" accept="image/*" capture="environment" data-slot="dev-file" hidden aria-hidden="true" tabindex="-1">
       <div class="serial-result-row" data-slot="dev-serial-badge" aria-live="polite"></div>
       <label class="form-row">
         <span class="form-label" id="devSerialLabel">Número de serie *</span>
         <input type="text" data-field="devSerial" aria-labelledby="devSerialLabel" autocomplete="off"
-          autocapitalize="characters" spellcheck="false" maxlength="40" placeholder="Ej. ZTEGD0BB8294">
+          autocapitalize="characters" spellcheck="false" maxlength="40" placeholder="Ej. ZTEGD0BB8294" enterkeyhint="done">
       </label>
     </div>`;
 }
@@ -11123,13 +11285,17 @@ function devSerialBadgeHtml(dev) {
   const s = dev.serialStatus;
   if (!s) return '';
   const cls = s.kind === 'ok' ? 'ok' : 'warn';
-  return `<span class="serial-confidence-badge ${cls}">${escapeHtml(s.text)}</span>`;
+  const demo = dev.demoLabel ? `<span class="dev-demo-note">Demo: etiqueta simulada «${escapeHtml(dev.demoLabel)}»</span>` : '';
+  return `<span class="serial-confidence-badge ${cls}">${escapeHtml(s.text)}</span>${demo}`;
 }
 
-/** Modo de la pantalla según el estado guardado y el borrador. */
+/**
+ * Modo de la pantalla: 'summary' (veredicto guardado al reabrir, sin borrador
+ * con validación propia) o 'form' (captura + menú + resultado en vivo).
+ */
 function devMode(dev) {
   const st = devStateFor(dev.account, dev.category);
-  if (st && !dev.rescanning) return st.status === 'blocked' ? 'blocked' : 'done';
+  if (st && !dev.rescanning && !dev.lastValidation) return st.status === 'blocked' ? 'blocked' : 'done';
   return 'form';
 }
 
@@ -11140,23 +11306,22 @@ function devScreenHtml(dev) {
     const again = mode === 'blocked' ? 'Escanear otro equipo' : 'Validar otro equipo';
     return `
       <div class="tool-form dev-module" data-form="device-validation">
-        <div data-slot="dev-verdict" aria-live="polite">${devVerdictCardHtml(st.validation)}</div>
+        <div data-slot="dev-verdict" aria-live="polite">${devVerdictCardHtml(st.validation, st.how || null)}</div>
         ${mode === 'blocked' ? '<p class="form-note">No se puede completar el módulo ni guardar registros de la visita con este equipo.</p>' : ''}
         <button type="button" class="save-btn${mode === 'done' ? ' outline' : ''}" data-action="dev-rescan">${again}</button>
       </div>`;
   }
-  const blockedBefore = st && st.status === 'blocked';
+  const blockedBefore = st && st.status === 'blocked' && !dev.lastValidation;
   return `
     <div class="tool-form dev-module" data-form="device-validation">
       ${blockedBefore ? `<div class="dev-still-blocked" role="status">El equipo anterior${st.validation && st.validation.serial ? ` (${escapeHtml(st.validation.serial)})` : ''} quedó bloqueado. El flujo sigue bloqueado hasta validar un equipo apto.</div>` : ''}
-      <p class="form-note dev-intro">Escanea la etiqueta del equipo que vas a instalar (ONT, ONU, router o powerline), confirma el modelo y valida que soporte el plan del cliente.</p>
+      <p class="form-note dev-intro">Toma una foto de la etiqueta del equipo que vas a instalar (ONT, ONU, router o powerline): se detecta el modelo y se valida automáticamente contra el plan del cliente.</p>
       <h3 class="dev-step">1. Etiqueta del equipo</h3>
       ${devScannerHtml(serialScannerAvailable())}
       <h3 class="dev-step">2. Modelo</h3>
       <div data-slot="dev-models">${devModelsHtml(dev)}</div>
-      <h3 class="dev-step">3. Capacidad vs plan</h3>
-      <div data-slot="dev-capacity">${devCapacityHtml(dev)}</div>
-      <div data-slot="dev-actions">${devFormActionsHtml(dev)}</div>
+      <h3 class="dev-step">3. Validación vs plan</h3>
+      <div data-slot="dev-result" aria-live="polite">${devResultHtml(dev)}</div>
     </div>`;
 }
 
@@ -11166,15 +11331,36 @@ function devSetSlot(name, html) {
 }
 
 /** Repinta solo las partes dinámicas del formulario (no el input del serial). */
-function devRenderSlots(names = ['dev-models', 'dev-capacity', 'dev-actions', 'dev-serial-badge']) {
+function devRenderSlots(names = ['dev-models', 'dev-result', 'dev-serial-badge']) {
   if (!_dev || !equipoBody) return;
   const html = {
     'dev-models': devModelsHtml,
-    'dev-capacity': devCapacityHtml,
-    'dev-actions': devFormActionsHtml,
+    'dev-model-hint': devModelHintHtml,
+    'dev-other': devOtherModelHtml,
+    'dev-result': devResultHtml,
     'dev-serial-badge': devSerialBadgeHtml,
   };
   names.forEach((n) => devSetSlot(n, html[n](_dev)));
+}
+
+/**
+ * Lleva el menú al modelo del borrador SIN repintarlo (no cierra el picker ni
+ * mueve el foco) y actualiza la marca "— detectado", la pista y "Otro".
+ */
+function devSyncModelSelect() {
+  if (!_dev || !equipoBody) return;
+  const sel = equipoBody.querySelector('#devModelSelect');
+  if (!sel || !sel.options) {
+    devRenderSlots(['dev-models']);
+    return;
+  }
+  const byModel = new Map((_dev.catalog || []).map((d) => [d.model, d]));
+  Array.from(sel.options).forEach((o) => {
+    const d = byModel.get(o.value);
+    if (d) o.textContent = devOptionText(d, _dev);
+  });
+  sel.value = _dev.model || '';
+  devRenderSlots(['dev-model-hint', 'dev-other']);
 }
 
 function devRender(focusSel) {
@@ -11202,21 +11388,70 @@ function devNewDraft(account, category, prev) {
     serialSource: null,
     detectedSerial: '',
     serialStatus: null,
-    textMatches: [],
+    demoLabel: null,
+    /** Todo lo leído del equipo actual (foto + código), para re-detectar. */
+    labelValues: [],
+    labelSource: null,
+    /** Último resultado de devDetectModel. */
+    detection: null,
     model: '',
+    /** 'ocr' | 'barcode' | 'brand_single' | 'manual' | null */
+    modelSource: null,
+    modelAmbiguous: false,
     otherModel: '',
-    showAll: false,
     rescanning: false,
     posting: false,
     postError: null,
+    failedKey: null,
+    /** Veredicto del servidor de la última validación de ESTE borrador. */
+    lastValidation: null,
+    validatedKey: null,
+    validatedHow: null,
+    revalidate: false,
   };
 }
 
-/** Aplica lo leído por el escáner: serial + modelo sugerido. Pura sobre `dev`. */
+function devSetAutoModel(dev, det) {
+  dev.model = det.model;
+  dev.modelSource = det.method;
+  dev.modelAmbiguous = !!det.ambiguous;
+}
+
+function devClearModel(dev) {
+  dev.model = '';
+  dev.modelSource = null;
+  dev.modelAmbiguous = false;
+}
+
+/**
+ * Aplica la detección al borrador respetando lo que eligió el técnico:
+ *   - elegido a mano y coherente con la marca del serial → se respeta
+ *     (salvo equipo nuevo);
+ *   - detección automática → se usa;
+ *   - sin detección: equipo nuevo o modelo de otra marca → se limpia (pide
+ *     elegir); mismo equipo y coherente → se mantiene.
+ */
+function devResolveModel(dev, det, newDevice) {
+  const brand = devModelsForPrefix(det.prefix, dev.catalog || []);
+  const consistent = dev.model === DEVICE_OTHER_MODEL || !brand.length || brand.some((d) => d.model === dev.model);
+  if (!newDevice && dev.modelSource === 'manual' && dev.model && consistent) return;
+  if (det.model) {
+    devSetAutoModel(dev, det);
+  } else if (newDevice || !consistent || (det.unlistedCode && dev.modelSource !== 'manual')) {
+    devClearModel(dev);
+  }
+}
+
+/**
+ * Aplica lo leído por el escáner (foto/OCR o código de barras): serial +
+ * detección automática del modelo. Pura sobre `dev` (sin DOM ni red).
+ * Si el serial cambió es OTRO equipo: lo leído antes no cuenta.
+ */
 function devApplyCapture(dev, rawValues, source) {
-  const picked = devPickSerial(rawValues, dev.catalog || []);
-  const matches = devMatchModelsFromText(rawValues, dev.catalog || []);
-  dev.textMatches = matches;
+  const raw = (Array.isArray(rawValues) ? rawValues : []).map((v) => String(v ?? '')).filter(Boolean);
+  const picked = devPickSerial(raw, dev.catalog || []);
+  const prevSerial = devNormalize(dev.serial);
+  const newDevice = !!(picked.serial && prevSerial && picked.serial !== prevSerial);
   if (picked.serial) {
     dev.serial = picked.serial;
     dev.detectedSerial = picked.serial;
@@ -11227,14 +11462,28 @@ function devApplyCapture(dev, rawValues, source) {
   } else {
     dev.serialStatus = { kind: 'warn', text: source === 'barcode' ? '⚠ No se reconoció un serial en el código' : '⚠ No se encontró el serial en la foto: escríbelo a mano' };
   }
-  const pre = devPreselectModel(matches);
-  if (pre) {
-    dev.model = pre;
-  } else if (dev.model && dev.model !== DEVICE_OTHER_MODEL) {
-    // El modelo elegido antes ya no es de la marca del serial nuevo: se pide de nuevo.
-    const still = devShortlist(dev.catalog || [], dev.serial, matches).some((d) => d.model === dev.model);
-    if (!still && devSerialPrefix(dev.serial, dev.catalog || [])) dev.model = '';
-  }
+  dev.labelValues = newDevice ? raw : (dev.labelValues || []).concat(raw);
+  // El texto de la foto manda sobre el del código para el rótulo del método.
+  if (source === 'ocr' || newDevice || !dev.labelSource) dev.labelSource = source;
+  const det = devDetectModel(dev.labelValues, dev.serial, dev.catalog || [], dev.labelSource);
+  dev.detection = det;
+  devResolveModel(dev, det, newDevice);
+  return dev;
+}
+
+/** El técnico corrigió el serial a mano: re-detecta con lo ya leído (o solo la marca). */
+function devApplySerialEdit(dev) {
+  const det = devDetectModel(dev.labelValues || [], dev.serial, dev.catalog || [], dev.labelSource || 'ocr');
+  dev.detection = (dev.labelValues || []).length || det.model ? det : null;
+  devResolveModel(dev, det, false);
+  return dev;
+}
+
+/** El técnico eligió en el menú. */
+function devApplyManualModel(dev, value) {
+  dev.model = value || '';
+  dev.modelSource = dev.model ? 'manual' : null;
+  dev.modelAmbiguous = false;
   return dev;
 }
 
@@ -11267,26 +11516,87 @@ async function devLoadCatalogInto(dev, force) {
 
 /**
  * POST de la validación + aplicación del veredicto. Sin DOM (lo usa el smoke).
+ * Mismo contrato de siempre (serial, model, category, serialSource; taskId lo
+ * pone api.js). Cómo se eligió el modelo NO viaja: el schema del backend no
+ * tiene campo para eso; queda en la UI y en el estado local.
  * Devuelve la validación del servidor, o null si falló (dev.postError).
  */
 async function devSubmitValidation(dev) {
   const body = buildDeviceValidationPayload(dev);
   if (!body || dev.posting) return null;
+  const key = `${body.serial}|${body.model.toUpperCase()}`;
+  const how = { modelSource: dev.modelSource, modelAmbiguous: !!dev.modelAmbiguous };
   dev.posting = true;
   dev.postError = null;
+  dev.failedKey = null;
   try {
     const v = await WifixAPI.createDeviceValidation(dev.account, body);
     if (!v || !devStatusFromResult(v.result)) throw new Error('Respuesta inesperada del servidor.');
-    devApplyValidation(dev.account, dev.category, v);
+    devApplyValidation(dev.account, dev.category, v, how);
+    dev.lastValidation = v;
+    dev.validatedKey = key;
+    dev.validatedHow = how;
     dev.rescanning = false;
     return v;
   } catch (err) {
     console.error('[Wifix] validación de equipo:', err);
     dev.postError = `No se pudo validar el equipo: ${(err && err.message) || 'error desconocido'}. El módulo sigue sin completar.`;
+    dev.failedKey = key;
     return null;
   } finally {
     dev.posting = false;
   }
+}
+
+/**
+ * Validación AUTOMÁTICA (sin botón): se dispara cuando hay serial + modelo.
+ * Cada combinación serial+modelo nueva se registra una vez (queda como alerta
+ * igual que antes); si el técnico cambia el modelo mientras hay un POST en
+ * curso, al terminar se valida la última elección. Una combinación que falló
+ * por red no se reintenta sola (botón "Reintentar validación").
+ * `onChange` repinta (se llama al empezar y al terminar cada POST).
+ */
+async function devAutoValidate(dev, onChange) {
+  if (dev.posting) {
+    dev.revalidate = true;
+    return null;
+  }
+  let last = null;
+  for (let i = 0; i < 5; i++) {
+    dev.revalidate = false;
+    const key = devValidationKey(dev);
+    if (!key || key === dev.validatedKey || key === dev.failedKey) break;
+    const pending = devSubmitValidation(dev);
+    if (onChange) onChange();
+    last = await pending;
+    if (onChange) onChange();
+    if (!dev.revalidate) break;
+  }
+  return last;
+}
+
+/** Repinto del resultado si el borrador sigue en pantalla. */
+function devRepaintResult(dev) {
+  if (_dev !== dev) return;
+  devRenderSlots(['dev-result']);
+  devRefreshIndicators();
+}
+
+/**
+ * Punto ÚNICO de entrada de lo que devuelve el escáner nativo (ML Kit barcode
+ * u OCR de la foto): aplica serial + modelo detectado, sincroniza la pantalla
+ * y valida sola. El recorrido headless la llama con texto simulado.
+ */
+async function devProcessCapture(dev, rawValues, source, demoLabel = null) {
+  dev.demoLabel = demoLabel;
+  devApplyCapture(dev, rawValues, source);
+  if (_dev === dev && equipoBody) {
+    const input = equipoBody.querySelector('[data-field="devSerial"]');
+    if (input) input.value = dev.serial;
+    devRenderSlots(['dev-serial-badge', 'dev-result']);
+    devSyncModelSelect();
+  }
+  return devAutoValidate(dev, () => devRepaintResult(dev));
 }
 
 function devStartRescan() {
@@ -11294,7 +11604,7 @@ function devStartRescan() {
   const next = devNewDraft(_dev.account, _dev.category, _dev);
   next.rescanning = true;
   _dev = next;
-  devRender(serialScannerAvailable() ? '[data-action="dev-scan"]' : '[data-field="devSerial"]');
+  devRender('[data-action="dev-photo"]');
 }
 
 async function devCaptureBarcode(btn) {
@@ -11302,12 +11612,12 @@ async function devCaptureBarcode(btn) {
   const dev = _dev;
   btn.disabled = true;
   btn.setAttribute('aria-busy', 'true');
+  let raw = null;
   try {
-    const raw = await window.WifixNative.serialScanner.scanBarcodes();
+    raw = await window.WifixNative.serialScanner.scanBarcodes();
     if (!raw || !raw.length) {
       dev.serialStatus = { kind: 'warn', text: '⚠ No se detectó ningún código. Prueba con "Tomar foto" o escribe el serial.' };
-    } else {
-      devApplyCapture(dev, raw, 'barcode');
+      raw = null;
     }
   } catch (err) {
     console.error('[Wifix] equipo scanBarcodes:', err);
@@ -11316,14 +11626,21 @@ async function devCaptureBarcode(btn) {
     btn.disabled = false;
     btn.removeAttribute('aria-busy');
   }
-  if (_dev !== dev) return;
-  const input = equipoBody.querySelector('[data-field="devSerial"]');
-  if (input) input.value = dev.serial;
-  devRenderSlots();
+  if (raw) await devProcessCapture(dev, raw, 'barcode');
+  else if (_dev === dev) devRenderSlots(['dev-serial-badge']);
 }
 
-async function devOcrLines(base64) {
-  return (await window.WifixNative.serialScanner.ocrFromImageBase64(base64)) || [];
+/**
+ * Líneas de OCR de la foto. Sin escáner nativo y en modo demo (mock), usa
+ * una etiqueta simulada del mock de api.js para poder mostrar el flujo en el
+ * navegador; con la API real en el navegador no hay OCR (como siempre).
+ */
+async function devOcrLines(base64, file) {
+  if (!serialScannerAvailable() && !WifixAPI.useRealApi && typeof WifixAPI.mockLabelScan === 'function') {
+    const sample = WifixAPI.mockLabelScan(file && file.name);
+    return { lines: sample.lines.slice(), demoLabel: sample.title };
+  }
+  return { lines: (await window.WifixNative.serialScanner.ocrFromImageBase64(base64)) || [], demoLabel: null };
 }
 
 async function devCapturePhoto(btn, file) {
@@ -11331,6 +11648,8 @@ async function devCapturePhoto(btn, file) {
   const dev = _dev;
   btn.disabled = true;
   btn.setAttribute('aria-busy', 'true');
+  let lines = null;
+  let demoLabel = null;
   try {
     let base64 = null;
     if (file) {
@@ -11344,11 +11663,12 @@ async function devCapturePhoto(btn, file) {
       }
     }
     if (base64) {
-      const lines = await devOcrLines(base64);
+      const ocr = await devOcrLines(base64, file);
+      lines = ocr.lines;
+      demoLabel = ocr.demoLabel;
       if (!lines.length) {
         dev.serialStatus = { kind: 'warn', text: '⚠ No se encontró texto en la foto: acerca la cámara a la etiqueta' };
-      } else {
-        devApplyCapture(dev, lines, 'ocr');
+        lines = null;
       }
     }
   } catch (err) {
@@ -11358,10 +11678,19 @@ async function devCapturePhoto(btn, file) {
     btn.disabled = false;
     btn.removeAttribute('aria-busy');
   }
-  if (_dev !== dev) return;
-  const input = equipoBody.querySelector('[data-field="devSerial"]');
-  if (input) input.value = dev.serial;
-  devRenderSlots();
+  if (lines) await devProcessCapture(dev, lines, 'ocr', demoLabel);
+  else if (_dev === dev) devRenderSlots(['dev-serial-badge']);
+}
+
+/** Serial confirmado a mano (blur/Enter): re-detecta y valida. */
+function devCommitSerial(dev) {
+  const s = devNormalize(dev.serial);
+  if (s === dev.committedSerial) return;
+  dev.committedSerial = s;
+  devApplySerialEdit(dev);
+  devSyncModelSelect();
+  devAutoValidate(dev, () => devRepaintResult(dev));
+  devRenderSlots(['dev-result']);
 }
 
 /** Delegación de eventos: se registra una sola vez sobre el contenedor. */
@@ -11377,27 +11706,48 @@ function devWireOnce() {
       if (_dev.serial !== _dev.detectedSerial) {
         _dev.serialSource = 'manual';
         _dev.serialStatus = null;
+        _dev.demoLabel = null;
       }
-      devRenderSlots();
+      devRenderSlots(['dev-result', 'dev-serial-badge']);
     } else if (t.matches('[data-field="devOtherModel"]')) {
-      // Sin repintar la lista de modelos: el input vive ahí y perdería el foco.
+      // Sin repintar el input (perdería el foco); valida al confirmar (change).
       _dev.otherModel = t.value;
-      devRenderSlots(['dev-capacity', 'dev-actions']);
+      devRenderSlots(['dev-result']);
+    }
+  });
+
+  equipoBody.addEventListener('keydown', (ev) => {
+    if (!_dev || ev.key !== 'Enter') return;
+    const t = ev.target;
+    if (t.matches('[data-field="devSerial"]')) {
+      ev.preventDefault();
+      devCommitSerial(_dev);
+    } else if (t.matches('[data-field="devOtherModel"]')) {
+      ev.preventDefault();
+      devAutoValidate(_dev, () => devRepaintResult(_dev));
     }
   });
 
   equipoBody.addEventListener('change', (ev) => {
     if (!_dev) return;
     const t = ev.target;
-    if (t.matches('input[name="devModel"]')) {
-      _dev.model = t.value;
-      devRenderSlots();
-      const sel = equipoBody.querySelector(`input[name="devModel"][value="${CSS.escape(t.value)}"]`);
-      if (sel) sel.focus();
+    if (t.matches('[data-field="devModel"]')) {
+      const dev = _dev;
+      devApplyManualModel(dev, t.value);
+      // Sin repintar el <select>: el foco se queda en el menú.
+      devSyncModelSelect();
       if (t.value === DEVICE_OTHER_MODEL) {
+        devRenderSlots(['dev-result']);
         const other = equipoBody.querySelector('[data-field="devOtherModel"]');
         if (other) other.focus();
+        if (!String(dev.otherModel || '').trim()) return;
       }
+      devAutoValidate(dev, () => devRepaintResult(dev));
+      devRenderSlots(['dev-result']);
+    } else if (t.matches('[data-field="devSerial"]')) {
+      devCommitSerial(_dev);
+    } else if (t.matches('[data-field="devOtherModel"]')) {
+      devAutoValidate(_dev, () => devRepaintResult(_dev));
     } else if (t.matches('[data-slot="dev-file"]')) {
       const file = t.files && t.files[0];
       const btn = equipoBody.querySelector('[data-action="dev-photo"]');
@@ -11420,23 +11770,19 @@ function devWireOnce() {
         const fileInput = equipoBody.querySelector('[data-slot="dev-file"]');
         if (fileInput) fileInput.click();
       }
-    } else if (action === 'dev-show-all') {
-      _dev.showAll = true;
-      devRenderSlots();
-      const first = equipoBody.querySelector('input[name="devModel"]');
-      if (first) first.focus();
     } else if (action === 'dev-retry-catalog') {
       const dev = _dev;
       await devLoadCatalogInto(dev, true);
       if (_dev === dev) devRenderSlots();
     } else if (action === 'dev-validate') {
+      // Solo aparece tras un error de red: reintenta la misma combinación.
       const dev = _dev;
-      const pending = devSubmitValidation(dev);
-      devRenderSlots();
-      const v = await pending;
-      if (_dev !== dev) return;
-      if (v) devRender('.dev-verdict-title');
-      else devRenderSlots();
+      dev.failedKey = null;
+      await devAutoValidate(dev, () => devRepaintResult(dev));
+      if (_dev === dev && dev.lastValidation && !dev.postError) {
+        const title = equipoBody.querySelector('.dev-verdict-title');
+        if (title) title.focus();
+      }
     } else if (action === 'dev-rescan') {
       devStartRescan();
     }
