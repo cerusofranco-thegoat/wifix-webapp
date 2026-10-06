@@ -269,6 +269,212 @@ console.log('\n== ISP Monitor por tecnología (GPON / HFC / no identificada) =='
     && ctx._ispRangeState(null, { min: 0 }) === 'unknown');
 }
 
+console.log('\n== ISP Monitor por cuenta (GPON / HFC, plan en bits, red de acceso) ==');
+{
+  const A = WifixAPI;
+  const noDocsis = (h) => !/DOCSIS|dBmV|SNR|[Cc]odewords|Canales (down|up)stream/.test(h);
+  const noOptics = (h) => !/Óptica|Potencia Rx OLT|ONU Info|dBm\b/.test(h);
+  const noNodo = (h) => !/\b[Nn]odo\b/.test(h);
+
+  // Panel: cuenta prellenada y serial como opción secundaria.
+  const panel = ctx.renderIspPanel('35070291');
+  check('panel: input de cuenta prellenado con la cuenta de la sesión',
+    panel.includes('data-field="isp-account"') && /data-field="isp-account"[\s\S]*?value="35070291"/.test(panel)
+    && panel.includes('<label class="form-row" for="ispAccountInput">'));
+  check('panel: "Buscar por serial" plegado y conserva el flujo por serial',
+    /<details class="isp-by-serial"[^>]*>\s*<summary>Buscar por serial<\/summary>/.test(panel)
+    && panel.indexOf('data-field="isp-account"') < panel.indexOf('Buscar por serial')
+    && panel.includes('data-field="terminalId"') && balanced(panel) === null, balanced(panel));
+  check('cuenta: solo dígitos (4-12), con espacios/puntos/guiones limpiados',
+    ctx._ispNormalizeAccount(' 35.070-291 ') === '35070291' && ctx._ispNormalizeAccount('abc') === null
+    && ctx._ispNormalizeAccount('12') === null);
+
+  // Tecnología compartida con la orden mock.
+  const orden = await A.getOrderContext('ORDER/463158/2026');
+  const monOrden = await A.getIspMonitor(orden.client.accountNumber);
+  check('tecnología mock compartida: la orden y el monitor de la misma cuenta coinciden',
+    orden.order.technology === monOrden.technology && A.mockAccountTechnology(orden.client.accountNumber) === monOrden.technology,
+    `${orden.order.technology} vs ${monOrden.technology}`);
+  const modem = orden.equipment[0];
+  check('equipo de la orden = equipo que ve ISP Monitor (serial GPON o MAC HFC)',
+    (monOrden.technology === 'GPON' ? modem.serial : modem.mac) === monOrden.searchRow.serial
+    && /^(SERVICE CALL\+)(GPON|HFC)$/.test(modem.type) && modem.type.endsWith(monOrden.technology));
+  let gpon = 0;
+  for (let i = 0; i < 1000; i++) if (A.mockAccountTechnology(String(70000000 + i * 7919)) === 'GPON') gpon++;
+  check('tecnología mock ~70 % GPON / 30 % HFC', gpon > 620 && gpon < 780, String(gpon));
+
+  // Caso 1: GPON working, sin falla.
+  const m1 = await A.getIspMonitor('35070291');
+  const n1 = await A.getIspAccessNetwork('35070291');
+  const prof = await A.getClientProfile('35070291');
+  check('mock GPON: shape del contrato (searchRow, plan, device, docsis null)',
+    m1.simulated === true && m1.source === 'ISP_MONITOR' && m1.technology === 'GPON' && m1.docsis === null
+    && m1.device && m1.device.optics && m1.device.state === 'working'
+    && ['serial', 'city', 'accessNetwork', 'profile', 'accountNumber', 'accountStatus', 'clientName'].every((k) => k in m1.searchRow));
+  check('plan en bits = plan simulado de client-profile, simétrico',
+    m1.plan.downloadMbps === prof.contractedDownloadMbps && m1.plan.uploadMbps === prof.contractedUploadMbps
+    && m1.plan.profile === `RES-${prof.contractedDownloadMbps * 1000}/${prof.contractedDownloadMbps * 1000}-I`
+    && m1.plan.downloadKbps === m1.plan.uploadKbps && m1.searchRow.profile === m1.plan.profile);
+  const p600 = await A.getIspMonitor('40000600');
+  check('plan 600 Mbps → RES-600000/600000-I', p600.plan.profile === 'RES-600000/600000-I');
+  const h1 = ctx.renderIspAccountResult(m1, { data: n1 });
+  check('GPON: HTML balanceado', balanced(h1) === null, balanced(h1));
+  check('GPON: fila de resultado (serial, ciudad, red de acceso, profile, cuenta, estado A/S/T, cliente)',
+    ['Serial', 'Ciudad', 'Red de acceso', 'Profile', 'Cuenta', 'Estado', 'Cliente'].every((l) => h1.includes(`<dt>${l}</dt>`))
+    && h1.includes(m1.searchRow.serial) && h1.includes('<strong>A</strong> Activo'));
+  check('GPON: plan en bits "200.000 kbps ↓ / 200.000 kbps ↑ (200 Mbps simétrico)"',
+    h1.includes('RES-200000/200000-I') && h1.includes('200.000 kbps') && h1.includes('↓') && h1.includes('↑')
+    && h1.includes('(200 Mbps simétrico)'));
+  check('GPON: ONU Info con Equipo, Estado, Versión, Software, Puerto+headend, ID, En línea, Fuera de línea, Causa, Speed Mode',
+    h1.includes('ONU Info') && ['Equipo', 'Versión', 'Software', 'Puerto', 'ID', 'En línea', 'Fuera de línea', 'Causa', 'Speed Mode']
+      .every((l) => h1.includes(`<dt>${l}</dt>`)) && h1.includes(m1.device.headend) && h1.includes(m1.device.onuId));
+  check('GPON: Información del cliente (cuenta, NAP, cliente, dirección) y Configuración (tipo, admin, profile, service ports, WAN IP, CPEs)',
+    h1.includes('Información del cliente') && h1.includes('<dt>NAP</dt>') && h1.includes('<dt>Dirección</dt>')
+    && h1.includes('Configuración') && h1.includes('<dt>Tipo</dt>') && h1.includes('<dt>Admin</dt>')
+    && h1.includes('Service ports') && h1.includes('INT Residencial') && h1.includes('<dt>WAN IP</dt>') && h1.includes('CPEs')
+    && h1.includes(m1.device.cpes[0].ip));
+  check('GPON: Óptica con semáforo verde (flags *Ok) y unidades',
+    h1.includes('Óptica') && h1.includes('Potencia Rx OLT') && h1.includes('Potencia Tx') && h1.includes('Potencia Rx')
+    && h1.includes('<dt>Voltaje</dt>') && h1.includes('<dt>Temperatura</dt>') && h1.includes('isp-light ok') && !h1.includes('isp-light bad')
+    && h1.includes('Rango OK: -27 a -8 dBm'));
+  check('GPON: estado working en verde con texto', h1.includes('isp-chip ok') && h1.includes('working'));
+  check('GPON: NADA DOCSIS', noDocsis(h1));
+  check('GPON: badge "Simulado" visible', h1.includes('class="sim-badge"') && h1.includes('>Simulado<'));
+  check('GPON: "red de acceso", nunca "nodo"', noNodo(h1));
+  check('GPON: sin "undefined"/"NaN"', !/undefined|NaN/.test(h1));
+  check('diagnóstico NONE: "Sin falla" con mensaje',
+    n1.diagnosis.scope === 'NONE' && h1.includes('isp-diagnosis ok') && h1.includes('Sin falla') && h1.includes(ctx.escapeHtml(n1.diagnosis.message)));
+  // GPON aunque el backend mande docsis por error: no se muestra.
+  const hG = ctx.renderIspAccountResult(Object.assign({}, m1, { docsis: { downstream: [{ channel: 1, frequencyMHz: 555, powerDbmv: 1, snrDb: 38 }], upstream: [], codewords: { corrected: 1, uncorrected: 0 }, ok: true } }), { loading: true });
+  check('GPON con docsis colado del backend: se ignora', noDocsis(hG));
+
+  // Red de acceso.
+  check('access-network mock: shape, 4-7 NAPs, 2-8 equipos, NAP del cliente primero, totales cuadran',
+    n1.simulated === true && n1.naps[0].nap === n1.clientNap && n1.naps.length >= 4 && n1.naps.length <= 7
+    && n1.naps.every((x) => x.devices.length >= 2 && x.devices.length <= 8 && x.summary.total === x.devices.length)
+    && n1.totals.devices === n1.naps.reduce((a, x) => a + x.devices.length, 0)
+    && n1.naps[0].devices.filter((d) => d.isClient).length === 1);
+  const al = ctx.renderIspAccessNetwork(n1);
+  check('lista por NAP: HTML balanceado', balanced(al) === null, balanced(al));
+  const firstNap = al.indexOf('<details class="isp-nap');
+  check('lista por NAP: la del cliente primero, resaltada y abierta; el resto colapsadas',
+    al.slice(firstNap, firstNap + 60).includes('is-client-nap" open') && (al.match(/<details class="isp-nap[^"]*" open>/g) || []).length === 1
+    && al.includes('NAP del cliente'));
+  check('lista por NAP: resumen working/lost y estado OK/PARCIAL/CAÍDA',
+    /<strong>\d+<\/strong> working · <strong>\d+<\/strong> lost/.test(al) && al.includes('>OK<'));
+  check('equipo: serial, cuenta, servicios (texto accesible), nombre, A/S/T, chip working/lost; el del cliente marcado',
+    al.includes('Equipo del cliente') && al.includes('isp-net-dev is-client') && /aria-label="Servicios: Internet/.test(al)
+    && al.includes(m1.searchRow.serial) && /<strong>[AST]<\/strong>/.test(al) && al.includes('Cuenta <span class="mono">'));
+  check('lista: "red de acceso", nunca "nodo"', noNodo(al) && al.includes('Equipos de la red de acceso'));
+
+  // Caso 2: falla interna.
+  const m2 = await A.getIspMonitor('40123456');
+  const n2 = await A.getIspAccessNetwork('40123456');
+  const h2 = ctx.renderIspAccountResult(m2, { data: n2 });
+  check('falla interna: solo el cliente lost en su NAP → INTERNAL',
+    n2.diagnosis.scope === 'INTERNAL' && n2.naps[0].devices.filter((d) => d.state === 'lost').length === 1
+    && n2.naps[0].devices.find((d) => d.isClient).state === 'lost');
+  check('falla interna: bloque "Falla interna (domicilio/drop/equipo)" y ficha lost en rojo',
+    h2.includes('isp-diagnosis warn') && h2.includes('Falla interna (domicilio/drop/equipo)') && h2.includes('isp-chip fail')
+    && balanced(h2) === null);
+  check('GPON lost: óptica null + flags false → "Sin lectura (equipo lost)", sin rojo inventado',
+    m2.device.optics.rxDbm === null && m2.device.optics.rxOk === false
+    && h2.includes('Sin lectura (equipo lost)') && !h2.includes('isp-light bad') && !h2.includes('Fuera de rango'));
+  check('lectura real fuera de rango (flag false con valor) → rojo "Fuera de rango"',
+    ctx.renderIspOptics({ distanceMeters: 4006, rxOltDbm: -30.1, txDbm: 2.3, rxDbm: -29.4, voltage: 3.26, temperatureC: 41,
+      rxOltOk: false, txOk: true, rxOk: false }, 'working').includes('isp-light bad'));
+  check('NAP del cliente de 6 caracteres; vecinas de 6 o 7',
+    /^[A-Z]{2}\d[NT][A-Z]\d$/.test(n2.clientNap) && n2.naps.slice(1).every((x) => /^[A-Z]{2}\d[NT][A-Z]\d{1,2}$/.test(x.nap)),
+    n2.naps.map((x) => x.nap).join(' '));
+  // Caso 3: NAP.
+  const n3 = await A.getIspAccessNetwork('40000600');
+  const h3 = ctx.renderIspDiagnosis(n3);
+  check('falla externa NAP: ≥50 % de su NAP lost → EXTERNAL_NAP y PARCIAL',
+    n3.diagnosis.scope === 'EXTERNAL_NAP' && n3.naps[0].summary.lost / n3.naps[0].summary.total >= 0.5
+    && h3.includes('Falla externa en la NAP') && h3.includes('isp-diagnosis bad')
+    && ctx.renderIspAccessNetwork(n3).includes('PARCIAL'));
+  // Caso 4: red de acceso.
+  const n4 = await A.getIspAccessNetwork('40001000');
+  check('falla externa red: ≥30 % lost en ≥2 NAPs → EXTERNAL_NETWORK y NAPs CAÍDA',
+    n4.diagnosis.scope === 'EXTERNAL_NETWORK' && n4.totals.lost / n4.totals.devices >= 0.3
+    && n4.naps.filter((x) => x.summary.lost > 0).length >= 2
+    && ctx.renderIspDiagnosis(n4).includes('Falla externa en la red de acceso') && ctx.renderIspAccessNetwork(n4).includes('CAÍDA'));
+  const n4b = await A.getIspMonitor('40001000');
+  check('lost por red: óptica "Sin lectura" (sin valores inventados)',
+    ctx.renderIspAccountResult(n4b, { data: n4 }).includes('Sin lectura'));
+
+  // Caso 5: HFC.
+  const m5 = await A.getIspMonitor('35070288');
+  const n5 = await A.getIspAccessNetwork('35070288');
+  const h5 = ctx.renderIspAccountResult(m5, { data: n5 });
+  check('mock HFC: optics null, docsis con canales y codewords',
+    m5.technology === 'HFC' && m5.device.optics === null && m5.docsis && m5.docsis.downstream.length > 0
+    && m5.docsis.upstream.length > 0 && 'corrected' in m5.docsis.codewords && /^[0-9A-F]{12}$/.test(m5.searchRow.serial));
+  check('HFC: ficha del cablemódem + tablas down/up con potencia/SNR + codewords',
+    h5.includes('Cablemódem') && h5.includes('Interfaz CMTS') && h5.includes('Señal DOCSIS') && h5.includes('Canales downstream')
+    && h5.includes('Canales upstream') && h5.includes('Potencia (dBmV)') && h5.includes('SNR (dB)') && h5.includes('Codewords')
+    && h5.includes('<strong>S</strong> Suspendido'));
+  check('HFC: sin óptica GPON ni ONU Info', noOptics(h5));
+  check('HFC: HTML balanceado y "Tap / derivador" en vez de NAP', balanced(h5) === null && h5.includes('Tap / derivador'), balanced(h5));
+  const hH = ctx.renderIspAccountResult(Object.assign({}, m5, { device: Object.assign({}, m5.device, { optics: m1.device.optics }) }), { loading: true });
+  check('HFC con óptica colada del backend: se ignora', noOptics(hH));
+  check('HFC como el backend: onuId/offlineCause/optics null, servicePorts [], DOCSIS 3.1, tap de 6, admin down si no es A',
+    m5.device.onuId === null && m5.device.offlineCause === null && m5.device.optics === null
+    && Array.isArray(m5.device.servicePorts) && m5.device.servicePorts.length === 0 && m5.device.speedMode === 'DOCSIS 3.1'
+    && /^[A-Z]{2}\dT[A-Z]\d$/.test(m5.device.nap)
+    && m5.searchRow.accountStatus === 'S' && m5.device.adminState === 'down' && m1.device.adminState === 'up', m5.device.nap);
+  check('HFC: MAC mostrada con ":"', h5.includes(ctx.fmtMac(m5.searchRow.serial)) && ctx.fmtMac(m5.searchRow.serial).includes(':'));
+
+  // Errores de cuenta (mismos códigos que el backend).
+  let e400 = null; let e404 = null;
+  try { await A.getIspMonitor('12a4'); } catch (e) { e400 = e; }
+  try { await A.getIspAccessNetwork('99999999'); } catch (e) { e404 = e; }
+  check('mock: cuenta inválida → 400; fuera de la whitelist → 404', e400 && e400.status === 400 && e404 && e404.status === 404);
+  check('mensajes claros para 400 y 404',
+    ctx._ispAccountErrorMessage(e400, '12a4').includes('Número de cuenta inválido')
+    && ctx._ispAccountErrorMessage(e404, '99999999').includes('no está en la base de clientes Xtrim')
+    && ctx._ispAccountErrorMessage({ code: 'HTTP_404' }, '1').includes('Buscar por serial'));
+  check('cuenta con ceros a la izquierda: cuentan solo los dígitos significativos',
+    ctx._ispNormalizeAccount('000012345678') === '000012345678' && ctx._ispNormalizeAccount('0000123') === null);
+  check('red de acceso 404: el aviso del panel lo explica',
+    ctx.renderIspAccessSlot({ error: e404, account: '99999999' }, 'diagnosis').includes('no está en la base de clientes Xtrim'));
+
+  // Orden mock alineada con ISP Monitor.
+  const ord2 = await A.getOrderContext('ORDER/463158/2026');
+  const mon2 = await A.getIspMonitor(ord2.client.accountNumber);
+  check('orden: napCode/zoneCode = NAP del cliente y red de acceso de ISP Monitor',
+    ord2.client.napCode === mon2.device.nap && ord2.client.zoneCode === mon2.searchRow.accessNetwork);
+  let hfcMig = 0;
+  for (let k = 0; k < 60; k++) {
+    const o = await A.getOrderContext('ORDER/' + (463100 + k) + '/2026');
+    if (o.order.technology === 'HFC' && o.order.orderType === 'Migración') hfcMig++;
+  }
+  check('orden: en HFC no hay Migración', hfcMig === 0);
+
+  // Estados de carga / error / vacío.
+  check('red de acceso cargando: aviso de carga', ctx.renderIspAccountResult(m1, { loading: true }).includes('Analizando la red de acceso'));
+  const errH = ctx.renderIspAccountResult(m1, { error: new Error('timeout') });
+  check('red de acceso con error: mensaje + Reintentar, la ficha sigue', errH.includes('data-action="isp-access-retry"')
+    && errH.includes('timeout') && errH.includes('ONU Info'));
+  const empty = ctx.renderIspAccountResult({ simulated: true, technology: null, searchRow: null, plan: null, device: null, docsis: null }, { loading: true });
+  check('cuenta sin equipos: estado vacío que sugiere buscar por serial', empty.includes('no tiene equipos asociados') && balanced(empty) === null);
+  check('sin plan: aviso y no "RES-undefined"', ctx.renderIspPlan(null).includes('no tiene un plan') && !ctx.renderIspPlan(null).includes('undefined'));
+  check('plan asimétrico: "X / Y Mbps"', ctx.renderIspPlan({ profile: 'RES-100000/20000-I', downloadKbps: 100000, uploadKbps: 20000, downloadMbps: 100, uploadMbps: 20 }).includes('100 / 20 Mbps'));
+  check('sin simulated: no hay badge "Simulado"', !ctx.renderIspAccountResult(Object.assign({}, m1, { simulated: false }), { data: Object.assign({}, n1, { simulated: false }) }).includes('sim-badge'));
+
+  // Rutas reales.
+  const urls = [];
+  A.useRealApi = true;
+  const origFetch = ctx.fetch;
+  ctx.fetch = async (u) => { urls.push(String(u)); return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({}), text: async () => '{}' }; };
+  await A.getIspMonitor('100926544');
+  await A.getIspAccessNetwork('100926544');
+  ctx.fetch = origFetch;
+  A.useRealApi = false;
+  check('real: GET /accounts/{n}/isp-monitor y /isp-monitor/access-network',
+    /\/accounts\/100926544\/isp-monitor$/.test(urls[0] || '') && /\/accounts\/100926544\/isp-monitor\/access-network$/.test(urls[1] || ''), urls.join(' '));
+}
+
 console.log('\n== Fecha/hora común (America/Guayaquil) y caídas ==');
 check('fmtDateTimeEc: "mar 29 sep 2026, 14:32:05" (UTC-5, coincide con Intl)',
   ctx.fmtDateTimeEc('2026-09-29T19:32:05Z') === 'mar 29 sep 2026, 14:32:05'
