@@ -1645,6 +1645,28 @@
     mockDevice('ONT ZXHN F1611A-1FXS', 'ONT ZXHN F1611A-1FXS', 'ZTE', 'ONT', ONT_GPON, 'WIFI 6', 1000, 1200, 'enabled', ['ZTEG']),
     mockDevice('ONT ZTE XGS-PON ZXHN F8605P', 'ONT XGS-PON ZXHN F8605P', 'ZTE', 'ONT', 'ONT / ONU (XGS-PON)', 'WIFI 6', 2500, 1800, 'enabled', ['ZTEG']),
   ];
+  // Etiquetas simuladas (líneas como las devuelve el OCR de ML Kit) para
+  // demostrar en el navegador la detección automática del modelo, que en el
+  // APK hace la foto real. Combinadas con las cuentas de plan simulado
+  // (35070291 → 200, 40000600 → 600, 40001000 → 1000, 40000000 → sin plan)
+  // cubren: detección por OCR, único modelo de la marca, ambigua, sin match,
+  // bloqueo por plan y aprobado.
+  const MOCK_LABEL_SCANS = [
+    { id: 'ocr-f670l', title: 'ONT ZTE ZXHN F670L', lines: ['ZTE', 'ZXHN F670L', 'GPON SN: ZTEGD0BB8294', 'MAC: 00:1E:73:4A:9C:21', 'Made in China'] },
+    { id: 'marca-hwtc', title: 'ONT Huawei sin modelo legible', lines: ['HUAWEI', 'GPON SN: HWTC8C4D7E21', 'Power 12V 1.5A'] },
+    { id: 'ambigua-ax3', title: 'Router Huawei WiFi AX3', lines: ['HUAWEI', 'WiFi AX3', 'S/N: BWH7A1234567'] },
+    { id: 'sin-match', title: 'ONT ZTE con el modelo tapado', lines: ['ZTE', 'GPON SN: ZTEGC8F21A77', 'Power 12V 1A'] },
+    { id: 'powerline', title: 'Powerline TP-Link TL-WPA4220', lines: ['tp-link', 'AV600 Powerline WiFi Extender', 'Model: TL-WPA4220', 'S/N: 2219876543210'] },
+    { id: 'ocr-f6600p', title: 'ONT ZTE ZXHN F6600P', lines: ['ZTE', 'ZXHN F6600P', 'GPON SN: ZTEGC4A1B2C3', 'WiFi 6'] },
+  ];
+  let mockLabelCursor = 0;
+  function mockLabelScan(hint) {
+    const h = String(hint || '').toLowerCase();
+    const byName = h ? MOCK_LABEL_SCANS.filter(function (s) { return h.indexOf(s.id) !== -1; })[0] : null;
+    const s = byName || MOCK_LABEL_SCANS[mockLabelCursor++ % MOCK_LABEL_SCANS.length];
+    return { id: s.id, title: s.title, lines: s.lines.slice() };
+  }
+
   const DEVICE_VALIDATION_CATEGORIES = ['instalaciones', 'migraciones', 'visitas'];
   const SERIAL_SOURCES = ['barcode', 'ocr', 'manual'];
 
@@ -2304,6 +2326,11 @@
     // Regla y mensaje puros (misma lógica que el mock y que el servidor).
     evaluateDeviceCapacity: evaluateDeviceCapacity,
     deviceValidationMessage: deviceValidationMessage,
+    // Solo demo/mock: etiqueta simulada para la "foto" sin OCR nativo. `hint`
+    // (nombre del archivo) elige por id ('ambigua-ax3', 'sin-match', ...); si
+    // no, rota. app.js no la usa con la API real.
+    mockLabelScan: mockLabelScan,
+    mockLabelScanIds: function () { return MOCK_LABEL_SCANS.map(function (s) { return s.id; }); },
 
     // Registra la guardia de registros de la visita (ver assertRecordAllowed).
     setRecordGuard(fn) {
