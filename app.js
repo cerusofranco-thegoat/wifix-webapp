@@ -1616,9 +1616,128 @@ async function _napPortsCached(scope, napRef) {
 // actualiza sola (ocupación, color binario, reutilizables) con su propio
 // estado de carga/error; la lista nunca se bloquea.
 // No existe endpoint de lote de puertos: es una llamada por NAP.
-// Los ESTADOS de los clientes (status-batch) NO se piden aquí: la operadora
-// pidió que solo se consulten por un gesto explícito del técnico.
+// ESTADOS de los clientes (status-batch, ronda 2026-10-06 §6): se piden SOLOS,
+// sin tap, justo después de cargar los puertos de las 2 NAPs más cercanas (y
+// de la NAP del cliente en Visita técnica / Migración), en lotes ≤12 y
+// secuenciales; el backend cachea 5 min. Las demás NAPs los piden solos al
+// abrir «Ver puertos» o al elegirlas para GPON. Si falla queda «Reintentar».
 const NAP_PORTS_AUTO_CONCURRENCY = 2;
+const NAP_STATUS_AUTO_NAPS = 2;
+
+function _napStatusStateOf(scope, napRef) {
+  return scope && scope._napStatusState ? scope._napStatusState[napRef] || null : null;
+}
+
+function _napSetStatusState(scope, napRef, st) {
+  if (!scope._napStatusState) scope._napStatusState = {};
+  scope._napStatusState[napRef] = st;
+}
+
+/** Cuentas distintas con estado aún sin consultar (o que fallaron). */
+function _pendingStatusAccounts(ports) {
+  const out = [];
+  const vistas = {};
+  (ports || []).forEach((p) => {
+    if (!p || !p.occupied || p.clientStatus || p.statusPending === false || !p.clientAccountNumber) return;
+    const c = String(p.clientAccountNumber);
+    if (vistas[c]) return;
+    vistas[c] = true;
+    out.push(c);
+  });
+  return out;
+}
+
+/** Vuelca los estados de status-batch sobre los puertos (mismo objeto de la caché). */
+function _applyStatusItems(items, portsData) {
+  const ports = (portsData && Array.isArray(portsData.ports)) ? portsData.ports : [];
+  (items || []).forEach((item) => {
+    if (!item || !item.accountNumber) return;
+    const cuenta = String(item.accountNumber);
+    ports.forEach((p) => {
+      if (!p.clientAccountNumber || String(p.clientAccountNumber) !== cuenta) return;
+      if (item.error) {
+        p.statusError = item.error;
+        return;
+      }
+      p.clientStatus = item.statusCode || item.status || null;
+      p.clientStatusDescription = item.statusDescription || null;
+      p.statusError = null;
+      p.statusPending = false;
+    });
+  });
+}
+
+/**
+ * Consulta AUTOMÁTICA de estados de una NAP cuyos puertos ya están en la
+ * caché del panel. Una sola en vuelo por NAP; lotes secuenciales ≤ batchLimit.
+ * Nunca rechaza: el error queda en el estado de la NAP (con «Reintentar»).
+ */
+function _napFetchStatuses(scope, napRef) {
+  if (!scope || !napRef) return Promise.resolve();
+  if (!scope._napStatusInflight) scope._napStatusInflight = {};
+  if (scope._napStatusInflight[napRef]) return scope._napStatusInflight[napRef];
+  const data = scope._napPortsCache ? scope._napPortsCache[napRef] : null;
+  if (!data || data.detailAvailable === false || !data.statusFanOut || data.statusFanOut.supported === false) {
+    return Promise.resolve();
+  }
+  const cuentas = _pendingStatusAccounts(data.ports);
+  if (cuentas.length === 0) {
+    _napSetStatusState(scope, napRef, { state: 'ok', resolved: 0, failed: 0 });
+    return Promise.resolve();
+  }
+  const limite = Math.min(12, Number(data.statusFanOut.batchLimit) || 12);
+  const run = (async () => {
+    _napSetStatusState(scope, napRef, { state: 'loading', total: cuentas.length });
+    _napRefreshStatusViews(scope, napRef);
+    let resolved = 0;
+    let failed = 0;
+    try {
+      for (let i = 0; i < cuentas.length; i += limite) {
+        const res = await WifixAPI.getAccountsStatusBatch(cuentas.slice(i, i + limite));
+        _applyStatusItems((res && res.items) || [], data);
+        resolved += Number(res && res.resolved) || 0;
+        failed += Number(res && res.failed) || 0;
+      }
+      _napSetStatusState(scope, napRef, { state: 'ok', resolved, failed });
+    } catch (err) {
+      console.error('[Wifix] status-batch (automático)', napRef, err);
+      _napSetStatusState(scope, napRef, { state: 'error', error: err, resolved, failed });
+    } finally {
+      delete scope._napStatusInflight[napRef];
+    }
+    _napRefreshStatusViews(scope, napRef);
+  })();
+  scope._napStatusInflight[napRef] = run;
+  return run;
+}
+
+/** NAP (objeto) de una referencia, en la lista o como NAP del cliente. */
+function _napByRef(napRef) {
+  const lista = (_napPanelState.naps || []).find(n => _napRef(n) === napRef);
+  if (lista) return lista;
+  return _napHasClientNap() && _napCurrentRef() === napRef ? _napPanelState.currentNap.nap : null;
+}
+
+/** Repinta grilla(s) abierta(s), tarjeta y resumen GPON tras cambiar estados. */
+function _napRefreshStatusViews(scope, napRef) {
+  if (!scope || !scope.querySelectorAll) return;
+  const data = scope._napPortsCache ? scope._napPortsCache[napRef] : null;
+  if (data) {
+    scope.querySelectorAll('.nap-ports-slot').forEach((slot) => {
+      if (!slot.dataset || slot.dataset.portsFor !== napRef || slot.dataset.loaded !== '1') return;
+      slot.innerHTML = renderPortsTable(data, _napStatusStateOf(scope, napRef));
+      _wirePortStatusButton(slot, data);
+    });
+  }
+  const nap = _napByRef(napRef);
+  if (nap) _napUpdateCardPorts(scope, napRef, nap);
+  if (_napPanelState.selectedNap === napRef) _renderGponSummary(scope);
+}
+
+/** Las N NAPs más cercanas con puertos consultables (estados automáticos). */
+function _napAutoStatusRefs(naps) {
+  return _napSortByDistance(naps).filter(_napPortsEligible).slice(0, NAP_STATUS_AUTO_NAPS).map(_napRef);
+}
 
 // ¿Se pueden pedir los puertos de esta NAP de la lista? Una NAP simulada
 // (o sin referencia) nunca llama a /naps/{ref}/ports.
@@ -1665,6 +1784,23 @@ function _napPortsStateOf(scope, napRef) {
 function _napPortsStatusHtml(scope, napRef) {
   const st = _napPortsStateOf(scope, napRef);
   if (!st) return '';
+  if (st.state === 'ok') {
+    const ss = _napStatusStateOf(scope, napRef);
+    if (!ss) return '';
+    if (ss.state === 'loading') return '<span class="nap-ports-auto is-loading">Consultando estado de los clientes…</span>';
+    if (ss.state === 'error') {
+      const m = ss.error && ss.error.message ? `: ${ss.error.message}` : '';
+      return `<span class="nap-ports-auto is-error">No se pudo consultar el estado de los clientes${escapeHtml(m)}.</span>
+      <button type="button" class="link-btn nap-ports-retry" data-action="nap-status-retry" data-nap="${escapeHtml(napRef)}"
+        aria-label="Reintentar la consulta de estado de los clientes de la NAP">Reintentar</button>`;
+    }
+    if (ss.failed > 0) {
+      return `<span class="nap-ports-auto">${escapeHtml(String(ss.failed))} cliente${ss.failed === 1 ? '' : 's'} sin respuesta de la operadora.</span>
+      <button type="button" class="link-btn nap-ports-retry" data-action="nap-status-retry" data-nap="${escapeHtml(napRef)}"
+        aria-label="Reintentar la consulta de estado de los clientes sin respuesta">Reintentar</button>`;
+    }
+    return '';
+  }
   if (st.state === 'queued') return '<span class="nap-ports-auto is-loading">Puertos en cola…</span>';
   if (st.state === 'loading') return '<span class="nap-ports-auto is-loading">Consultando puertos…</span>';
   if (st.state === 'error') {
@@ -1756,6 +1892,12 @@ async function _napAutoLoadPorts(scope, naps, opts = {}) {
   scope._napPortsGen = gen;
   const cache = scope._napPortsCache || {};
   const elegibles = _napSortByDistance(naps).filter(_napPortsEligible);
+  // Estados automáticos: solo las 2 más cercanas (§6).
+  const autoStatus = new Set(_napAutoStatusRefs(naps));
+  scope._napAutoStatusRefs = autoStatus;
+  const autoEstados = (ref) => {
+    if (autoStatus.has(ref) && !_napStatusStateOf(scope, ref)) _napFetchStatuses(scope, ref);
+  };
   // Las ya cacheadas se aplican al instante (sin llamada).
   elegibles.forEach((n) => {
     const ref = _napRef(n);
@@ -1763,6 +1905,7 @@ async function _napAutoLoadPorts(scope, naps, opts = {}) {
     _napApplyPortsCounts(n, cache[ref]);
     _napSetPortsState(scope, ref, 'ok');
     _napUpdateCardPorts(scope, ref, n);
+    autoEstados(ref);
   });
   const cola = elegibles.filter(n => !cache[_napRef(n)]);
   if (cola.length === 0) {
@@ -1785,6 +1928,7 @@ async function _napAutoLoadPorts(scope, naps, opts = {}) {
       const nap = cola[i++];
       const ok = await _napLoadPortsForCard(scope, nap, gen);
       if (scope._napPortsGen !== gen) return;
+      if (ok) autoEstados(_napRef(nap));
       hechas++;
       if (!ok) fallidas++;
       if (hechas < total) _napPortsProgress(scope, `Consultando puertos… ${hechas}/${total}`);
@@ -1807,6 +1951,7 @@ async function _napRetryPorts(scope, napRef, onDone) {
   const nap = naps.find(n => _napRef(n) === napRef);
   if (!nap || !_napPortsEligible(nap)) return;
   const ok = await _napLoadPortsForCard(scope, nap, scope._napPortsGen);
+  if (ok && scope._napAutoStatusRefs && scope._napAutoStatusRefs.has(napRef)) _napFetchStatuses(scope, napRef);
   if (ok && onDone) onDone();
 }
 
@@ -1940,7 +2085,7 @@ function _napOccupancyBar(nap) {
 //   'libre'         → sin cliente
 //   'cancelado'     → cliente con status Cancelado (T): se puede reutilizar
 //   'ocupado'       → cliente Activo/Suspendido (o status no reconocido)
-//   'sin-consultar' → ocupado y todavía sin status (se pide solo por tap)
+//   'sin-consultar' → ocupado y todavía sin status (se está consultando solo, o falló)
 function _portState(p) {
   if (!p || !p.occupied) return 'libre';
   if (!p.clientStatus) return 'sin-consultar';
@@ -2075,6 +2220,10 @@ async function _renderGponSummary(scope) {
     const libres = ports.filter(p => _portState(p) === 'libre');
     const reutilizables = ports.filter(p => _portState(p) === 'cancelado');
     const sinConsultar = ports.filter(p => _portState(p) === 'sin-consultar').length;
+    // NAP elegida con clientes sin estado: se consultan solos (una vez; si
+    // falla, «Reintentar» en la tarjeta).
+    const estSt = _napStatusStateOf(scope, napRef);
+    if (sinConsultar > 0 && !estSt) _napFetchStatuses(scope, napRef);
     const elegibles = libres.concat(reutilizables)
       .sort((a, b) => Number(a.portNumber) - Number(b.portNumber));
     const sugerido = libres[0] || reutilizables[0] || null;
@@ -2095,8 +2244,12 @@ async function _renderGponSummary(scope) {
       freeTxt = n === null
         ? 'Detalle por puerto no disponible'
         : `${n} puerto${n === 1 ? '' : 's'} libre${n === 1 ? '' : 's'} (sin detalle por puerto)`;
+    } else if (sinConsultar > 0 && estSt && estSt.state === 'error') {
+      freeTxt = 'Sin puertos libres: no se pudo consultar el estado de los clientes (reintenta en la tarjeta de la NAP).';
+    } else if (sinConsultar > 0 && estSt && estSt.state === 'ok') {
+      freeTxt = `Sin puertos libres ni reutilizables entre los clientes consultados (${sinConsultar} sin respuesta de la operadora).`;
     } else if (sinConsultar > 0) {
-      freeTxt = 'Sin puertos libres. Consulta el estado de los clientes en «Ver puertos» para buscar puertos reutilizables.';
+      freeTxt = 'Sin puertos libres. Consultando el estado de los clientes para buscar puertos reutilizables…';
     } else {
       freeTxt = 'Sin puertos libres ni reutilizables';
     }
@@ -2431,6 +2584,13 @@ function _wireNapPanel(scope) {
     const foco = t.closest('[data-action="nap-focus"]');
     if (foco) {
       _napMapFocus(foco.dataset.nap, true);
+      return;
+    }
+    const retryStatus = t.closest('[data-action="nap-status-retry"]');
+    if (retryStatus) {
+      ev.stopPropagation();
+      _napSetStatusState(scope, retryStatus.dataset.nap, null);
+      _napFetchStatuses(scope, retryStatus.dataset.nap);
       return;
     }
     const retryPorts = t.closest('[data-action="nap-ports-retry"]');
@@ -3906,6 +4066,13 @@ function _wireNapContractedPanel(panel, body) {
       _napRetryCurrent(body, retry);
       return;
     }
+    const retryStatus = t.closest('[data-action="nap-status-retry"]');
+    if (retryStatus) {
+      ev.stopPropagation();
+      _napSetStatusState(panel, retryStatus.dataset.nap, null);
+      _napFetchStatuses(panel, retryStatus.dataset.nap);
+      return;
+    }
     const retryPorts = t.closest('[data-action="nap-ports-retry"]');
     if (retryPorts) {
       ev.stopPropagation();
@@ -3940,8 +4107,8 @@ async function _napRetryCurrent(body, btn) {
 //   libre (verde) · cancelado (verde, "reutilizable") · ocupado activo o
 //   suspendido (rojo) · ocupado sin consultar (gris punteado).
 // El estado del cliente NO llega en este paso (contrato §6): los ocupados
-// vienen con clientStatus null + statusPending true hasta que el técnico pida
-// la consulta explícitamente.
+// vienen con clientStatus null + statusPending true hasta que la consulta
+// automática de estados (_napFetchStatuses) los completa.
 function _renderPortCell(p) {
   const estado = _portState(p);
   const cuenta = p.clientAccountNumber ? String(p.clientAccountNumber) : '';
@@ -3956,7 +4123,7 @@ function _renderPortCell(p) {
     marca = '';
   } else if (estado === 'sin-consultar') {
     cls = 'busy pending';
-    title = base + ' · ' + (cuenta || 'ocupado') + ' · estado sin consultar';
+    title = base + ' · ' + (cuenta || 'ocupado') + ' · estado pendiente';
     if (p.statusError) title += ' · ' + p.statusError;
     marca = '<small aria-hidden="true">·</small>';
   } else if (estado === 'cancelado') {
@@ -4002,7 +4169,7 @@ function _portsPendingAccounts(ports) {
   return Object.keys(vistas).length;
 }
 
-function renderPortsTable(napPorts) {
+function renderPortsTable(napPorts, statusSt) {
   // La API de operadora aún no expone el detalle cliente por cliente en el
   // camino heredado: en ese caso se muestra el aviso en vez de una rejilla.
   if (!napPorts || !napPorts.ports || napPorts.ports.length === 0) {
@@ -4011,16 +4178,28 @@ function renderPortsTable(napPorts) {
   }
   const fanOut = napPorts.statusFanOut || { supported: false, pendingAccounts: 0, batchLimit: 12 };
   const pendientes = _portsPendingAccounts(napPorts.ports);
-  // El botón es la ÚNICA vía para consultar estados: nunca se dispara solo.
-  const accionEstados = (fanOut.supported && pendientes > 0)
-    ? `
+  // Los estados se consultan SOLOS (§6): aquí solo se informa el avance y,
+  // si falló o quedaron clientes sin respuesta, se ofrece «Reintentar».
+  const st = statusSt || null;
+  const plural = pendientes === 1 ? '' : 's';
+  let accionEstados = '';
+  if (fanOut.supported && pendientes > 0) {
+    if (st && (st.state === 'error' || st.state === 'ok')) {
+      const msg = st.state === 'error'
+        ? `No se pudo consultar el estado de ${pendientes} cliente${plural}${st.error && st.error.message ? `: ${escapeHtml(st.error.message)}` : ''}.`
+        : `${pendientes} cliente${plural} sin respuesta de la operadora.`;
+      accionEstados = `
     <div class="port-status-actions" data-slot="port-status">
-      <button type="button" class="port-status-btn" data-action="port-status">
-        Consultar estado de ${pendientes} cliente${pendientes === 1 ? '' : 's'}
-      </button>
-      <div class="port-status-note" data-slot="port-status-note" role="status" aria-live="polite"></div>
-    </div>`
-    : '';
+      <div class="port-status-note ${st.state === 'error' ? 'error' : 'warn'}" data-slot="port-status-note" role="status">${msg}</div>
+      <button type="button" class="port-status-btn" data-action="port-status">Reintentar</button>
+    </div>`;
+    } else {
+      accionEstados = `
+    <div class="port-status-actions" data-slot="port-status">
+      <div class="port-status-note" data-slot="port-status-note" role="status">Consultando el estado de ${pendientes} cliente${plural}…</div>
+    </div>`;
+    }
+  }
 
   return `
     <div class="port-grid" role="list" aria-label="Puertos de la NAP">
@@ -4030,7 +4209,7 @@ function renderPortsTable(napPorts) {
       <span><span class="dot free"></span>Libre</span>
       <span><span class="dot reusable"></span>Cancelado (reutilizable)</span>
       <span><span class="dot busy"></span>Ocupado (activo o suspendido)</span>
-      <span><span class="dot pending"></span>Sin consultar</span>
+      <span><span class="dot pending"></span>Estado pendiente</span>
       ${napPorts.ports.some(p => p.isClientPort) ? '<span><span class="dot client"></span>Puerto del cliente</span>' : ''}
     </div>
     ${accionEstados}`;
@@ -4043,20 +4222,10 @@ function renderPortsTable(napPorts) {
 // grilla y el resumen GPON leen siempre la misma fuente.
 function _applyPortStatuses(slot, items, portsData) {
   const ports = (portsData && Array.isArray(portsData.ports)) ? portsData.ports : [];
+  _applyStatusItems(items, portsData);
   (items || []).forEach((item) => {
     if (!item || !item.accountNumber) return;
     const cuenta = String(item.accountNumber);
-    ports.forEach((p) => {
-      if (!p.clientAccountNumber || String(p.clientAccountNumber) !== cuenta) return;
-      if (item.error) {
-        p.statusError = item.error;
-        return;
-      }
-      p.clientStatus = item.statusCode || item.status || null;
-      p.clientStatusDescription = item.statusDescription || null;
-      p.statusError = null;
-      p.statusPending = false;
-    });
     const celdas = slot.querySelectorAll('.port-cell[data-account]');
     celdas.forEach((cell) => {
       if (cell.dataset.account !== cuenta) return;
@@ -4085,19 +4254,29 @@ function _napSyncTwinGrids(slot, portsData) {
   if (!scope || !napRef || !scope.querySelectorAll) return;
   scope.querySelectorAll('.nap-ports-slot').forEach((other) => {
     if (other === slot || other.dataset.portsFor !== napRef || other.dataset.loaded !== '1') return;
-    other.innerHTML = renderPortsTable(portsData);
+    other.innerHTML = renderPortsTable(portsData, _napStatusStateOf(scope, napRef));
     _wirePortStatusButton(other, portsData);
   });
 }
 
-// Consulta de estados bajo demanda (campo 8, paso 2). Se ejecuta SOLO desde el
-// botón: nada de intervalos, scroll, hover ni precarga al abrir el panel.
-// Los lotes van secuenciales para no saturar a la operadora (todo producción).
+// «Reintentar» de la grilla (campo 8, paso 2): los estados ya se piden solos
+// (_napFetchStatuses); el botón solo aparece si la consulta falló o quedaron
+// clientes sin respuesta. Dentro del panel NAP reintenta por la misma vía; el
+// camino de respaldo (sin panel) consulta en lotes secuenciales.
 function _wirePortStatusButton(slot, portsData) {
   const btn = slot.querySelector('[data-action="port-status"]');
   if (!btn) return;
   const note = slot.querySelector('[data-slot="port-status-note"]');
   btn.addEventListener('click', async () => {
+    const panel = slot.closest ? slot.closest('[data-panel="nap-gpon"]') : null;
+    const ref = slot.dataset ? slot.dataset.portsFor : null;
+    if (panel && ref && panel._napPortsCache && panel._napPortsCache[ref] === portsData) {
+      btn.disabled = true;
+      btn.textContent = 'Consultando…';
+      _napSetStatusState(panel, ref, null);
+      await _napFetchStatuses(panel, ref);
+      return;
+    }
     const cuentas = [];
     const vistas = {};
     (portsData.ports || []).forEach((p) => {
@@ -6864,10 +7043,12 @@ function wireNapPortsButtons(scope) {
       slot.innerHTML = `<div class="detail-loading">Cargando puertos…</div>`;
       try {
         const data = await _napPortsCached(scope, napRef);
-        slot.innerHTML = renderPortsTable(data);
+        slot.innerHTML = renderPortsTable(data, _napStatusStateOf(scope, napRef));
         slot.dataset.loaded = '1';
         btn.setAttribute('aria-expanded', 'true');
         _wirePortStatusButton(slot, data);
+        // Estados automáticos también para las NAPs más lejanas al abrirlas.
+        if (!_napStatusStateOf(scope, napRef)) _napFetchStatuses(scope, napRef);
       } catch (err) {
         console.error('[Wifix] puertos NAP', err);
         slot.innerHTML = renderPanelError(err, 'No se pudieron cargar los puertos.');

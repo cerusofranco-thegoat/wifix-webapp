@@ -543,10 +543,13 @@ check('los ocupados llegan sin estado consultado',
   ports.ports.filter((p) => p.occupied).every((p) => p.clientStatus === null && p.statusPending === true));
 check('tercer estado visual "ocupado sin consultar"', portsHtml.includes('port-cell busy pending'));
 check('la leyenda explica las cuatro categorías',
-  ['Libre', 'Cancelado (reutilizable)', 'Ocupado (activo o suspendido)', 'Sin consultar']
+  ['Libre', 'Cancelado (reutilizable)', 'Ocupado (activo o suspendido)', 'Estado pendiente']
     .every((t) => portsHtml.includes(t)));
-check('ofrece consultar estados solo por acción explícita',
-  portsHtml.includes('data-action="port-status"') && portsHtml.includes('Consultar estado de'));
+check('estados automáticos: la grilla informa "Consultando…" sin botón manual',
+  !portsHtml.includes('data-action="port-status"') && portsHtml.includes('Consultando el estado de'));
+const portsErrHtml = ctx.renderPortsTable(ports, { state: 'error', error: new Error('FSM caído') });
+check('estados automáticos: si falla queda solo "Reintentar"',
+  portsErrHtml.includes('data-action="port-status"') && portsErrHtml.includes('>Reintentar<') && portsErrHtml.includes('FSM caído'));
 check('renderPortsTable HTML balanceado', balanced(portsHtml) === null, balanced(portsHtml));
 
 // ---- Color binario de la NAP (regla de Franco) ----------------------------
@@ -610,8 +613,12 @@ const llenaSinStatus = JSON.parse(JSON.stringify(await WifixAPI.getNapPorts(Stri
 const sc3 = fakeScope(nearby.naps, { [String(llena.napId)]: llenaSinStatus });
 vm.runInContext(`_napPanelState.selectedNap = '${llena.napId}'; _napPanelState.selectedPort = null;`, ctx);
 await ctx._renderGponSummary(sc3);
-check('NAP llena sin status: pide consultar, no inventa puerto',
-  sc3._summary.innerHTML.includes('Consulta el estado de los clientes') && !sc3._summary.innerHTML.includes('type="radio"'));
+check('NAP llena sin status: consulta sola los estados, no inventa puerto mientras tanto',
+  sc3._summary.innerHTML.includes('Consultando el estado de los clientes') && !sc3._summary.innerHTML.includes('type="radio"'));
+await (sc3._napStatusInflight && sc3._napStatusInflight[String(llena.napId)]);
+check('NAP llena elegida para GPON: los estados se consultaron solos y aparecen reutilizables',
+  sc3._napStatusState[String(llena.napId)].state === 'ok'
+  && llenaSinStatus.ports.some((p) => ctx._portState(p) === 'cancelado'));
 vm.runInContext(`_napPanelState.selectedNap = null; _napPanelState.selectedPort = null;`, ctx);
 check('renderPortsTable sin detalle muestra el aviso',
   ctx.renderPortsTable({ napCode: 'X', ports: [], detailAvailable: false, note: 'sin detalle' }).includes('sin detalle'));
@@ -928,6 +935,13 @@ console.log('\n== NAP del cliente (visita técnica) y mapa ==');
       maxVuelo <= vm.runInContext('NAP_PORTS_AUTO_CONCURRENCY', ctx) && maxVuelo >= 1, `max=${maxVuelo}`);
     check('puertos automáticos: empiezan por la NAP más cercana',
       pedidas.slice(0, 2).every((r) => elegibles.slice(0, 2).includes(r)));
+    for (let k = 0; k < 200 && Object.keys(autoScope._napStatusInflight || {}).length; k++) await new Promise((r) => setTimeout(r, 5));
+    const conEstado = Object.keys(autoScope._napStatusState || {});
+    const dosCercanas = elegibles.slice(0, 2);
+    check('estados automáticos: solo las 2 NAPs más cercanas, sin tap',
+      conEstado.length === dosCercanas.length && dosCercanas.every((r) => conEstado.includes(r)), conEstado.join(','));
+    check('estados automáticos: en esas NAPs ya no quedan clientes sin consultar (salvo fallos de la operadora)',
+      dosCercanas.every((r) => autoScope._napPortsCache[r].ports.every((p) => !p.occupied || p.clientStatus || p.statusError)));
     check('puertos automáticos: estado ok por NAP y progreso final anunciado',
       elegibles.every((r) => (autoScope._napPortsState[r] || {}).state === 'ok')
       && /Puertos actualizados en \d+ NAP/.test(autoSlots['[data-slot="nap-ports-progress"]'].textContent));
