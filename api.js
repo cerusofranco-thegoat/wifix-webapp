@@ -373,7 +373,7 @@
       email: null,
       planName: 'Wifix Hogar 200',
       contractedDownloadMbps: 200,
-      contractedUploadMbps: 100,
+      contractedUploadMbps: 200,
       latitude: null,
       longitude: null,
       sources: {
@@ -386,6 +386,7 @@
   }
   // Velocidad contratada de prueba por cuenta (demo de la validación de equipo):
   // Solo valores que da el plan simulado del backend (50/100/200/400/600/1000).
+  // Todo plan simulado es SIMÉTRICO (decisión de Franco): subida = bajada.
   //   40000600 → 600 Mbps  (un ONT con WiFi 500 queda bloqueado por WiFi)
   //   40001000 → 1000 Mbps (powerline: bloquea por Ethernet y por WiFi)
   //   40000000 → sin plan  (unknown_plan: no bloquea, deja alerta)
@@ -400,7 +401,7 @@
       return Object.assign(mockClientProfileBase(accountNumber), {
         planName: down ? 'Wifix Hogar ' + down : null,
         contractedDownloadMbps: down,
-        contractedUploadMbps: down ? Math.round(down / 2) : null,
+        contractedUploadMbps: down || null,
       });
     }
     return mockClientProfileBase(accountNumber);
@@ -414,7 +415,7 @@
       email: 'cliente.mock@example.com',
       planName: 'Wifix Hogar 200',
       contractedDownloadMbps: 200,
-      contractedUploadMbps: 100,
+      contractedUploadMbps: 200,
       latitude: -2.247946,
       longitude: -79.904161,
       // Plan y velocidad siguen simulados hasta que exista API de Comarch.
@@ -1952,12 +1953,12 @@
       if (k === 'ext') {
         r.speedtests.push(Object.assign(base(40, 'TASK_ID'), {
           source: 'external-device', deviceName: 'Medidor Xtrim 10G', deviceId: 'XTM10G-SIM-0001', simulated: true,
-          downloadMbps: 487.3, uploadMbps: 241.8, latencyMs: 4.1, jitterMs: 0.6, packetLossPercent: 0,
+          downloadMbps: 487.3, uploadMbps: 479.6, latencyMs: 4.1, jitterMs: 0.6, packetLossPercent: 0,
         }));
       }
       if (k === 'app') {
         r.speedtests.push(Object.assign(base(55, 'TIME_WINDOW'), {
-          source: 'app', simulated: false, downloadMbps: 212.4, uploadMbps: 98.7, latencyMs: 14.2, jitterMs: 2.3,
+          source: 'app', simulated: false, downloadMbps: 212.4, uploadMbps: 206.1, latencyMs: 14.2, jitterMs: 2.3,
           packetLossPercent: 0, serverName: 'CNT Guayaquil',
         }));
       }

@@ -1215,10 +1215,30 @@ function mockNotice(extraClass = '', text = 'Datos simulados — integración pe
     `${escapeHtml(text)}</span>`;
 }
 
+/**
+ * Velocidad contratada { down, up, simulated } en Mbps (null si no hay dato).
+ * Regla de Franco: un plan SIMULADO es siempre simétrico (subida = bajada).
+ * El backend ya lo entrega así; si un backend viejo manda una subida distinta
+ * con fuente MOCK, aquí se corrige para que el técnico nunca vea 1000/500.
+ */
+function contractedPlanMbps(profile) {
+  const n = (v) => {
+    const x = typeof v === 'string' && v.trim() !== '' ? Number(v) : v;
+    return typeof x === 'number' && Number.isFinite(x) && x > 0 ? x : null;
+  };
+  if (!profile) return { down: null, up: null, simulated: false };
+  const src = profile.sources || {};
+  const simulated = src.contractedDownloadMbps === 'MOCK' || src.contractedUploadMbps === 'MOCK';
+  const down = n(profile.contractedDownloadMbps);
+  const up = simulated ? down : n(profile.contractedUploadMbps);
+  return { down, up, simulated };
+}
+
 function renderClientProfile(profile, cuenta) {
   const phonesHtml = profilePhonesHtml(profile.phones);
-  const down = profile.contractedDownloadMbps ?? '—';
-  const up = profile.contractedUploadMbps ?? '—';
+  const plan = contractedPlanMbps(profile);
+  const down = plan.down ?? '—';
+  const up = plan.up ?? '—';
   const speedTxt = `${escapeHtml(down)} ↓ / ${escapeHtml(up)} ↑ Mbps`;
   // Plan y velocidad siguen simulados hasta que exista la API de Comarch: se
   // rotulan como tales para que el técnico no los lea como datos reales.
@@ -7505,8 +7525,8 @@ function distanceFormHtml() {
 // El motor nativo anterior (NetworkTools / Ookla) quedó desconectado de la UI.
 // ============================================================================
 
-/** Plan por defecto si no hay perfil validado con velocidad contratada. */
-const EXT_SPEED_FALLBACK_PLAN = Object.freeze({ downMbps: 300, upMbps: 150 });
+/** Plan por defecto si no hay perfil validado con velocidad contratada (simétrico). */
+const EXT_SPEED_FALLBACK_PLAN = Object.freeze({ downMbps: 300, upMbps: 300 });
 
 /** Datos del medidor simulado. */
 const EXT_SPEED_SIM_DEVICE = Object.freeze({
@@ -7522,8 +7542,9 @@ const EXT_SPEED_SIM_DEVICE = Object.freeze({
 function _extSpeedPlan() {
   const cuenta = currentAccount();
   const p = validatedProfile && validatedAccount === cuenta ? validatedProfile : null;
-  const down = p ? Number(p.contractedDownloadMbps) : NaN;
-  const up = p ? Number(p.contractedUploadMbps) : NaN;
+  const plan = contractedPlanMbps(p);
+  const down = plan.down === null ? NaN : plan.down;
+  const up = plan.up === null ? NaN : plan.up;
   if (Number.isFinite(down) && down > 0 && Number.isFinite(up) && up > 0) {
     return { downMbps: down, upMbps: up, known: true };
   }
