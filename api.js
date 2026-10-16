@@ -1809,6 +1809,62 @@
     return null;
   }
 
+  // Año calendario actual en Ecuador (UTC-5, sin horario de verano).
+  function currentEcuadorYear() {
+    return new Date(Date.now() - 5 * 3600000).getUTCFullYear();
+  }
+
+  function taskNotFoundError(message) {
+    const err = new Error(message);
+    err.code = 'TASK_NOT_FOUND';
+    err.status = 404;
+    return err;
+  }
+
+  // Task de ingreso (TYTAN simulado), como el backend: formato inválido → 400
+  // VALIDATION_ERROR; año futuro o número cero → 404 TASK_NOT_FOUND.
+  function normalizeEntryTask(raw) {
+    const tid = normalizeTaskId(raw);
+    if (!tid) throw validationError('Número de tarea inválido: usa TASK/<6-7 dígitos>/<año> o solo el número.');
+    const m = /^TASK\/(\d+)\/(\d{4})$/.exec(tid);
+    if (Number(m[2]) > currentEcuadorYear() || Number(m[1]) === 0) {
+      throw taskNotFoundError('La task ' + tid + ' no existe en el FSM.');
+    }
+    return tid;
+  }
+
+  // Task FSM ⇄ orden derivada (TYTAN SIMULADO, misma biyección que el backend
+  // en order-ids.ts): TASK/<d…d>/<año> → ORDER/<L><(A·x+B) mod 10^7>/<año>.
+  // TODO(tytan-real): la orden de una task la dará TYTAN/FSM.
+  const TASK_SPACE = 10000000;
+  const AFFINE_A = 3141593;
+  const AFFINE_B = 2718281;
+  function modInverse(a, m) {
+    let oldR = a; let r = m; let oldS = 1; let sv = 0;
+    while (r !== 0) {
+      const q = Math.floor(oldR / r);
+      let t = r; r = oldR - q * r; oldR = t;
+      t = sv; sv = oldS - q * sv; oldS = t;
+    }
+    return ((oldS % m) + m) % m;
+  }
+  const AFFINE_A_INV = modInverse(AFFINE_A, TASK_SPACE);
+  function workOrderFromTask(taskId) {
+    const m = /^TASK\/(\d{6,7})\/(\d{4})$/.exec(String(taskId || ''));
+    if (!m) return null;
+    const y = ((AFFINE_A * Number(m[1])) % TASK_SPACE + AFFINE_B) % TASK_SPACE;
+    return 'ORDER/' + m[1].length + String(y).padStart(7, '0') + '/' + m[2];
+  }
+  function taskFromWorkOrder(workOrder) {
+    const m = /^ORDER\/([67]\d{7})\/(\d{4})$/.exec(String(workOrder || ''));
+    if (!m) return null;
+    const len = Number(m[1][0]);
+    const y = Number(m[1].slice(1));
+    const x = (AFFINE_A_INV * ((y - AFFINE_B + TASK_SPACE) % TASK_SPACE)) % TASK_SPACE;
+    if (x >= Math.pow(10, len)) return null;
+    return 'TASK/' + String(x).padStart(len, '0') + '/' + m[2];
+  }
+
   // PRNG determinístico (mulberry32) para que la orden "no baile".
   function seededRandom(seed) {
     let a = (Number(seed) >>> 0) || 1;
@@ -1892,7 +1948,10 @@
     // HFC no tiene Migración (como el backend): esas órdenes quedan en Visita Técnica.
     const orderType = (function (t) { return technology === 'HFC' && t === 'Migración' ? 'Visita Técnica' : t; })(['Visita Técnica', 'Migración', 'Instalación'][n % 3]);
     const sig = { 'Visita Técnica': 'FSM_VISTEC', 'Migración': 'FSM_MIGRA', 'Instalación': 'FSM_INSTAL' }[orderType];
-    const open = n % 5 !== 0;           // 4 de cada 5 órdenes con la tarea de hoy pendiente
+    // Orden derivada de una task (ingreso por task): esa task es SIEMPRE la
+    // Pendiente de hoy (como el backend).
+    const pinnedTask = taskFromWorkOrder(wo);
+    const open = pinnedTask ? true : n % 5 !== 0; // 4 de cada 5 órdenes con la tarea de hoy pendiente
     const count = 2 + (n % 4);          // 2..5 tareas
     const midnight = ecuadorMidnightUtcMs();
     const tasks = [];
@@ -1901,7 +1960,8 @@
       const daysAgo = i === 0 ? (open ? 0 : 1 + Math.floor(rnd() * 2)) : i * 2 + Math.floor(rnd() * 2);
       const schedFrom = midnight - daysAgo * DAY_MS + (8 + Math.floor(rnd() * 6)) * 3600000;
       const schedTo = schedFrom + 2 * 3600000;
-      const taskNum = 500000 + ((n * 37 + i * 1009) % 99999);
+      let taskNum = 500000 + ((n * 37 + i * 1009) % 99999);
+      if (pinnedTask && i > 0 && ('TASK/' + taskNum + '/' + year) === pinnedTask) taskNum += 1;
       const pendiente = open && i === 0;
       const cancelado = !pendiente && rnd() < 0.3;
       const status = pendiente ? 'Pendiente' : (cancelado ? 'Cancelado' : 'Realizado');
@@ -1935,7 +1995,8 @@
         };
       }
       tasks.push({
-        taskId: 'TASK/' + taskNum + '/' + year,
+        current: pendiente,
+        taskId: pendiente && pinnedTask ? pinnedTask : 'TASK/' + taskNum + '/' + year,
         taskType: orderType + ' ' + technology,
         status: status,
         doneFrom: doneFrom ? new Date(doneFrom).toISOString() : null,
@@ -1988,9 +2049,19 @@
     }
     // NAP del cliente y red de acceso: los mismos que ve ISP Monitor.
     const topoIsp = mockIspTopology(account, technology);
+    const observations = [
+      'Cliente reporta ' + (isGpon ? 'intermitencia en la fibra' : 'lentitud en el cablemódem') + ' en horario nocturno.',
+      'Llamar antes de llegar. Referencia: casa esquinera, portón ' + pick(['verde', 'negro', 'blanco']) + '.',
+    ].join(' ');
+    const signatureProcess = sig + '/' + (100000 + (n % 899999)) + '/' + year;
+    const visits = mockOrderVisits({
+      tasks: tasks, workOrder: wo, signatureProcess: signatureProcess, orderNote: observations,
+      equipment: equipment, profile: profile, account: account, technology: technology, orderType: orderType,
+    });
     return {
       simulated: true,
       source: 'TYTAN',
+      currentTaskId: open ? tasks[0].taskId : null,
       order: {
         workOrder: wo,
         orderType: orderType,
@@ -2001,7 +2072,7 @@
         slaAt: new Date(Date.parse(createdAt) + 3 * DAY_MS).toISOString(),
         externalSystem: 'TYTAN',
         externalId: String(38000000 + (n % 999999)),
-        signatureProcess: sig + '/' + (100000 + (n % 899999)) + '/' + year,
+        signatureProcess: signatureProcess,
       },
       client: {
         accountNumber: account,
@@ -2016,11 +2087,163 @@
       tasks: tasks,
       equipment: equipment,
       registeredAddress: profile.address || null,
-      observations: [
-        'Cliente reporta ' + (isGpon ? 'intermitencia en la fibra' : 'lentitud en el cablemódem') + ' en horario nocturno.',
-        'Llamar antes de llegar. Referencia: casa esquinera, portón ' + pick(['verde', 'negro', 'blanco']) + '.',
-      ].join(' '),
+      observations: observations,
+      visits: visits,
     };
+  }
+
+  // ---- Visitas "como en el FSM" (OrderVisit, aditivo 2026-10-16) -----------
+  // Las tasks de la orden + 1–3 órdenes anteriores de la cuenta (la más antigua
+  // es la instalación; ninguna si la orden es una Instalación). Pendiente
+  // primero, luego de la más reciente a la más antigua. Fechas UTC ISO.
+  const MOCK_VISIT_CANCEL_REASONS = ['CLIENTE NO SE ENCUENTRA EN DOMICILIO', 'CLIENTE REPROGRAMA LA VISITA', 'DIRECCIÓN INCORRECTA'];
+  function visitResultOf(status) {
+    if (status === 'Realizado') return 'SATISFACTORIA';
+    if (status === 'Cancelado') return 'INSATISFACTORIA';
+    return 'PENDIENTE';
+  }
+  function visitProgressNotes(status, startedAt, finishedAt, reason, notes) {
+    if (status === 'Realizado' && startedAt && finishedAt) {
+      return [
+        { createdAt: startedAt, content: 'TECNICO EN SITIO. INICIA ATENCION AL CLIENTE.' },
+        { createdAt: finishedAt, content: notes || '' },
+      ];
+    }
+    if (status === 'Cancelado' && finishedAt) return [{ createdAt: finishedAt, content: (reason || '') + '. ' + (notes || '') }];
+    return [];
+  }
+  function mockOrderVisits(o) {
+    const place = {
+      address: (o.profile && o.profile.address) || '',
+      latitude: o.profile && typeof o.profile.latitude === 'number' ? o.profile.latitude : null,
+      longitude: o.profile && typeof o.profile.longitude === 'number' ? o.profile.longitude : null,
+    };
+    const copyEq = function (list) { return list.map(function (e) { return Object.assign({}, e); }); };
+    const own = o.tasks.map(function (t) {
+      const n = Number((/^TASK\/(\d+)\//.exec(t.taskId) || [0, 0])[1]);
+      const sched = Date.parse(t.scheduledFrom);
+      const created = sched - (6 + (n % 24)) * 3600000;
+      const startedAt = t.status === 'Realizado' ? t.doneFrom : null;
+      const finishedAt = t.status === 'Realizado' ? t.doneTo
+        : (t.status === 'Cancelado' ? new Date(sched + (20 + (n % 60)) * 60000).toISOString() : null);
+      const c = t.status === 'Pendiente' ? null : t.closure;
+      return {
+        _sort: sched,
+        current: t.status === 'Pendiente' && !!t.current,
+        taskId: t.taskId,
+        fsmTaskId: 8000000 + (n % 999999),
+        workOrder: o.workOrder,
+        externalProcess: o.signatureProcess,
+        workType: t.taskType,
+        status: t.status,
+        result: visitResultOf(t.status),
+        createdAt: new Date(created).toISOString(),
+        scheduledFrom: t.scheduledFrom,
+        scheduledTo: t.scheduledTo,
+        startedAt: startedAt,
+        finishedAt: finishedAt,
+        technician: t.assignedTo,
+        lastModifyUser: t.status === 'Pendiente' ? null : t.assignedTo,
+        closureReason: c ? c.reason : null,
+        closureNotes: c ? c.notes : null,
+        orderNote: o.orderNote,
+        notes: [{ createdAt: new Date(created).toISOString(), content: 'ORDEN GENERADA DESDE TYTAN. ' + o.orderNote }]
+          .concat(visitProgressNotes(t.status, startedAt, finishedAt, c && c.reason, c && c.notes)),
+        materials: t.status === 'Realizado' && c ? c.materials.map(function (m) { return Object.assign({}, m); }) : [],
+        equipment: copyEq(o.equipment),
+        address: place.address,
+        latitude: place.latitude,
+        longitude: place.longitude,
+      };
+    });
+    const history = [];
+    if (o.orderType !== 'Instalación') {
+      const seed = Number(String(o.account).replace(/\D/g, '')) || 1;
+      const rnd = seededRandom(seed * 7 + 13);
+      const pick = function (arr) { return arr[Math.floor(rnd() * arr.length)]; };
+      const count = 1 + Math.floor(rnd() * 3);
+      const pastTech = o.orderType === 'Migración' ? 'HFC' : o.technology;
+      const midnight = ecuadorMidnightUtcMs();
+      let dayCursor = 30 + Math.floor(rnd() * 30);
+      let fsmTaskId = 5000000 + Math.floor(rnd() * 900000);
+      const usados = {};
+      o.tasks.forEach(function (t) { usados[t.taskId] = true; });
+      for (let i = 0; i < count; i++) {
+        const start = midnight - dayCursor * DAY_MS + (8 + Math.floor(rnd() * 7)) * 3600000;
+        dayCursor += 45 + Math.floor(rnd() * 255);
+        const year = new Date(start - 5 * 3600000).getUTCFullYear();
+        const type = i === count - 1 ? 'Instalación' : 'Visita Técnica';
+        const status = type === 'Instalación' || rnd() < 0.7 ? 'Realizado' : 'Cancelado';
+        fsmTaskId -= 20000 + Math.floor(rnd() * 380000);
+        let taskNumber = 100000 + Math.floor(rnd() * 299999);
+        while (usados['TASK/' + taskNumber + '/' + year]) taskNumber += 1;
+        const taskId = 'TASK/' + taskNumber + '/' + year;
+        usados[taskId] = true;
+        const technician = pick(MOCK_ORDER_CREWS);
+        const created = start - (2 + Math.floor(rnd() * 28)) * 3600000;
+        const orderNote = type === 'Instalación' ? 'Instalación de servicio nuevo. Coordinar acceso con el cliente.' : 'Cliente reporta fallas intermitentes en el servicio.';
+        let startedAt = null;
+        let finished;
+        let reason;
+        let notes;
+        let materials = [];
+        if (status === 'Realizado') {
+          startedAt = start + (10 + Math.floor(rnd() * 40)) * 60000;
+          finished = startedAt + (40 + Math.floor(rnd() * 80)) * 60000;
+          const mt = MOCK_ORDER_MATERIALS[Math.floor(rnd() * MOCK_ORDER_MATERIALS.length)];
+          materials = [{ name: mt.name, type: mt.type, quantity: 1 + Math.floor(rnd() * 6) }];
+          reason = type === 'Instalación' ? 'INSTALACIÓN REALIZADA' : pick(MOCK_ORDER_REASONS_OK);
+          notes = 'CTO: ' + o.account + '. SE DEJA SERVICIO OPERATIVO ' + pastTech + ', CLIENTE CONFORME.';
+        } else {
+          finished = start + (20 + Math.floor(rnd() * 90)) * 60000;
+          reason = pick(MOCK_VISIT_CANCEL_REASONS);
+          notes = 'TAREA CANCELADA. SE NOTIFICA A CALL CENTER PARA REAGENDAR.';
+        }
+        const startedIso = startedAt ? new Date(startedAt).toISOString() : null;
+        const finishedIso = new Date(finished).toISOString();
+        const modem = o.equipment[0] || {};
+        history.push({
+          _sort: start,
+          current: false,
+          taskId: taskId,
+          fsmTaskId: fsmTaskId,
+          workOrder: 'ORDER/' + (60000 + Math.floor(rnd() * 339999)) + '/' + year,
+          externalProcess: (type === 'Instalación' ? 'FSM_INSTAL' : 'FSM_VISTEC') + '/' + (10000 + Math.floor(rnd() * 89999)) + '/' + year,
+          workType: type + ' ' + pastTech,
+          status: status,
+          result: visitResultOf(status),
+          createdAt: new Date(created).toISOString(),
+          scheduledFrom: new Date(start).toISOString(),
+          scheduledTo: new Date(start + 2 * 3600000).toISOString(),
+          startedAt: startedIso,
+          finishedAt: finishedIso,
+          technician: technician,
+          lastModifyUser: technician,
+          closureReason: reason,
+          closureNotes: notes,
+          orderNote: orderNote,
+          notes: [{ createdAt: new Date(created).toISOString(), content: 'ORDEN GENERADA DESDE TYTAN. ' + orderNote }]
+            .concat(visitProgressNotes(status, startedIso, status === 'Realizado' ? finishedIso : finishedIso, reason, notes)),
+          materials: materials,
+          equipment: [
+            Object.assign({}, modem, pastTech === o.technology ? {} : { model: 'CABLEMODEM ARRIS TG2482A', type: 'SERVICE CALL+HFC' }),
+            { serviceId: String(Number(modem.serviceId || 156000000) - 7), status: 'Aprovisionado', type: 'INTERNET ' + pastTech,
+              shortName: 'Internet', productName: 'Internet', model: null, serial: null, mac: null },
+          ],
+          address: place.address,
+          latitude: place.latitude,
+          longitude: place.longitude,
+        });
+      }
+    }
+    const pending = own.filter(function (v) { return v.current; });
+    const previous = own.filter(function (v) { return !v.current; }).concat(history)
+      .sort(function (a, b) { return b._sort - a._sort; });
+    return pending.concat(previous).map(function (v) {
+      const out = Object.assign({}, v);
+      delete out._sort;
+      return out;
+    });
   }
 
   function mockLookupByOrder(order) {
@@ -2045,15 +2268,16 @@
     };
   }
 
-  function mockTaskCheck(workOrder, taskId) {
-    const wo = normalizeOrderNumber(workOrder);
-    const tid = normalizeTaskId(taskId);
-    if (!wo) throw validationError('Formato de orden inválido. Usa ORDER/463158/2026 o solo el número.');
-    if (!tid) throw validationError('Formato de task inválido. Usa TASK/549487/2026 o solo el número (6-7 dígitos).');
-    const ctx = mockOrderContext(wo);
-    const task = ctx.tasks.filter(function (t) { return t.taskId === tid; })[0];
-    if (!task) return { valid: false, reason: 'TASK_NOT_IN_ORDER', taskId: tid, workOrder: wo, simulated: true };
-    return { valid: true, taskId: tid, workOrder: wo, task: task, simulated: true };
+  // Ingreso por task (modo principal): orden derivada + la cuenta de ESA orden.
+  function mockLookupByTask(task) {
+    const tid = normalizeEntryTask(task);
+    const r = mockLookupByOrder(workOrderFromTask(tid));
+    return Object.assign({ by: 'task', task: tid }, r, { by: 'task', task: tid });
+  }
+
+  // GET /tasks/context: idéntico al contexto de la orden derivada.
+  function mockTaskContext(task) {
+    return mockOrderContext(workOrderFromTask(normalizeEntryTask(task)));
   }
 
   // NAP elegida en Instalación (append-only en memoria, como el resto del mock).
@@ -2408,19 +2632,34 @@
       await delay(120);
       return mockOrderContext(workOrder);
     },
-    // Validación del Nº de task de la visita (§4): { valid, taskId, workOrder,
-    // task } o { valid:false, reason:'TASK_NOT_IN_ORDER' }. Formato inválido → 400.
-    async checkOrderTask(workOrder, taskId) {
+    // Ingreso por Nº de task FSM (MODO PRINCIPAL, 2026-10-16). Acepta
+    // 'TASK/549487/2026' o '549487'. 200 { by:'task', task, workOrder,
+    // simulated, source:'TYTAN', matches:[1], count, truncated, importedAt }.
+    // Formato inválido → 400 VALIDATION_ERROR; task imposible → 404 TASK_NOT_FOUND.
+    // La task basta: no hay validación adicional (task-check está deprecado y
+    // la app ya no lo usa).
+    async lookupAccountsByTask(task) {
       if (this.useRealApi) {
-        return fetchJson('GET', '/orders/task-check?workOrder=' + encodeURIComponent(workOrder) +
-          '&taskId=' + encodeURIComponent(taskId));
+        return fetchJson('POST', '/accounts/lookup', { task: String(task || '').trim() });
       }
-      await delay(80);
-      return mockTaskCheck(workOrder, taskId);
+      await delay(90);
+      return mockLookupByTask(task);
+    },
+    // Contexto de la task: mismo objeto que /orders/context + currentTaskId,
+    // tasks[].current y visits[] (pendiente actual primero). task como query
+    // param (lleva barras).
+    async getTaskContext(task) {
+      if (this.useRealApi) {
+        return fetchJson('GET', '/tasks/context?task=' + encodeURIComponent(task));
+      }
+      await delay(120);
+      return mockTaskContext(task);
     },
     // Normalizadores puros (misma regla que el backend) para validar en la UI.
     normalizeOrderNumber: normalizeOrderNumber,
     normalizeTaskId: normalizeTaskId,
+    // Solo el simulador: orden derivada de una task (para pruebas/demos).
+    mockWorkOrderFromTask: workOrderFromTask,
 
     // ---- NAP elegida en Instalación (§5, append-only) ----------------------
     // body = { napId, napCode, napName, port, latitude, longitude,
