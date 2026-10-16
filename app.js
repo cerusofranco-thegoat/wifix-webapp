@@ -10540,13 +10540,15 @@ async function openRetirados() {
 // ============================================================================
 // Equipo a instalar — Validación de capacidad vs plan contratado
 // ----------------------------------------------------------------------------
-// Instalaciones, Migraciones y Visita técnica. El técnico toma la foto de la
-// etiqueta del equipo que va a instalar (mismo escáner que Equipos Retirados:
-// ML Kit barcode + OCR, serial editable). El modelo del catálogo se DETECTA
+// Instalaciones, Migraciones y Visita técnica. UN SOLO DISPARO: el técnico
+// fotografía la etiqueta del equipo que va a instalar y de ESA imagen salen
+// los códigos de barras (serial) y el texto (OCR, modelo)
+// —WifixNative.serialScanner.captureLabel—. El modelo del catálogo se DETECTA
 // solo (devDetectModel: texto de la etiqueta + marca del prefijo del serial)
 // y la validación contra el plan se dispara sola (devAutoValidate, sin botón).
-// El modelo queda en un menú desplegable (<select> por marca): si el técnico
-// lo cambia, se re-valida con el nuevo. Cada validación es un POST (alerta).
+// El menú desplegable (<select> por marca) queda plegado como corrección
+// opcional y se abre solo cuando no hubo detección. Si el técnico cambia el
+// modelo, se re-valida con el nuevo. Cada validación es un POST (alerta).
 //
 //   ok           → verde, módulo completado.
 //   unknown_plan → ámbar, no bloquea (el backend deja la alerta "sin plan").
@@ -10978,7 +10980,7 @@ function devRefreshIndicators() {
       <button type="button" class="save-btn device-block-banner-btn" data-action="open-equipo">Escanear otro equipo</button>`;
     deviceBlockBanner.hidden = false;
     const btn = deviceBlockBanner.querySelector('[data-action="open-equipo"]');
-    if (btn) btn.addEventListener('click', () => openEquipo());
+    if (btn) btn.addEventListener('click', () => openEquipo({ rescan: true }));
   } else {
     deviceBlockBanner.innerHTML = '';
     deviceBlockBanner.hidden = true;
@@ -11044,18 +11046,39 @@ function devModelsHtml(dev) {
     .map((g) => `<optgroup label="${escapeHtml(g.brand)}">${g.items.map(opt).join('')}</optgroup>`).join('');
   const other = dev.model === DEVICE_OTHER_MODEL;
   return `
-    <div class="form-row dev-model-row">
-      <label class="form-label" for="devModelSelect">Modelo del equipo *</label>
-      <select id="devModelSelect" data-field="devModel" aria-describedby="devModelHint">
-        <option value=""${dev.model ? '' : ' selected'}>Elige el modelo…</option>
-        ${groups}
-        <optgroup label="Fuera del catálogo">
-          <option value="${DEVICE_OTHER_MODEL}"${other ? ' selected' : ''}>El modelo no está en la lista (no homologado)</option>
-        </optgroup>
-      </select>
-      <p class="form-note dev-model-hint" id="devModelHint" data-slot="dev-model-hint" aria-live="polite">${devModelHintHtml(dev)}</p>
-    </div>
-    <div data-slot="dev-other">${devOtherModelHtml(dev)}</div>`;
+    <p class="form-note dev-model-hint" id="devModelHint" data-slot="dev-model-hint" aria-live="polite">${devModelHintHtml(dev)}</p>
+    <details class="dev-model-picker" data-slot="dev-model-picker"${devModelPickerOpen(dev) ? ' open' : ''}>
+      <summary class="dev-model-summary" data-slot="dev-model-summary">${escapeHtml(devModelSummaryText(dev))}</summary>
+      <div class="form-row dev-model-row">
+        <label class="form-label" for="devModelSelect">Modelo del equipo</label>
+        <select id="devModelSelect" data-field="devModel" aria-describedby="devModelHint">
+          <option value=""${dev.model ? '' : ' selected'}>Elige el modelo…</option>
+          ${groups}
+          <optgroup label="Fuera del catálogo">
+            <option value="${DEVICE_OTHER_MODEL}"${other ? ' selected' : ''}>El modelo no está en la lista (no homologado)</option>
+          </optgroup>
+        </select>
+      </div>
+      <div data-slot="dev-other">${devOtherModelHtml(dev)}</div>
+    </details>`;
+}
+
+/**
+ * El menú es una corrección OPCIONAL: queda plegado mientras la detección
+ * automática funcione y se abre solo cuando hace falta (se capturó y no hubo
+ * detección, catálogo vacío, o el técnico ya está corrigiendo a mano).
+ */
+function devModelPickerOpen(dev) {
+  if (!dev || !dev.catalog) return false;
+  if (!dev.catalog.length) return true;
+  if (dev.model === DEVICE_OTHER_MODEL || dev.modelSource === 'manual') return true;
+  return !!(dev.detection && !dev.model && devNormalize(dev.serial).length >= 4);
+}
+
+function devModelSummaryText(dev) {
+  return dev && dev.model && dev.modelSource !== 'manual'
+    ? '¿No coincide con la etiqueta? Corregir el modelo'
+    : 'Elegir el modelo manualmente';
 }
 
 function devOtherModelHtml(dev) {
@@ -11097,8 +11120,11 @@ function devModelHintHtml(dev) {
   if (det && det.offBrand && det.offBrand.length) {
     return 'El modelo leído en la etiqueta no corresponde a la marca del serial: revisa el serial y elige el modelo en el menú.';
   }
+  if (det && dev.labelSource === 'barcode' && det.brandCount > 1) {
+    return 'El código escaneado solo trae el serial y la marca tiene varios modelos: fotografía la etiqueta para detectarlo, o elígelo en el menú.';
+  }
   if (det) return 'No se reconoció el modelo en la etiqueta: elígelo en el menú.';
-  return 'Toma la foto de la etiqueta para detectarlo automáticamente, o elígelo en el menú.';
+  return 'Toma la foto de la etiqueta para detectarlo automáticamente (no hace falta elegir nada).';
 }
 
 /** Tiles plan vs equipo. `outcome` = vista previa o veredicto del servidor. */
@@ -11167,6 +11193,7 @@ function devPreviewTilesHtml(dev) {
 function devMissingText(dev) {
   if (!dev.catalog) return 'Esperando el catálogo de equipos.';
   if (devNormalize(dev.serial).length < 4) return 'Falta el número de serie: toma la foto de la etiqueta o escríbelo.';
+  if (!dev.model && !dev.detection) return 'Toma la foto de la etiqueta: el modelo se detecta y se valida solo.';
   if (!dev.model) return 'Elige el modelo en el menú: la validación se hace sola.';
   if (dev.model === DEVICE_OTHER_MODEL && !String(dev.otherModel || '').trim()) return 'Escribe el modelo que figura en la etiqueta.';
   return '';
@@ -11251,11 +11278,11 @@ function devScannerHtml(nativeAvailable) {
   return `
     <div class="serial-detect-block">
       <p class="serial-browser-note">${nativeAvailable
-        ? 'Toma una foto de la etiqueta: lee el serial y el modelo y valida solo. El código de barras solo lee el serial.'
+        ? 'Un solo disparo: la foto de la etiqueta lee el código de barras (serial) y el texto (modelo) y valida sola contra el plan.'
         : 'Escaneo disponible solo en la app: toma una foto o escribe el serial'}</p>
       <div class="serial-actions">
-        <button type="button" class="serial-action-btn" data-action="dev-photo">${camIcon} Tomar foto</button>
-        ${nativeAvailable ? `<button type="button" class="serial-action-btn" data-action="dev-scan">${scanIcon} Escanear código</button>` : ''}
+        <button type="button" class="serial-action-btn dev-primary-capture" data-action="dev-photo">${camIcon} Fotografiar etiqueta</button>
+        ${nativeAvailable ? `<button type="button" class="serial-action-btn" data-action="dev-scan">${scanIcon} Solo código de barras</button>` : ''}
       </div>
       <input type="file" accept="image/*" capture="environment" data-slot="dev-file" hidden aria-hidden="true" tabindex="-1">
       <div class="serial-result-row" data-slot="dev-serial-badge" aria-live="polite"></div>
@@ -11301,12 +11328,12 @@ function devScreenHtml(dev) {
   return `
     <div class="tool-form dev-module" data-form="device-validation">
       ${blockedBefore ? `<div class="dev-still-blocked" role="status">El equipo anterior${st.validation && st.validation.serial ? ` (${escapeHtml(st.validation.serial)})` : ''} quedó bloqueado. El flujo sigue bloqueado hasta validar un equipo apto.</div>` : ''}
-      <p class="form-note dev-intro">Toma una foto de la etiqueta del equipo que vas a instalar (ONT, ONU, router o powerline): se detecta el modelo y se valida automáticamente contra el plan del cliente.</p>
+      <p class="form-note dev-intro">Fotografía la etiqueta del equipo que vas a instalar (ONT, ONU, router o powerline): el serial y el modelo se detectan solos y se validan automáticamente contra el plan del cliente.</p>
       <h3 class="dev-step">1. Etiqueta del equipo</h3>
       ${devScannerHtml(serialScannerAvailable())}
-      <h3 class="dev-step">2. Modelo</h3>
+      <h3 class="dev-step">2. Modelo (automático)</h3>
       <div data-slot="dev-models">${devModelsHtml(dev)}</div>
-      <h3 class="dev-step">3. Validación vs plan</h3>
+      <h3 class="dev-step">3. Validación vs plan (automática)</h3>
       <div data-slot="dev-result" aria-live="polite">${devResultHtml(dev)}</div>
     </div>`;
 }
@@ -11322,6 +11349,7 @@ function devRenderSlots(names = ['dev-models', 'dev-result', 'dev-serial-badge']
   const html = {
     'dev-models': devModelsHtml,
     'dev-model-hint': devModelHintHtml,
+    'dev-model-summary': (d) => escapeHtml(devModelSummaryText(d)),
     'dev-other': devOtherModelHtml,
     'dev-result': devResultHtml,
     'dev-serial-badge': devSerialBadgeHtml,
@@ -11346,7 +11374,10 @@ function devSyncModelSelect() {
     if (d) o.textContent = devOptionText(d, _dev);
   });
   sel.value = _dev.model || '';
-  devRenderSlots(['dev-model-hint', 'dev-other']);
+  devRenderSlots(['dev-model-hint', 'dev-model-summary', 'dev-other']);
+  // Solo se ABRE (nunca se cierra a la fuerza: el técnico pudo abrirlo él).
+  const picker = equipoBody.querySelector('[data-slot="dev-model-picker"]');
+  if (picker && devModelPickerOpen(_dev)) picker.open = true;
 }
 
 function devRender(focusSel) {
@@ -11433,7 +11464,7 @@ function devResolveModel(dev, det, newDevice) {
  * detección automática del modelo. Pura sobre `dev` (sin DOM ni red).
  * Si el serial cambió es OTRO equipo: lo leído antes no cuenta.
  */
-function devApplyCapture(dev, rawValues, source) {
+function devApplyCapture(dev, rawValues, source, serialSource = source) {
   const raw = (Array.isArray(rawValues) ? rawValues : []).map((v) => String(v ?? '')).filter(Boolean);
   const picked = devPickSerial(raw, dev.catalog || []);
   const prevSerial = devNormalize(dev.serial);
@@ -11441,7 +11472,7 @@ function devApplyCapture(dev, rawValues, source) {
   if (picked.serial) {
     dev.serial = picked.serial;
     dev.detectedSerial = picked.serial;
-    dev.serialSource = source;
+    dev.serialSource = serialSource;
     dev.serialStatus = picked.confidence === 'ok'
       ? { kind: 'ok', text: `✓ Serial detectado: ${picked.serial}` }
       : { kind: 'warn', text: `⚠ Verifica el serial contra la etiqueta: ${picked.serial}` };
@@ -11455,6 +11486,21 @@ function devApplyCapture(dev, rawValues, source) {
   dev.detection = det;
   devResolveModel(dev, det, newDevice);
   return dev;
+}
+
+/**
+ * Una foto = códigos de barras + OCR de la MISMA imagen. Los códigos van
+ * primero para que el serial salga del código (más fiable que el OCR) y el
+ * texto aporta el modelo. Pura. Devuelve { raw, serialSource }.
+ */
+function devCombineLabelImage(capture, catalog) {
+  const barcodes = (capture && Array.isArray(capture.barcodes) ? capture.barcodes : []).map(String).filter(Boolean);
+  const lines = (capture && Array.isArray(capture.lines) ? capture.lines : []).map(String).filter(Boolean);
+  const fromCode = barcodes.length ? devPickSerial(barcodes, catalog || []) : null;
+  return {
+    raw: barcodes.concat(lines),
+    serialSource: fromCode && fromCode.confidence === 'ok' ? 'barcode' : 'ocr',
+  };
 }
 
 /** El técnico corrigió el serial a mano: re-detecta con lo ya leído (o solo la marca). */
@@ -11573,9 +11619,13 @@ function devRepaintResult(dev) {
  * u OCR de la foto): aplica serial + modelo detectado, sincroniza la pantalla
  * y valida sola. El recorrido headless la llama con texto simulado.
  */
-async function devProcessCapture(dev, rawValues, source, demoLabel = null) {
+async function devProcessCapture(dev, rawValues, source, demoLabel = null, serialSource = source) {
   dev.demoLabel = demoLabel;
-  devApplyCapture(dev, rawValues, source);
+  // Foto tomada antes de que llegue el catálogo (p. ej. "Escanear otro equipo"
+  // desde el banner): se espera el catálogo para que la detección no quede
+  // vacía y obligue a elegir a mano.
+  if (!dev.catalog) await devLoadCatalogInto(dev, false);
+  devApplyCapture(dev, rawValues, source, serialSource);
   if (_dev === dev && equipoBody) {
     const input = equipoBody.querySelector('[data-field="devSerial"]');
     if (input) input.value = dev.serial;
@@ -11591,6 +11641,24 @@ function devStartRescan() {
   next.rescanning = true;
   _dev = next;
   devRender('[data-action="dev-photo"]');
+}
+
+/**
+ * Dispara la captura de la etiqueta (cámara nativa o selector de archivo en
+ * el navegador). Debe llamarse dentro del gesto del técnico (clic) para que
+ * el navegador permita abrir el selector.
+ */
+function devTriggerCapture() {
+  if (!equipoBody) return;
+  const btn = equipoBody.querySelector('[data-action="dev-photo"]');
+  if (!btn) return;
+  const useNativeCamera = serialScannerAvailable() && typeof window.WifixNative?.takePhoto === 'function';
+  if (useNativeCamera) {
+    devCapturePhoto(btn, null);
+  } else {
+    const fileInput = equipoBody.querySelector('[data-slot="dev-file"]');
+    if (fileInput) fileInput.click();
+  }
 }
 
 async function devCaptureBarcode(btn) {
@@ -11636,9 +11704,25 @@ async function devCapturePhoto(btn, file) {
   btn.setAttribute('aria-busy', 'true');
   let lines = null;
   let demoLabel = null;
+  let serialSource = 'ocr';
+  const scanner = window.WifixNative && window.WifixNative.serialScanner;
   try {
     let base64 = null;
-    if (file) {
+    if (!file && serialScannerAvailable() && scanner && typeof scanner.captureLabel === 'function') {
+      // Un solo disparo: códigos de barras + OCR de la misma foto.
+      const cap = await scanner.captureLabel();
+      if (!cap) {
+        dev.serialStatus = { kind: 'warn', text: '⚠ No se tomó ninguna foto' };
+      } else {
+        const combined = devCombineLabelImage(cap, dev.catalog);
+        serialSource = combined.serialSource;
+        lines = combined.raw;
+        if (!lines.length) {
+          dev.serialStatus = { kind: 'warn', text: '⚠ No se encontró texto ni código en la foto: acerca la cámara a la etiqueta' };
+          lines = null;
+        }
+      }
+    } else if (file) {
       base64 = await readFileAsBase64(file);
     } else {
       const dataUrl = await window.WifixNative.takePhoto();
@@ -11664,7 +11748,7 @@ async function devCapturePhoto(btn, file) {
     btn.disabled = false;
     btn.removeAttribute('aria-busy');
   }
-  if (lines) await devProcessCapture(dev, lines, 'ocr', demoLabel);
+  if (lines) await devProcessCapture(dev, lines, 'ocr', demoLabel, serialSource);
   else if (_dev === dev) devRenderSlots(['dev-serial-badge']);
 }
 
@@ -11749,13 +11833,7 @@ function devWireOnce() {
     if (action === 'dev-scan') {
       devCaptureBarcode(btn);
     } else if (action === 'dev-photo') {
-      const useNativeCamera = serialScannerAvailable() && typeof window.WifixNative?.takePhoto === 'function';
-      if (useNativeCamera) {
-        devCapturePhoto(btn, null);
-      } else {
-        const fileInput = equipoBody.querySelector('[data-slot="dev-file"]');
-        if (fileInput) fileInput.click();
-      }
+      devTriggerCapture();
     } else if (action === 'dev-retry-catalog') {
       const dev = _dev;
       await devLoadCatalogInto(dev, true);
@@ -11770,12 +11848,16 @@ function devWireOnce() {
         if (title) title.focus();
       }
     } else if (action === 'dev-rescan') {
+      // "Escanear/Validar otro equipo" abre la cámara de una vez (sin un
+      // segundo toque en "Fotografiar etiqueta").
       devStartRescan();
+      devTriggerCapture();
     }
   });
 }
 
-async function openEquipo() {
+/** opts.rescan: viene de "Escanear otro equipo" (banner): abre la cámara de una vez. */
+async function openEquipo(opts = {}) {
   const cuenta = currentAccount();
   if (!cuenta) {
     alert('Ingresa primero el número de cuenta.');
@@ -11787,12 +11869,20 @@ async function openEquipo() {
   devWireOnce();
 
   const reuse = _dev && _dev.account === cuenta && _dev.category === currentCategory;
-  if (!reuse) _dev = devNewDraft(cuenta, currentCategory, null);
+  if (opts && opts.rescan) {
+    // Equipo nuevo: borrador limpio (conserva catálogo y plan si ya estaban).
+    _dev = devNewDraft(cuenta, currentCategory, reuse ? _dev : null);
+    _dev.rescanning = true;
+  } else if (!reuse) {
+    _dev = devNewDraft(cuenta, currentCategory, null);
+  }
   const dev = _dev;
   devRender();
 
   detailEquipo.classList.add('open');
   detailEquipo.setAttribute('aria-hidden', 'false');
+  // Sincrónico (dentro del clic del banner): el navegador permite el selector.
+  if (opts && opts.rescan && devMode(dev) === 'form') devTriggerCapture();
 
   await Promise.all([
     dev.catalog ? null : devLoadCatalogInto(dev, false),

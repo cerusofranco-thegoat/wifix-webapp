@@ -3233,6 +3233,139 @@ console.log('\n== Equipo a instalar: validación de capacidad vs plan ==');
   ctx.devApplyManualModel(fe, 'ONT ZTE ZXHN F6600P');
   await ctx.devAutoValidate(fe);
 
+  // --- Un solo disparo: foto = códigos de barras + OCR de la MISMA imagen ------
+  console.log('  -- un solo disparo (foto: código + OCR) --');
+  {
+    const comb = ctx.devCombineLabelImage({ barcodes: ['ZTEGD0BB8294'], lines: ['ZTE', 'ZXHN F670L', 'Made in China'] }, cat);
+    check('foto combinada: el código va primero y define serialSource barcode',
+      comb.raw[0] === 'ZTEGD0BB8294' && comb.raw.includes('ZXHN F670L') && comb.serialSource === 'barcode');
+    check('foto combinada sin código legible: serialSource ocr',
+      ctx.devCombineLabelImage({ barcodes: [], lines: ['GPON SN: ZTEGD0BB8294'] }, cat).serialSource === 'ocr'
+      && ctx.devCombineLabelImage(null, cat).raw.length === 0);
+
+    // Flujo completo con el escáner nativo simulado: UN toque → serial + modelo + POST.
+    n0 = await countOf('35070291');
+    const f1 = await flowDraft('35070291');
+    const realNative = ctx.WifixNative;
+    let capturas = 0;
+    ctx.WifixNative = {
+      takePhoto: async () => { throw new Error('no debe usarse: la captura es única'); },
+      serialScanner: {
+        available: () => true,
+        captureLabel: async () => { capturas++; return { barcodes: ['ZTEGD0BB8294'], lines: ['ZXHN F670L', 'GPON ONT'] }; },
+        scanBarcodes: async () => [],
+        ocrFromImageBase64: async () => { throw new Error('no debe usarse'); },
+      },
+    };
+    ctx.__devDraft = f1;
+    run('_dev = __devDraft');
+    const btnStub = { disabled: false, setAttribute() {}, removeAttribute() {} };
+    await ctx.devCapturePhoto(btnStub, null);
+    check('un toque (APK): captureLabel una vez → serial del código + modelo por OCR → validado solo (1 POST, sin botones)',
+      capturas === 1 && f1.serial === 'ZTEGD0BB8294' && f1.serialSource === 'barcode' && f1.model === 'ZXHN F670L'
+      && f1.modelSource === 'ocr' && f1.lastValidation && f1.lastValidation.result === 'ok'
+      && f1.lastValidation.serialSource === 'barcode' && (await countOf('35070291')) === n0 + 1 && btnStub.disabled === false);
+    const f1Html = ctx.devScreenHtml(f1);
+    check('detectado: menú plegado como corrección opcional ("¿No coincide…?"), sin botón Validar/Confirmar',
+      /<details class="dev-model-picker" data-slot="dev-model-picker">/.test(f1Html)
+      && f1Html.includes('¿No coincide con la etiqueta? Corregir el modelo')
+      && !/data-action="dev-(validate|confirm)"/.test(f1Html) && !/>\s*(Confirmar|Validar)\b/.test(f1Html)
+      && balanced(f1Html) === null, balanced(f1Html));
+
+    // Cámara cancelada: no hay POST ni cambios.
+    ctx.WifixNative.serialScanner.captureLabel = async () => null;
+    const f2 = await flowDraft('40001000');
+    ctx.__devDraft = f2;
+    run('_dev = __devDraft');
+    const n2 = await countOf('40001000');
+    await ctx.devCapturePhoto(btnStub, null);
+    check('cámara cancelada: aviso, sin serial ni POST', f2.serial === '' && f2.serialStatus.kind === 'warn'
+      && (await countOf('40001000')) === n2);
+    ctx.WifixNative = realNative;
+    run('_dev = null');
+
+    // Foto tomada antes de que llegue el catálogo: se espera el catálogo y detecta igual.
+    const f3 = await flowDraft('35070291');
+    f3.catalog = null;
+    const v3 = await ctx.devProcessCapture(f3, ['ZTEGD0BB8294', 'ZXHN F670L'], 'ocr', null, 'barcode');
+    check('sin catálogo al capturar: lo carga, detecta F670L y valida', f3.catalog && f3.catalog.length === 19
+      && f3.model === 'ZXHN F670L' && v3 && v3.result === 'ok');
+
+    // "Solo código de barras": serial sin modelo → deducción por marca.
+    const f4 = await flowDraft('40000600');
+    const v4 = await ctx.devProcessCapture(f4, ['HWTC1A2B3C4D'], 'barcode');
+    check('solo código (HWTC, marca de un modelo): modelo deducido y validado sin tocar nada',
+      f4.model === 'ONT OptiXstar HG8145X6' && f4.modelSource === 'brand_single' && v4 && v4.result === 'ok');
+    const f5 = await flowDraft('40000600');
+    const n5 = await countOf('40000600');
+    const v5 = await ctx.devProcessCapture(f5, ['ZTEGC8F21A99'], 'barcode');
+    const f5Html = ctx.devScreenHtml(f5);
+    check('solo código (ZTEG, 10 modelos): no adivina, pide la foto y abre el menú como corrección',
+      v5 === null && f5.model === '' && (await countOf('40000600')) === n5
+      && f5Html.includes('solo trae el serial') && /<details class="dev-model-picker" data-slot="dev-model-picker" open>/.test(f5Html));
+    // La foto del MISMO equipo completa el modelo y valida sola.
+    const v5b = await ctx.devProcessCapture(f5, ['ZXHN F6600P'], 'ocr');
+    check('…y la foto del mismo equipo detecta el modelo y valida sola',
+      f5.model === 'ONT ZTE ZXHN F6600P' && f5.serial === 'ZTEGC8F21A99' && v5b && !!v5b.result);
+
+    // Formulario vacío: el menú arranca plegado (no es un paso obligatorio).
+    const f6 = await flowDraft('40000600');
+    const f6Html = ctx.devScreenHtml(f6);
+    check('formulario sin captura: menú plegado "Elegir el modelo manualmente" y CTA "Fotografiar etiqueta"',
+      /<details class="dev-model-picker" data-slot="dev-model-picker">/.test(f6Html)
+      && f6Html.includes('Elegir el modelo manualmente') && f6Html.includes('Fotografiar etiqueta')
+      && f6Html.includes('no hace falta elegir nada'));
+  }
+
+  // native.js: captureLabel = una foto, códigos + OCR de esa misma imagen.
+  {
+    const llamadas = { getPhoto: [], readBarcodes: [], detectText: 0 };
+    const c = {
+      console: { info() {}, warn() {}, error() {}, log() {} },
+      document: { readyState: 'complete', body: { querySelectorAll: () => [] }, addEventListener() {}, createElement: () => fakeEl() },
+      MutationObserver: class { observe() {} disconnect() {} },
+      addEventListener() {},
+      WifixAPI: { baseUrl: 'http://smoke' }, // corta el reintento de reportBackend (sin timers)
+      fetch: async (url) => ({ blob: async () => ({ url }) }),
+      FileReader: class { readAsDataURL() { this.result = 'data:image/jpeg;base64,QUJD'; this.onload(); } },
+      Capacitor: {
+        isNativePlatform: () => true,
+        isPluginAvailable: () => true,
+        Plugins: {
+          Camera: {
+            checkPermissions: async () => ({ camera: 'granted' }),
+            requestPermissions: async () => ({ camera: 'granted' }),
+            getPhoto: async (o) => { llamadas.getPhoto.push(o); return { path: 'file:///tmp/label.jpg', webPath: 'http://localhost/_capacitor_file_/tmp/label.jpg' }; },
+          },
+          BarcodeScanner: {
+            readBarcodesFromImage: async (o) => { llamadas.readBarcodes.push(o.path); return { barcodes: [{ rawValue: ' zteg1234abcd ' }, { rawValue: 'ZTEG1234ABCD' }] }; },
+          },
+          CapacitorPluginMlKitTextRecognition: {
+            detectText: async (o) => { llamadas.detectText++; return { blocks: [{ lines: [{ text: o.base64Image === 'QUJD' ? 'ZXHN F670L' : '?' }] }] }; },
+          },
+        },
+      },
+    };
+    c.window = c;
+    c.globalThis = c;
+    vm.createContext(c);
+    vm.runInContext(readFileSync(base + 'native.js', 'utf8'), c, { filename: 'native.js' });
+    const r = await c.WifixNative.serialScanner.captureLabel();
+    check('native captureLabel: 1 foto (uri), códigos de esa ruta (dedup) + OCR de esa imagen',
+      llamadas.getPhoto.length === 1 && llamadas.getPhoto[0].resultType === 'uri' && llamadas.getPhoto[0].source === 'CAMERA'
+      && llamadas.readBarcodes.join() === 'file:///tmp/label.jpg' && llamadas.detectText === 1
+      && r && r.barcodes.join() === 'ZTEG1234ABCD' && r.lines.join() === 'ZXHN F670L', JSON.stringify(r));
+    c.Capacitor.Plugins.BarcodeScanner.readBarcodesFromImage = async () => { throw new Error('ML Kit no disponible'); };
+    const r2 = await c.WifixNative.serialScanner.captureLabel();
+    check('native captureLabel: si fallan los códigos sigue con el OCR', r2 && r2.barcodes.length === 0 && r2.lines.join() === 'ZXHN F670L');
+    c.Capacitor.Plugins.Camera.getPhoto = async () => { throw new Error('User cancelled photos app'); };
+    check('native captureLabel: cancelar la cámara → null (sin error)', (await c.WifixNative.serialScanner.captureLabel()) === null);
+    c.Capacitor.Plugins.Camera.checkPermissions = async () => ({ camera: 'denied' });
+    c.Capacitor.Plugins.Camera.requestPermissions = async () => ({ camera: 'denied' });
+    check('native captureLabel: permiso negado → null', (await c.WifixNative.serialScanner.captureLabel()) === null);
+    check('native: Red Interna ya no expone httpLatency (sin Cloudflare)', typeof c.WifixNative.httpLatency === 'undefined');
+  }
+
   check('mock: etiquetas simuladas por id y en rotación (6 casos)', (() => {
     const ids = A.mockLabelScanIds();
     return ids.length === 6 && A.mockLabelScan('foto-ambigua-ax3.jpg').id === 'ambigua-ax3'

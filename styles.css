@@ -4989,7 +4989,15 @@ ul.nap-map-legend li { display: inline-flex; align-items: center; }
 }
 
 /* Menú desplegable de modelos (select nativo de .tool-form) */
-.dev-model-row { gap: 6px; }
+.dev-model-row { gap: 6px; margin-top: 8px; }
+/* Menú de modelo = corrección opcional, plegado mientras la detección funcione. */
+.dev-model-picker { margin-top: 6px; }
+.dev-model-summary {
+  min-height: 44px; display: flex; align-items: center; cursor: pointer;
+  font-size: 12.5px; font-weight: 600; color: var(--brand-primary);
+}
+.dev-model-summary:focus-visible { outline: 2px solid var(--brand-primary); outline-offset: 2px; border-radius: var(--radius-btn); }
+.dev-primary-capture { font-weight: 700; }
 .dev-model-row select { width: 100%; min-height: 48px; }
 .dev-model-hint { margin: 0; }
 .dev-model-hint strong { color: var(--warn-text); }

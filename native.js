@@ -976,6 +976,27 @@
   // La lógica de negocio (filtrado, validación de patrón) queda en el frontend;
   // este wrapper sólo devuelve datos crudos.
   // --------------------------------------------------------------------------
+  /** Permiso de cámara del plugin Camera (lo pide si hace falta). Nunca lanza. */
+  async function ensureCameraPermission(Cam) {
+    try {
+      const perms = await Cam.checkPermissions();
+      if (perms.camera === 'granted') return true;
+      const req = await Cam.requestPermissions({ permissions: ['camera'] });
+      if (req.camera === 'granted') return true;
+      console.warn('[WifixNative] Permiso de cámara denegado.');
+      return false;
+    } catch (permErr) {
+      console.error('[WifixNative] Error al verificar permisos de cámara:', permErr);
+      return false;
+    }
+  }
+
+  /** El técnico canceló/cerró la cámara: no es un error. */
+  function isCancel(err) {
+    const msg = (err && err.message) || String(err);
+    return /cancel/i.test(msg) || /dismiss/i.test(msg);
+  }
+
   WifixNative.serialScanner = {
     /**
      * true sólo si corre dentro del APK con los plugins disponibles.
@@ -1082,6 +1103,74 @@
         console.error('[serialScanner] ocrFromImageBase64 error:', err);
         return [];
       }
+    },
+
+    /**
+     * Captura ÚNICA de la etiqueta (Equipo a instalar): una sola foto con la
+     * cámara nativa y, de ESA MISMA imagen, los códigos de barras/QR
+     * (BarcodeScanner.readBarcodesFromImage) y las líneas de texto (OCR).
+     * Así el serial (normalmente en el código) y el modelo (texto impreso)
+     * salen de un solo disparo, sin pasos intermedios.
+     *
+     * Devuelve { barcodes: string[], lines: string[] } o null si el técnico
+     * canceló la cámara o negó el permiso. Si la lectura de códigos falla se
+     * sigue solo con el OCR (y viceversa); nunca lanza.
+     *
+     * @returns {Promise<{barcodes: string[], lines: string[]}|null>}
+     */
+    async captureLabel() {
+      if (!isNative()) return null;
+      const P = global.Capacitor.Plugins;
+      const Cam = P.Camera;
+      if (!Cam) return null;
+      if (!(await ensureCameraPermission(Cam))) return null;
+      let photo;
+      try {
+        // resultType 'uri': hace falta la ruta del archivo para leer los
+        // códigos de la misma imagen (readBarcodesFromImage pide `path`).
+        photo = await Cam.getPhoto({
+          source: 'CAMERA',
+          resultType: 'uri',
+          quality: 85,
+          allowEditing: false,
+          saveToGallery: false,
+          correctOrientation: true,
+        });
+      } catch (err) {
+        if (!isCancel(err)) console.error('[serialScanner] captureLabel getPhoto:', err);
+        return null;
+      }
+      if (!photo || (!photo.path && !photo.webPath)) return null;
+
+      let barcodes = [];
+      const BS = P.BarcodeScanner;
+      if (BS && typeof BS.readBarcodesFromImage === 'function' && photo.path) {
+        try {
+          const r = await BS.readBarcodesFromImage({ path: photo.path });
+          const seen = new Set();
+          barcodes = ((r && r.barcodes) || [])
+            .map((b) => String((b && b.rawValue) || '').trim().toUpperCase())
+            .filter((v) => v && !seen.has(v) && seen.add(v));
+        } catch (err) {
+          console.warn('[serialScanner] captureLabel barcodes (se sigue con OCR):', err);
+        }
+      }
+
+      let lines = [];
+      try {
+        const src = photo.webPath || (global.Capacitor.convertFileSrc ? global.Capacitor.convertFileSrc(photo.path) : photo.path);
+        const blob = await (await global.fetch(src)).blob();
+        const dataUrl = await new Promise((resolve, reject) => {
+          const fr = new global.FileReader();
+          fr.onload = () => resolve(String(fr.result || ''));
+          fr.onerror = reject;
+          fr.readAsDataURL(blob);
+        });
+        lines = await this.ocrFromImageBase64(dataUrl);
+      } catch (err) {
+        console.warn('[serialScanner] captureLabel OCR (se sigue con los códigos):', err);
+      }
+      return { barcodes, lines: lines || [] };
     }
   };
 
@@ -1107,19 +1196,7 @@
     }
 
     // Verificar / solicitar permiso de cámara en runtime.
-    try {
-      const perms = await Cam.checkPermissions();
-      if (perms.camera !== 'granted') {
-        const req = await Cam.requestPermissions({ permissions: ['camera'] });
-        if (req.camera !== 'granted') {
-          console.warn('[WifixNative.takePhoto] Permiso de cámara denegado.');
-          return null;
-        }
-      }
-    } catch (permErr) {
-      console.error('[WifixNative.takePhoto] Error al verificar permisos:', permErr);
-      return null;
-    }
+    if (!(await ensureCameraPermission(Cam))) return null;
 
     // Abrir la cámara y tomar la foto.
     // source: 'CAMERA' — abre la cámara nativa, no la galería.
@@ -1136,15 +1213,7 @@
       return (photo && photo.dataUrl) ? photo.dataUrl : null;
     } catch (err) {
       // El usuario canceló la cámara — no propagamos el error.
-      const msg = (err && err.message) || String(err);
-      if (
-        /cancel/i.test(msg) ||
-        /dismiss/i.test(msg) ||
-        /user cancelled/i.test(msg) ||
-        /User cancelled/i.test(msg)
-      ) {
-        return null;
-      }
+      if (isCancel(err)) return null;
       console.error('[WifixNative.takePhoto] Error al tomar foto:', err);
       return null;
     }
