@@ -180,9 +180,8 @@ if (loginLogo) {
 logoutBtn.addEventListener('click', () => {
   WifixAPI.logout();
   _fsmHealth = null;
-  // La orden de trabajo es de la sesión del técnico: no pasa a otra sesión.
-  _orderSession.clear();
-  _visitTasks.clear();
+  // La task FSM es de la sesión del técnico: no pasa a otra sesión.
+  _taskSession.clear();
   renderIntegrationWarning(null);
   // Cerrar todas las detail screens y el subscreen al cerrar sesión.
   document.querySelectorAll('.detailscreen, .subscreen').forEach((el) => {
@@ -420,70 +419,85 @@ const confirmAccountFeedback = document.getElementById('confirmAccountFeedback')
 
 confirmAccountBtn.addEventListener('click', () => {
   if (accountEntryMode === 'document') lookupByDocumentFlow();
-  else if (accountEntryMode === 'order') lookupByOrderFlow();
+  else if (accountEntryMode === 'task') lookupByTaskFlow();
   else confirmAccountFlow();
 });
 
-// === Ingresar por: Nº de cuenta / Cédula-RUC / Nº de orden ===================
-// Por cédula se buscan las cuentas del titular (POST /accounts/lookup) y la
-// elegida sigue EXACTAMENTE el flujo de Confirmar cuenta (whitelist, regla de
-// Cancelaciones, modo limitado ante 503). El documento nunca se guarda: al
-// elegir la cuenta el campo pasa a mostrar el nº de cuenta.
-// Por nº de orden (POST /accounts/lookup { order }, TYTAN simulado) la orden
-// trae exactamente una cuenta, que sigue el mismo flujo; el workOrder queda
-// en la sesión de esa cuenta para el contexto de orden y la task de la visita.
+// === Ingresar por: Nº de task FSM (principal) / Nº de cuenta / Cédula-RUC =====
+// MODO PRINCIPAL (2026-10-16): el técnico busca SOLO por la task del FSM
+// (POST /accounts/lookup { task }, TYTAN simulado). La task basta: no hay
+// validación adicional. Trae UNA cuenta, que sigue EXACTAMENTE el flujo de
+// Confirmar cuenta (whitelist, Cancelaciones, modo limitado ante 503), y esa
+// task queda en la sesión de la cuenta como `taskId` de todos los registros.
+// Cuenta y cédula se conservan como modos secundarios. Por cédula se buscan
+// las cuentas del titular; el documento nunca se guarda: al elegir la cuenta
+// el campo pasa a mostrar el nº de cuenta.
 const entryModeGroup = document.getElementById('entryMode');
 const accountFieldHint = document.getElementById('accountFieldHint');
 const accountLookupResults = document.getElementById('accountLookupResults');
 const accountOrderLine = document.getElementById('accountOrderLine');
 
 const ENTRY_MODES = Object.freeze({
+  task: Object.freeze({ hint: 'Nº de task FSM', placeholder: 'TASK/549487/2026 o 549487',
+    maxlength: 32, inputmode: 'text', button: 'Buscar task' }),
   account: Object.freeze({ hint: 'Nº de cuenta', placeholder: 'Ingresa el número de cuenta',
     maxlength: 20, inputmode: 'numeric', button: 'Confirmar cuenta' }),
   document: Object.freeze({ hint: 'Cédula o RUC del titular', placeholder: 'Cédula (10 dígitos) o RUC (13)',
     maxlength: 32, inputmode: 'numeric', button: 'Buscar cuentas' }),
-  order: Object.freeze({ hint: 'Nº de orden de trabajo', placeholder: 'ORDER/463158/2026 o 463158',
-    maxlength: 32, inputmode: 'text', button: 'Buscar orden' }),
 });
 
-// === Orden de trabajo de la sesión (TYTAN simulado) ==========================
-// cuenta → { workOrder, source: 'lookup' | 'module' }. Vive mientras dure la
-// sesión: cambiar de módulo NO la borra (la orden sigue siendo de esa cuenta);
-// el técnico puede cambiarla dentro de Visita técnica / Migraciones.
-const _orderSession = new Map();
+// === Task FSM de la sesión (TYTAN simulado) ==================================
+// cuenta → { taskId, workOrder, source }. source:
+//   'lookup' → ingresada en la pantalla de ingreso (define la cuenta);
+//   'visits' → ingreso por cuenta/cédula en Visita técnica: la task pendiente
+//              de la cuenta, tomada sola (sin pedir validación);
+//   'manual' → escrita por el técnico cuando no se pudo tomar sola.
+// Vive mientras dure la sesión: cambiar de módulo NO la borra.
+const _taskSession = new Map();
 
-function sessionWorkOrder(cuenta) {
-  const hit = cuenta ? _orderSession.get(String(cuenta).trim()) : null;
-  return hit ? hit.workOrder : null;
+function sessionTask(cuenta) {
+  return cuenta ? (_taskSession.get(String(cuenta).trim()) || null) : null;
 }
 
-function setSessionWorkOrder(cuenta, workOrder, source) {
+/** Orden de la task de la sesión (si se conoce). */
+function sessionWorkOrder(cuenta) {
+  const t = sessionTask(cuenta);
+  return t ? (t.workOrder || null) : null;
+}
+
+function setSessionTask(cuenta, entry) {
   const c = String(cuenta || '').trim();
   if (!c) return;
-  if (!workOrder) _orderSession.delete(c);
-  else _orderSession.set(c, { workOrder: String(workOrder), source: source || 'module' });
+  if (!entry || !entry.taskId) _taskSession.delete(c);
+  else {
+    _taskSession.set(c, {
+      taskId: String(entry.taskId),
+      workOrder: entry.workOrder ? String(entry.workOrder) : null,
+      source: entry.source || 'manual',
+    });
+  }
   renderAccountOrderLine(c);
-  // La task validada es de la orden: si la orden cambió, se vuelve a pedir.
   if (validatedAccount === c) renderVisitTaskGate();
 }
 
-/** Línea "Orden ORDER/… · TYTAN (simulado)" bajo Confirmar cuenta. */
+/** Línea "Task TASK/… · Orden ORDER/… · TYTAN simulado" bajo Confirmar cuenta. */
 function renderAccountOrderLine(cuenta) {
   if (!accountOrderLine) return;
   const confirmada = validatedAccount && validatedAccount === String(cuenta || '').trim();
-  const wo = confirmada ? sessionWorkOrder(cuenta) : null;
-  if (!wo) {
+  const t = confirmada ? sessionTask(cuenta) : null;
+  if (!t) {
     accountOrderLine.innerHTML = '';
     accountOrderLine.hidden = true;
     return;
   }
-  accountOrderLine.innerHTML = `<span class="order-line-key">Orden</span>` +
-    `<span class="order-line-value mono">${escapeHtml(wo)}</span>` +
-    `<span class="sim-badge" title="Integración TYTAN simulada">TYTAN simulado</span>`;
+  accountOrderLine.innerHTML = `<span class="order-line-key">Task</span>` +
+    `<span class="order-line-value mono">${escapeHtml(t.taskId)}</span>` +
+    (t.workOrder ? `<span class="order-line-key">Orden</span><span class="order-line-value mono">${escapeHtml(t.workOrder)}</span>` : '') +
+    (t.source === 'lookup' ? `<span class="sim-badge" title="Integración TYTAN simulada">TYTAN simulado</span>` : '');
   accountOrderLine.hidden = false;
 }
 
-let accountEntryMode = 'account';
+let accountEntryMode = 'task';
 
 function entryModeButtons() {
   return entryModeGroup ? Array.from(entryModeGroup.querySelectorAll('[data-mode]')) : [];
@@ -511,8 +525,8 @@ function setEntryMode(mode) {
   accountInput.setAttribute('placeholder', cfg.placeholder);
   accountInput.setAttribute('maxlength', String(cfg.maxlength));
   accountInput.setAttribute('inputmode', cfg.inputmode);
-  // ORDER/… se escribe en mayúsculas; cuenta y cédula son solo dígitos.
-  accountInput.setAttribute('autocapitalize', mode === 'order' ? 'characters' : 'off');
+  // TASK/… se escribe en mayúsculas; cuenta y cédula son solo dígitos.
+  accountInput.setAttribute('autocapitalize', mode === 'task' ? 'characters' : 'off');
   accountInput.value = '';
   inputWrap.classList.remove('has-value');
   confirmAccountBtn.textContent = cfg.button;
@@ -649,15 +663,16 @@ async function lookupByDocumentFlow() {
   confirmAccountFeedback.className = 'confirm-account-feedback error';
 }
 
-// Ingreso por nº de orden (TYTAN simulado). Acepta ORDER/463158/2026 o solo
-// los dígitos. La orden trae UNA cuenta: se guarda el workOrder en la sesión de
-// esa cuenta y se sigue exactamente el flujo de Confirmar cuenta.
-async function lookupByOrderFlow() {
+// Ingreso por Nº de task FSM (modo principal, TYTAN simulado). Acepta
+// TASK/549487/2026 o solo los dígitos. La task trae UNA cuenta: se guarda la
+// task (y su orden) en la sesión de esa cuenta y se sigue exactamente el flujo
+// de Confirmar cuenta. Sin validación adicional de la task.
+async function lookupByTaskFlow() {
   const raw = (accountInput.value || '').trim();
   clearLookupResults();
-  const normalizada = WifixAPI.normalizeOrderNumber(raw);
-  if (!normalizada) {
-    confirmAccountFeedback.textContent = 'Ingresa el nº de orden: ORDER/463158/2026 o solo el número (463158).';
+  const tid = WifixAPI.normalizeTaskId(raw);
+  if (!tid) {
+    confirmAccountFeedback.textContent = 'Ingresa el Nº de task FSM: TASK/549487/2026 o solo el número (549487).';
     confirmAccountFeedback.className = 'confirm-account-feedback error';
     accountInput.setAttribute('aria-invalid', 'true');
     accountInput.setAttribute('aria-describedby', 'confirmAccountFeedback');
@@ -672,15 +687,16 @@ async function lookupByOrderFlow() {
   confirmAccountFeedback.className = 'confirm-account-feedback';
   let res = null;
   try {
-    res = await WifixAPI.lookupAccountsByOrder(raw);
+    res = await WifixAPI.lookupAccountsByTask(raw);
   } catch (err) {
-    console.error('[Wifix] lookup por orden:', err);
+    console.error('[Wifix] lookup por task:', err);
     const infra = isUpstreamOrNetworkFailure(err);
-    confirmAccountFeedback.textContent = infra
-      ? `No se pudo buscar la orden en este momento (${err.message || 'sin conexión'}). Ingresa con el número de cuenta.`
-      : (err.code === 'VALIDATION_ERROR'
-        ? 'Formato de orden inválido. Usa ORDER/463158/2026 o solo el número.'
-        : (err.message || 'No se pudo buscar la orden.'));
+    let msg;
+    if (infra) msg = `No se pudo buscar la task en este momento (${err.message || 'sin conexión'}). Ingresa con el número de cuenta.`;
+    else if (err && err.code === 'VALIDATION_ERROR') msg = 'Formato de task inválido. Usa TASK/549487/2026 o solo el número.';
+    else if (err && (err.code === 'TASK_NOT_FOUND' || err.status === 404)) msg = `La task ${tid} no existe en el FSM. Revisa el número.`;
+    else msg = (err && err.message) || 'No se pudo buscar la task.';
+    confirmAccountFeedback.textContent = msg;
     confirmAccountFeedback.className = `confirm-account-feedback ${infra ? 'warning' : 'error'}`;
   } finally {
     confirmAccountBtn.disabled = false;
@@ -689,11 +705,11 @@ async function lookupByOrderFlow() {
   if (!res) return;
   const match = Array.isArray(res.matches) ? res.matches.find(m => m && m.accountNumber) : null;
   if (!match) {
-    confirmAccountFeedback.textContent = `No se encontró la cuenta de la orden ${normalizada}. Verifica el número o ingresa con el número de cuenta.`;
+    confirmAccountFeedback.textContent = `No se encontró la cuenta de la task ${tid}. Verifica el número o ingresa con el número de cuenta.`;
     confirmAccountFeedback.className = 'confirm-account-feedback error';
     return;
   }
-  setSessionWorkOrder(match.accountNumber, res.workOrder || normalizada, 'lookup');
+  setSessionTask(match.accountNumber, { taskId: res.task || tid, workOrder: res.workOrder || null, source: 'lookup' });
   await selectLookupAccount(match.accountNumber);
 }
 
@@ -2916,7 +2932,7 @@ async function _napAssignSave(scope) {
   let saved = null;
   try {
     const payload = buildNapAssignmentPayload(sel.nap, sel.port, {
-      // Instalaciones no tiene task de FSM validada: viaja la orden de la sesión.
+      // Task FSM de la sesión (y su orden, si se conoce).
       taskId: visitTaskIdFor(st.account),
       workOrder: sessionWorkOrder(st.account),
       distanceMeters: _napDistanceToNap(sel.nap),
@@ -6881,12 +6897,13 @@ function renderVisitsList(result) {
 // ---------------------------------------------------------------------------
 // Visita en curso: taskId de los registros que se guardan
 // ---------------------------------------------------------------------------
-// Todos los POST de herramientas/equipos retirados mandan como `taskId` el
-// workOrder (o fsmTaskId) de la visita PENDIENTE de la cuenta. Sin visita
-// pendiente no se manda taskId y el backend asocia por horario. Nunca se usa
-// el TASK/… que genera el panel NAP (es un identificador local, no de FSM).
-// Se lee de lo que ya cargó el panel de visitas; si no se abrió, se consulta
-// /visits una vez por cuenta y se recuerda (sin tocar la operadora de más).
+// Desde 2026-10-16 manda la task FSM de la SESIÓN de la cuenta (la ingresada
+// en la pantalla de ingreso, o la tomada sola / escrita en Visita técnica):
+// viaja como `taskId` en TODOS los registros, en cualquier módulo.
+// Sin task de sesión (ingreso por cuenta/cédula fuera de Visita técnica) se usa,
+// como antes, el workOrder de la visita PENDIENTE de /visits; sin pendiente no
+// se manda taskId y el backend asocia por horario. Nunca se usa el TASK/… que
+// genera el panel NAP (es un identificador local, no de FSM).
 const PENDING_VISIT_TTL_MS = 30 * 60 * 1000;
 const PENDING_VISIT_FAIL_TTL_MS = 2 * 60 * 1000;
 const _pendingVisitCache = new Map();   // cuenta → { taskId, promise?, at, ttl }
@@ -6902,22 +6919,25 @@ function rememberVisits(cuenta, result) {
   _pendingVisitCache.set(cuenta, { taskId: pendingVisitTaskId(result), at: Date.now(), ttl: PENDING_VISIT_TTL_MS });
 }
 
-/** taskId ya conocido (sin red), o null. En Visita técnica: la task validada. */
+/** taskId ya conocido (sin red), o null. La task de la sesión manda. */
 function peekCurrentVisitTaskId(cuenta) {
-  if (visitTaskUsesModule()) return visitTaskIdFor(cuenta);
+  const tid = visitTaskIdFor(cuenta);
+  if (tid || visitTaskUsesModule()) return tid;
   const hit = cuenta ? _pendingVisitCache.get(cuenta) : null;
   if (!hit || hit.promise || Date.now() - hit.at > hit.ttl) return null;
   return hit.taskId || null;
 }
 
 /**
- * taskId de la visita en curso. En Visita técnica es SIEMPRE la task que el
- * técnico validó (§4); en los demás módulos, la visita pendiente de /visits
- * (consulta una vez si hace falta).
+ * taskId de la visita en curso: la task FSM de la sesión; en Visita técnica
+ * sin task, la pendiente de la cuenta (se toma sola); en los demás módulos,
+ * la visita pendiente de /visits (consulta una vez si hace falta).
  */
 function resolveCurrentVisitTaskId(cuenta) {
   if (!cuenta) return Promise.resolve(null);
-  if (visitTaskUsesModule()) return Promise.resolve(visitTaskIdFor(cuenta));
+  const tid = visitTaskIdFor(cuenta);
+  if (tid) return Promise.resolve(tid);
+  if (visitTaskUsesModule()) return visitTaskAutoResolve(cuenta);
   const hit = _pendingVisitCache.get(cuenta);
   if (hit && Date.now() - hit.at <= hit.ttl) {
     return hit.promise || Promise.resolve(hit.taskId || null);
@@ -6936,34 +6956,30 @@ function resolveCurrentVisitTaskId(cuenta) {
 WifixAPI.setTaskIdResolver(resolveCurrentVisitTaskId);
 
 // ---------------------------------------------------------------------------
-// Visita técnica: Nº de task OBLIGATORIO (contrato 2026-10-06 §4)
+// Visita técnica: Task FSM de la visita (SIN validación, 2026-10-16)
 // ---------------------------------------------------------------------------
-// Al entrar a Visita técnica el técnico escribe el nº de task asignado a esta
-// visita (TASK/549487/2026 o solo los dígitos) y se valida contra la orden con
-// GET /orders/task-check. Se sugiere la tarea Pendiente de la orden, pero el
-// técnico tiene que confirmarla. Sin task válida NINGÚN registro de la visita
-// se guarda (guardia TASK_REQUIRED de api.js) y esa taskId es la que viaja como
-// `taskId` en todos los registros (reemplaza al workOrder de la visita pendiente).
+// La task ingresada en la pantalla de ingreso basta (ya no hay task-check ni
+// "cambiar orden"). Si el técnico entró por cuenta o cédula, se toma SOLA la
+// task pendiente de la cuenta (/visits: fsmTaskId de la visita PENDIENTE). Solo
+// si no hay ninguna se le pide escribirla (solo formato, sin validar). En
+// Visita técnica sin task ningún registro se guarda (guardia TASK_REQUIRED).
 const VISIT_TASK_MODULE = 'visitas';
-const VISIT_TASK_GUARD_MSG = 'Falta el Nº de task: valídalo arriba, en la pantalla de Visita técnica.';
-const _visitTasks = new Map();   // cuenta → { taskId, workOrder, task, at }
-// Estado de la tarjeta (por cuenta): borrador, error y "cambiando".
-const _visitTaskUi = { account: null, draft: null, error: null, busy: false, changing: false, loadingCtx: false, ctxError: null };
+const VISIT_TASK_GUARD_MSG = 'Falta el Nº de task FSM de esta visita: ingresa por Nº de task o escríbelo en la tarjeta de la visita.';
+// Estado de la tarjeta (por cuenta): borrador, error, "cambiando" y "buscando".
+const _visitTaskUi = { account: null, draft: null, error: null, changing: false, resolving: false };
+const _visitTaskAuto = new Map();   // cuenta → Promise (una búsqueda en vuelo)
 
 function visitTaskUsesModule(category = currentCategory) {
   return category === VISIT_TASK_MODULE;
 }
 
-/** Task validada vigente de la cuenta (debe ser de la orden actual de la sesión). */
+/** Task FSM de la sesión de la cuenta ({ taskId, workOrder, source }) o null. */
 function visitTaskFor(cuenta) {
-  const c = String(cuenta || '').trim();
-  const hit = c ? _visitTasks.get(c) : null;
-  if (!hit) return null;
-  return hit.workOrder === sessionWorkOrder(c) ? hit : null;
+  return sessionTask(cuenta);
 }
 
 function visitTaskIdFor(cuenta) {
-  const t = visitTaskFor(cuenta);
+  const t = sessionTask(cuenta);
   return t ? t.taskId : null;
 }
 
@@ -6974,74 +6990,85 @@ function visitTaskGuard(accountNumber) {
 }
 WifixAPI.setTaskGuard(visitTaskGuard);
 
-/** Tarea sugerida: la Pendiente más reciente de la orden (el técnico la confirma). */
-function suggestedVisitTask(context) {
-  const pendientes = orderTasksSorted(context && context.tasks).filter(t => t.status === 'Pendiente');
-  return pendientes[0] || null;
+/** Task FSM de la visita PENDIENTE de /visits (fsmTaskId con formato TASK/…). Pura. */
+function pendingVisitFsmTask(result) {
+  const items = Array.isArray(result) ? result : ((result && result.items) || []);
+  const p = items.find(t => t && t.result === 'PENDIENTE');
+  if (!p) return null;
+  const tid = WifixAPI.normalizeTaskId(p.fsmTaskId) || WifixAPI.normalizeTaskId(p.taskId);
+  return tid ? { taskId: tid, workOrder: p.workOrder || null } : null;
 }
 
-/** Valida la task contra la orden. { ok, entry } o { ok:false, error }. */
-async function validateVisitTask(cuenta, raw) {
-  const wo = sessionWorkOrder(cuenta);
-  if (!wo) return { ok: false, error: 'Primero ingresa el Nº de orden de la visita.' };
+/** Ingreso por cuenta/cédula: toma sola la task pendiente de la cuenta. */
+function visitTaskAutoResolve(cuenta) {
+  const c = String(cuenta || '').trim();
+  if (!c) return Promise.resolve(null);
+  if (visitTaskIdFor(c)) return Promise.resolve(visitTaskIdFor(c));
+  if (_visitTaskAuto.has(c)) return _visitTaskAuto.get(c);
+  const promise = WifixAPI.getVisits(c)
+    .then((r) => {
+      rememberVisits(c, r);
+      const hit = pendingVisitFsmTask(r);
+      if (hit && !visitTaskIdFor(c)) setSessionTask(c, { taskId: hit.taskId, workOrder: hit.workOrder, source: 'visits' });
+      return visitTaskIdFor(c);
+    })
+    .catch((err) => {
+      console.warn('[Wifix] task pendiente de la cuenta:', err);
+      return null;
+    })
+    .then((tid) => {
+      _visitTaskAuto.delete(c);
+      return tid;
+    });
+  _visitTaskAuto.set(c, promise);
+  return promise;
+}
+
+/** El técnico escribió la task (solo formato, sin validar). { ok, taskId } o { ok:false, error }. */
+function setManualVisitTask(cuenta, raw) {
   const tid = WifixAPI.normalizeTaskId(raw);
   if (!tid) return { ok: false, error: 'Formato inválido. Usa TASK/549487/2026 o solo el número (6 o 7 dígitos).' };
-  let r;
-  try {
-    r = await WifixAPI.checkOrderTask(wo, tid);
-  } catch (err) {
-    console.error('[Wifix] task-check:', err);
-    if (err && err.code === 'VALIDATION_ERROR') return { ok: false, error: 'Formato inválido. Usa TASK/549487/2026 o solo el número.' };
-    return { ok: false, error: `No se pudo validar la task: ${(err && err.message) || 'error del servidor'}.` };
-  }
-  if (!r || r.valid !== true) {
-    return { ok: false, error: `La task ${tid} no pertenece a la orden ${wo}. Revisa el número asignado a esta visita.` };
-  }
-  const entry = { taskId: r.taskId || tid, workOrder: wo, task: r.task || null, at: Date.now() };
-  _visitTasks.set(String(cuenta).trim(), entry);
-  return { ok: true, entry };
+  setSessionTask(cuenta, { taskId: tid, workOrder: null, source: 'manual' });
+  return { ok: true, taskId: tid };
 }
 
 function _visitTaskUiReset(cuenta) {
-  Object.assign(_visitTaskUi, { account: cuenta || null, draft: null, error: null, busy: false, changing: false, loadingCtx: false, ctxError: null });
+  Object.assign(_visitTaskUi, { account: cuenta || null, draft: null, error: null, changing: false, resolving: false });
 }
 
-/** Cabecera con la task validada (taskId + tipo + estado). Pura. */
+const VISIT_TASK_SOURCE_TEXT = Object.freeze({
+  lookup: 'Ingresada al buscar la cuenta',
+  visits: 'Tomada de la visita pendiente de la cuenta',
+  manual: 'Escrita en esta visita',
+});
+
+/** Cabecera con la task de la visita. Pura. */
 function visitTaskValidHtml(entry) {
-  const t = entry.task || {};
   return `
     <div class="visit-task-ok" role="status">
-      <span class="visit-task-ok-label">Task de esta visita</span>
+      <span class="visit-task-ok-label">Task FSM de esta visita</span>
       <span class="visit-task-ok-main">
         <span class="visit-task-id mono">${escapeHtml(entry.taskId)}</span>
-        ${t.status ? orderStatusChip(t.status) : ''}
       </span>
-      ${t.taskType ? `<span class="visit-task-type">${escapeHtml(t.taskType)}</span>` : ''}
-      <span class="visit-task-wo">Orden <span class="mono">${escapeHtml(entry.workOrder)}</span></span>
-      <button type="button" class="link-btn" data-action="visit-task-change">Cambiar task</button>
+      <span class="visit-task-type">${escapeHtml(VISIT_TASK_SOURCE_TEXT[entry.source] || '')}</span>
+      ${entry.workOrder ? `<span class="visit-task-wo">Orden <span class="mono">${escapeHtml(entry.workOrder)}</span></span>` : ''}
+      ${entry.source !== 'lookup' ? '<button type="button" class="link-btn" data-action="visit-task-change">Usar otra task</button>' : ''}
     </div>`;
 }
 
-/** Formulario de la task (orden ya conocida). Pura. */
-function visitTaskFormHtml(wo, opts = {}) {
-  const sug = opts.suggested;
-  let hint;
-  if (opts.loadingCtx) hint = 'Buscando la tarea pendiente de la orden…';
-  else if (sug) hint = `Sugerida: ${sug.taskId} (tarea Pendiente de la orden). Confírmala con el Nº que te asignaron.`;
-  else if (opts.ctxError) hint = 'No se pudo cargar la orden para sugerir la task: escríbela a mano.';
-  else hint = 'La orden no tiene una tarea pendiente: escribe el Nº de task asignado.';
+/** Formulario de la task (solo si no se pudo tomar sola o el técnico la cambia). Pura. */
+function visitTaskFormHtml(opts = {}) {
   return `
     <form class="visit-task-form" data-form="visit-task" novalidate>
-      <p class="visit-task-wo">Orden <span class="mono">${escapeHtml(wo)}</span>
-        <button type="button" class="link-btn" data-action="visit-task-order-change">Cambiar orden</button></p>
-      <label class="form-label" for="visitTaskInput">Nº de task de esta visita</label>
+      <label class="form-label" for="visitTaskInput">Nº de task FSM de esta visita</label>
       <input type="text" id="visitTaskInput" class="order-input" data-field="visit-task"
         inputmode="text" autocapitalize="characters" autocomplete="off" maxlength="24"
         placeholder="TASK/549487/2026 o 549487" value="${escapeHtml(opts.value || '')}"
         aria-describedby="visitTaskHint visitTaskError" aria-required="true"${opts.error ? ' aria-invalid="true"' : ''}>
-      <p class="visit-task-hint" id="visitTaskHint">${escapeHtml(hint)}</p>
+      <p class="visit-task-hint" id="visitTaskHint">${escapeHtml(opts.hint || 'No se valida: la task que escribas queda como la de todos los registros de esta visita.')}</p>
       <p class="order-field-error" id="visitTaskError" role="alert">${escapeHtml(opts.error || '')}</p>
-      <button type="submit" class="save-btn" ${opts.busy ? 'disabled aria-busy="true"' : ''}>${opts.busy ? 'Validando…' : 'Validar task'}</button>
+      <button type="submit" class="save-btn">Usar esta task</button>
+      ${opts.changing ? '<button type="button" class="link-btn" data-action="visit-task-cancel">Cancelar</button>' : ''}
     </form>`;
 }
 
@@ -7057,31 +7084,25 @@ function renderVisitTaskGate(focusSel) {
   }
   if (_visitTaskUi.account !== cuenta) _visitTaskUiReset(cuenta);
   const ui = _visitTaskUi;
-  const wo = sessionWorkOrder(cuenta);
   const entry = visitTaskFor(cuenta);
   let body;
   if (entry && !ui.changing) {
     body = visitTaskValidHtml(entry);
-  } else if (!wo || ui.changing === 'order') {
-    body = orderPromptHtml({
-      value: ui.changing === 'order' ? (wo || '') : '',
-      intro: 'Ingresa el Nº de orden de esta visita para validar la task asignada.',
-      error: ui.error,
-      submitLabel: 'Cargar orden',
-    });
+  } else if (ui.resolving && !entry) {
+    body = '<p class="visit-task-hint" role="status">Buscando la task pendiente de la cuenta…</p>';
   } else {
-    const ctxData = peekOrderContext(wo);
-    const sug = suggestedVisitTask(ctxData);
-    const value = ui.draft !== null ? ui.draft : (sug ? sug.taskId : '');
-    body = visitTaskFormHtml(wo, {
-      value, suggested: sug, loadingCtx: ui.loadingCtx, ctxError: ui.ctxError, error: ui.error, busy: ui.busy,
+    body = visitTaskFormHtml({
+      value: ui.draft !== null ? ui.draft : '',
+      error: ui.error,
+      changing: !!(ui.changing && entry),
+      hint: entry ? null : 'La cuenta no tiene una visita pendiente con task del FSM: escribe el Nº de task asignado (no se valida).',
     });
   }
   const falta = !entry
-    ? '<p class="visit-task-required">Obligatorio: sin task validada no se puede registrar nada de esta visita.</p>'
+    ? '<p class="visit-task-required">Obligatorio: sin task no se puede registrar nada de esta visita.</p>'
     : '';
   gate.innerHTML = `
-    <h3 class="visit-task-title" id="visitTaskGateTitle">Nº de task de la visita</h3>
+    <h3 class="visit-task-title" id="visitTaskGateTitle">Task FSM de la visita</h3>
     ${falta}
     ${body}`;
   gate.hidden = false;
@@ -7095,33 +7116,24 @@ function renderVisitTaskGate(focusSel) {
   }
 }
 
-/** Carga el contexto de la orden para sugerir la tarea Pendiente. */
-async function _visitTaskPrefetchContext(cuenta) {
-  const wo = sessionWorkOrder(cuenta);
-  if (!wo || peekOrderContext(wo)) return;
-  _visitTaskUi.loadingCtx = true;
-  _visitTaskUi.ctxError = null;
-  renderVisitTaskGate();
-  try {
-    await loadOrderContext(wo);
-  } catch (err) {
-    console.warn('[Wifix] contexto para sugerir task:', err);
-    if (_visitTaskUi.account === cuenta) _visitTaskUi.ctxError = err;
-  }
-  if (_visitTaskUi.account !== cuenta) return;
-  _visitTaskUi.loadingCtx = false;
-  if (validatedAccount === cuenta) renderVisitTaskGate();
-}
-
-/** Llamado al confirmar la cuenta (y al entrar al módulo con cuenta confirmada). */
+/** Llamado al confirmar la cuenta. En Visita técnica sin task, la toma sola. */
 function visitTaskOnAccountConfirmed(cuenta) {
   if (!visitTaskUsesModule()) {
     renderVisitTaskGate();
-    return;
+    return Promise.resolve(visitTaskIdFor(cuenta));
   }
   if (_visitTaskUi.account !== cuenta) _visitTaskUiReset(cuenta);
+  if (visitTaskIdFor(cuenta)) {
+    renderVisitTaskGate();
+    return Promise.resolve(visitTaskIdFor(cuenta));
+  }
+  _visitTaskUi.resolving = true;
   renderVisitTaskGate();
-  _visitTaskPrefetchContext(cuenta);
+  return visitTaskAutoResolve(cuenta).then((tid) => {
+    if (_visitTaskUi.account === cuenta) _visitTaskUi.resolving = false;
+    if (validatedAccount === cuenta) renderVisitTaskGate();
+    return tid;
+  });
 }
 
 (function wireVisitTaskGate() {
@@ -7130,16 +7142,16 @@ function visitTaskOnAccountConfirmed(cuenta) {
   gate.addEventListener('click', (ev) => {
     const btn = ev.target && ev.target.closest ? ev.target.closest('[data-action]') : null;
     if (!btn) return;
-    const cuenta = validatedAccount;
     if (btn.dataset.action === 'visit-task-change') {
-      _visitTaskUi.changing = 'task';
+      _visitTaskUi.changing = true;
       _visitTaskUi.error = null;
-      _visitTaskUi.draft = visitTaskIdFor(cuenta) || null;
+      _visitTaskUi.draft = null;
       renderVisitTaskGate('[data-field="visit-task"]');
-    } else if (btn.dataset.action === 'visit-task-order-change') {
-      _visitTaskUi.changing = 'order';
+    } else if (btn.dataset.action === 'visit-task-cancel') {
+      _visitTaskUi.changing = false;
       _visitTaskUi.error = null;
-      renderVisitTaskGate('[data-field="order-number"]');
+      _visitTaskUi.draft = null;
+      renderVisitTaskGate('.visit-task-id');
     }
   });
   gate.addEventListener('input', (ev) => {
@@ -7147,46 +7159,23 @@ function visitTaskOnAccountConfirmed(cuenta) {
       _visitTaskUi.draft = ev.target.value;
     }
   });
-  gate.addEventListener('submit', async (ev) => {
+  gate.addEventListener('submit', (ev) => {
     ev.preventDefault();
     const cuenta = validatedAccount;
-    if (!cuenta || _visitTaskUi.busy) return;
     const form = ev.target;
-    if (form.dataset.form === 'order-prompt') {
-      const input = form.querySelector('[data-field="order-number"]');
-      _visitTaskUi.busy = true;
-      const btn = form.querySelector('button[type="submit"]');
-      if (btn) { btn.disabled = true; btn.textContent = 'Consultando…'; }
-      const r = await submitOrderNumber(cuenta, input ? input.value : '');
-      _visitTaskUi.busy = false;
-      if (!r.ok) {
-        _visitTaskUi.error = r.error;
-        renderVisitTaskGate('[data-field="order-number"]');
-        return;
-      }
-      _visitTaskUi.changing = false;
-      _visitTaskUi.error = null;
-      _visitTaskUi.draft = null;
+    if (!cuenta || !form || form.dataset.form !== 'visit-task') return;
+    const input = form.querySelector('[data-field="visit-task"]');
+    _visitTaskUi.draft = input ? input.value : '';
+    const r = setManualVisitTask(cuenta, _visitTaskUi.draft);
+    if (!r.ok) {
+      _visitTaskUi.error = r.error;
       renderVisitTaskGate('[data-field="visit-task"]');
       return;
     }
-    if (form.dataset.form === 'visit-task') {
-      const input = form.querySelector('[data-field="visit-task"]');
-      _visitTaskUi.draft = input ? input.value : '';
-      _visitTaskUi.busy = true;
-      _visitTaskUi.error = null;
-      renderVisitTaskGate();
-      const r = await validateVisitTask(cuenta, _visitTaskUi.draft);
-      _visitTaskUi.busy = false;
-      if (!r.ok) {
-        _visitTaskUi.error = r.error;
-        renderVisitTaskGate('[data-field="visit-task"]');
-        return;
-      }
-      _visitTaskUi.changing = false;
-      _visitTaskUi.draft = null;
-      renderVisitTaskGate('.visit-task-id');
-    }
+    _visitTaskUi.changing = false;
+    _visitTaskUi.draft = null;
+    _visitTaskUi.error = null;
+    renderVisitTaskGate('.visit-task-id');
   });
 })();
 
@@ -7243,43 +7232,49 @@ function renderWorkOrderNotes(data) {
 }
 
 // ============================================================================
-// Contexto de la orden de trabajo (TYTAN simulado) — Visita técnica y
-// Migraciones. GET /orders/context?workOrder=… (contrato 2026-10-06 §3).
-// Como en FSM: tareas de la orden con su estado y su cierre (tap para
-// desplegar), dispositivos instalados, dirección guardada y observaciones.
-// Fechas en hora de Ecuador. Si el técnico entró por cuenta/cédula, se le pide
-// el nº de orden dentro del módulo antes de mostrar nada.
+// Contexto de la task FSM (TYTAN simulado) — orden, visitas "como en el FSM",
+// equipos, dirección y observaciones. GET /tasks/context?task=… (2026-10-16):
+// mismo objeto que /orders/context + currentTaskId, tasks[].current y
+// visits[] (pendiente actual primero, luego de la más reciente a la más
+// antigua). /orders/task-check está deprecado y la app ya no lo usa. Fechas
+// en hora de Ecuador. Si el técnico entró por cuenta/cédula y la cuenta no
+// tiene task, se le pide el Nº de task dentro del módulo (sin validar).
 // ============================================================================
-const ORDER_CONTEXT_TTL_MS = 10 * 60 * 1000;
-const _orderContextCache = new Map();   // workOrder → { data, at, promise }
+const TASK_CONTEXT_TTL_MS = 10 * 60 * 1000;
+const _taskContextCache = new Map();   // taskId → { data, at, promise }
 let _orderUid = 0;
 
-/** Contexto de la orden (cache por workOrder; una sola llamada en vuelo). */
-function loadOrderContext(workOrder, force = false) {
-  const wo = String(workOrder || '').trim();
-  if (!wo) return Promise.reject(new Error('Falta el nº de orden.'));
-  const hit = _orderContextCache.get(wo);
+/** Contexto de la task (cache por taskId; una sola llamada en vuelo). */
+function loadTaskContext(taskId, force = false) {
+  const tid = String(taskId || '').trim();
+  if (!tid) return Promise.reject(new Error('Falta el Nº de task.'));
+  const hit = _taskContextCache.get(tid);
   if (!force && hit) {
     if (hit.promise) return hit.promise;
-    if (Date.now() - hit.at < ORDER_CONTEXT_TTL_MS) return Promise.resolve(hit.data);
+    if (Date.now() - hit.at < TASK_CONTEXT_TTL_MS) return Promise.resolve(hit.data);
   }
-  const promise = WifixAPI.getOrderContext(wo)
+  const promise = WifixAPI.getTaskContext(tid)
     .then((data) => {
-      _orderContextCache.set(wo, { data, at: Date.now(), promise: null });
+      _taskContextCache.set(tid, { data, at: Date.now(), promise: null });
       return data;
     })
     .catch((err) => {
-      _orderContextCache.delete(wo);
+      _taskContextCache.delete(tid);
       throw err;
     });
-  _orderContextCache.set(wo, { data: null, at: Date.now(), promise });
+  _taskContextCache.set(tid, { data: null, at: Date.now(), promise });
   return promise;
 }
 
 /** Contexto ya cargado (sin red) o null. */
-function peekOrderContext(workOrder) {
-  const hit = workOrder ? _orderContextCache.get(String(workOrder).trim()) : null;
-  return hit && hit.data && Date.now() - hit.at < ORDER_CONTEXT_TTL_MS ? hit.data : null;
+function peekTaskContext(taskId) {
+  const hit = taskId ? _taskContextCache.get(String(taskId).trim()) : null;
+  return hit && hit.data && Date.now() - hit.at < TASK_CONTEXT_TTL_MS ? hit.data : null;
+}
+
+/** ¿El módulo actual muestra el panel "Visitas pendientes y anteriores"? */
+function servicioHasVisitsPanel() {
+  return servicioItemsForModule().some((i) => i.id === 'visits');
 }
 
 const ORDER_STATUS_BADGE = Object.freeze({
@@ -7401,18 +7396,275 @@ function orderDeviceHtml(e) {
     </li>`;
 }
 
-/** Panel completo con el contexto de la orden. Pura (sin DOM) para el smoke. */
+// ---------------------------------------------------------------------------
+// Visitas "como en el FSM" (OrderVisit) + registros de Wifix por taskId
+// ---------------------------------------------------------------------------
+const FSM_RESULT_BADGE = Object.freeze({ SATISFACTORIA: 'badge-resolved', INSATISFACTORIA: 'badge-fail', PENDIENTE: 'badge-pending' });
+const FSM_RESULT_TEXT = Object.freeze({ SATISFACTORIA: 'Satisfactoria', INSATISFACTORIA: 'Insatisfactoria', PENDIENTE: 'Pendiente' });
+
+/** Chip del resultado (texto + color, nunca solo color). */
+function fsmResultChip(result) {
+  return `<span class="event-badge order-chip ${FSM_RESULT_BADGE[result] || 'badge-neutral'}">${escapeHtml(FSM_RESULT_TEXT[result] || result || 'Sin resultado')}</span>`;
+}
+
+/** Fecha absoluta en hora de Ecuador (o '—'). */
+function _fsmDt(v) {
+  return v ? dateTimeHtml(v, { seconds: false, relative: false }) : '—';
+}
+
+// Registros de Wifix por visita (VisitRecords de /visits?include=records).
+const WIFIX_RECORD_KEYS = Object.freeze(['speedtests', 'pingTests', 'tracerouteTests', 'wifiHeatmaps',
+  'distanceMeasurements', 'clientLocations', 'napAssignments', 'retiredEquipment', 'deviceValidations']);
+const WIFIX_CHECKLIST_COUNT = Object.freeze({
+  speedtest: (r) => r.speedtests.filter((x) => x.source !== 'external-device').length,
+  externalSpeedtest: (r) => r.speedtests.filter((x) => x.source === 'external-device').length,
+  ping: (r) => r.pingTests.length,
+  traceroute: (r) => r.tracerouteTests.length,
+  wifiSignal: (r) => r.wifiHeatmaps.length,
+  distance: (r) => r.distanceMeasurements.length,
+  clientLocation: (r) => r.clientLocations.length,
+  napAssignment: (r) => r.napAssignments.length,
+  retiredEquipment: (r) => r.retiredEquipment.length,
+  deviceValidation: (r) => r.deviceValidations.length,
+});
+const WIFIX_CHECKLIST_DEFAULT = Object.freeze([
+  ['speedtest', 'Speedtest (app)'], ['externalSpeedtest', 'Speedtest (dispositivo externo)'], ['ping', 'Ping'],
+  ['traceroute', 'Traceroute'], ['wifiSignal', 'Medición de señal WiFi'], ['distance', 'Medición de distancia'],
+  ['clientLocation', 'Ubicación casa cliente'], ['napAssignment', 'NAP elegida (instalación)'],
+  ['retiredEquipment', 'Equipos retirados'], ['deviceValidation', 'Validación de equipo vs plan'],
+]);
+
+function _emptyWifixRecords() {
+  const r = {};
+  WIFIX_RECORD_KEYS.forEach((k) => { r[k] = []; });
+  return r;
+}
+
+/** Arma un VisitRecords (checklist + vínculo) a partir de registros sueltos. Pura. */
+function _finishWifixRecords(r, template) {
+  const all = WIFIX_RECORD_KEYS.flatMap((k) => r[k]);
+  const kinds = [...new Set(all.map((x) => x && x.linkedBy).filter(Boolean))];
+  return Object.assign({
+    linkedBy: kinds.length === 0 ? null : (kinds.length > 1 ? 'MIXED' : kinds[0]),
+    checklist: template.map(([type, label]) => {
+      const fn = WIFIX_CHECKLIST_COUNT[type];
+      const count = fn ? fn(r) : 0;
+      return { type, label, done: count > 0, count };
+    }),
+  }, r);
+}
+
+/**
+ * Reparte los registros de Wifix (de /visits?include=records) entre las
+ * visitas FSM por taskId (o fsmTaskId; si el registro trae el workOrder, va a
+ * la visita más reciente de esa orden). Lo que no calza con ninguna queda en
+ * `leftover` (agrupado por la visita de la operadora): no se pierde nada.
+ * Pura. Devuelve { byTask: Map(taskId → VisitRecords), leftover: VisitItem[] }.
+ */
+function mergeWifixRecords(visits, visitsResult) {
+  const items = Array.isArray(visitsResult) ? visitsResult : ((visitsResult && visitsResult.items) || []);
+  const vs = (Array.isArray(visits) ? visits : []).filter((v) => v && v.taskId);
+  const withChecklist = items.find((i) => i && i.records && Array.isArray(i.records.checklist) && i.records.checklist.length);
+  const template = withChecklist
+    ? withChecklist.records.checklist.map((c) => [c.type, c.label || c.type])
+    : WIFIX_CHECKLIST_DEFAULT.map((c) => c.slice());
+  const byTaskId = new Map(vs.map((v) => [String(v.taskId), v]));
+  const byFsmId = new Map(vs.filter((v) => v.fsmTaskId !== null && v.fsmTaskId !== undefined).map((v) => [String(v.fsmTaskId), v]));
+  // Lista ya ordenada (pendiente, luego más reciente): la primera de cada orden.
+  const byWo = new Map();
+  vs.forEach((v) => { if (v.workOrder && !byWo.has(String(v.workOrder))) byWo.set(String(v.workOrder), v); });
+  const assigned = new Map();
+  const seen = new Set();
+  const leftover = [];
+  items.forEach((item) => {
+    if (!item || !item.records) return;
+    const rest = _emptyWifixRecords();
+    let restCount = 0;
+    WIFIX_RECORD_KEYS.forEach((k) => {
+      (Array.isArray(item.records[k]) ? item.records[k] : []).forEach((rec) => {
+        if (!rec) return;
+        if (rec.id) {
+          if (seen.has(rec.id)) return;
+          seen.add(rec.id);
+        }
+        const key = rec.taskId !== null && rec.taskId !== undefined ? String(rec.taskId) : '';
+        const v = key ? (byTaskId.get(key) || byFsmId.get(key) || byWo.get(key)) : null;
+        if (v) {
+          if (!assigned.has(v.taskId)) assigned.set(v.taskId, _emptyWifixRecords());
+          assigned.get(v.taskId)[k].push(rec);
+        } else {
+          rest[k].push(rec);
+          restCount++;
+        }
+      });
+    });
+    if (restCount) leftover.push(Object.assign({}, item, { records: _finishWifixRecords(rest, template) }));
+  });
+  const byTask = new Map();
+  assigned.forEach((r, tid) => byTask.set(tid, _finishWifixRecords(r, template)));
+  return { byTask, leftover };
+}
+
+function _fsmEquipmentHtml(list) {
+  const eq = (Array.isArray(list) ? list : []).filter(Boolean);
+  if (!eq.length) return '<p class="order-muted">Sin equipos en la orden.</p>';
+  return `<ul class="fsm-equipment">${eq.map((e) => {
+    const nombre = e.shortName || e.productName || 'Equipo';
+    const datos = [
+      e.model ? escapeHtml(e.model) : '',
+      e.serial ? `Serial <span class="mono">${escapeHtml(e.serial)}</span>` : '',
+      e.mac ? `MAC <span class="mono">${escapeHtml(fmtMac(e.mac))}</span>` : '',
+    ].filter(Boolean).join(' · ');
+    return `<li><span class="fsm-eq-name">${escapeHtml(nombre)}</span>${e.status ? ` <span class="fsm-eq-status">${escapeHtml(e.status)}</span>` : ''}
+      <span class="fsm-eq-data">${datos || '<span class="order-muted">Sin modelo, serial ni MAC</span>'}</span></li>`;
+  }).join('')}</ul>`;
+}
+
+/** Cuerpo de una visita: fechas, técnico, cierre, notas, materiales, equipos, dirección y registros. */
+function fsmVisitBodyHtml(v, recs) {
+  const pend = v.status === 'Pendiente';
+  const notas = (Array.isArray(v.notes) ? v.notes : []).filter(Boolean);
+  const coords = typeof v.latitude === 'number' && typeof v.longitude === 'number'
+    ? `<p class="order-muted mono">${escapeHtml(v.latitude.toFixed(6))}, ${escapeHtml(v.longitude.toFixed(6))}</p>` : '';
+  let registros;
+  if (recs && _visitHasRecords(recs)) registros = renderVisitRecords(recs);
+  else registros = `<p class="order-muted">${pend ? 'Aún no hay registros de Wifix en esta visita.' : 'Sin registros de Wifix vinculados a esta task.'}</p>`;
+  return `
+    <dl class="order-facts fsm-dates">
+      <div><dt>Creada</dt><dd>${_fsmDt(v.createdAt)}</dd></div>
+      <div><dt>Agenda</dt><dd>${escapeHtml(fmtRangeEc(v.scheduledFrom, v.scheduledTo))}</dd></div>
+      <div><dt>Inicio</dt><dd>${v.startedAt ? _fsmDt(v.startedAt) : (pend ? 'Sin iniciar' : '—')}</dd></div>
+      <div><dt>Cierre</dt><dd>${v.finishedAt ? _fsmDt(v.finishedAt) : (pend ? 'Abierta' : '—')}</dd></div>
+      <div><dt>Técnico</dt><dd>${escapeHtml(v.technician || '—')}</dd></div>
+      <div><dt>Último usuario</dt><dd>${escapeHtml(v.lastModifyUser || '—')}</dd></div>
+      <div><dt>Orden</dt><dd class="mono">${escapeHtml(v.workOrder || '—')}</dd></div>
+      ${v.externalProcess ? `<div><dt>Proceso</dt><dd class="mono">${escapeHtml(v.externalProcess)}</dd></div>` : ''}
+      ${v.fsmTaskId !== null && v.fsmTaskId !== undefined ? `<div><dt>ID FSM</dt><dd class="mono">${escapeHtml(String(v.fsmTaskId))}</dd></div>` : ''}
+    </dl>
+    ${v.closureReason || v.closureNotes ? `
+    <h5 class="fsm-sub">Cierre</h5>
+    <dl class="order-facts">
+      <div><dt>Motivo de cierre</dt><dd>${escapeHtml(v.closureReason || '—')}</dd></div>
+      <div><dt>Notas de cierre</dt><dd class="order-notes">${escapeHtml(v.closureNotes || '—')}</dd></div>
+    </dl>` : (pend ? '' : '<p class="order-muted">La visita no trae datos de cierre.</p>')}
+    ${v.orderNote ? `<h5 class="fsm-sub">Nota de la orden</h5><p class="order-text">${escapeHtml(v.orderNote)}</p>` : ''}
+    <h5 class="fsm-sub">Notas (${notas.length})</h5>
+    ${notas.length ? `<ol class="task-notes-list fsm-notes">${notas.map((n) => `
+      <li class="task-note"><span class="task-note-date">${_fsmDt(n.createdAt)}</span>
+        <span class="task-note-text">${escapeHtml(n.content || '—')}</span></li>`).join('')}</ol>` : '<p class="order-muted">Sin notas.</p>'}
+    ${pend ? '' : orderMaterialsHtml(v.materials)}
+    <h5 class="fsm-sub">Equipos</h5>
+    ${_fsmEquipmentHtml(v.equipment)}
+    <h5 class="fsm-sub">Dirección</h5>
+    <p class="order-text">${v.address ? escapeHtml(v.address) : '<span class="order-muted">Sin dirección</span>'}</p>
+    ${coords}
+    <section class="fsm-records" aria-label="Registros de Wifix de la task ${escapeHtml(v.taskId || '')}">
+      <h5 class="fsm-sub">Registros de Wifix</h5>
+      ${registros}
+    </section>`;
+}
+
+/** Cabecera de la visita: nº task, estado, resultado, tipo de trabajo y fecha. */
+function fsmVisitHeadHtml(v, opts = {}) {
+  const deEsta = !!opts.currentTaskId && v.taskId === opts.currentTaskId;
+  const fecha = v.finishedAt || v.scheduledFrom || v.createdAt;
+  return `
+    <span class="order-task-top">
+      <span class="order-task-id mono">${escapeHtml(v.taskId || '—')}</span>
+      ${orderStatusChip(v.status)}
+      ${fsmResultChip(v.result)}
+      ${deEsta ? '<span class="order-current-badge">Task de esta visita</span>' : ''}
+    </span>
+    <span class="order-task-type">${escapeHtml(v.workType || 'Visita')}</span>
+    <span class="order-task-line"><span class="order-key">${v.finishedAt ? 'Cierre' : 'Agenda'}</span> ${escapeHtml(v.finishedAt ? fmtDateTimeEc(fecha, { seconds: false }) : fmtRangeEc(v.scheduledFrom, v.scheduledTo))}</span>
+    <span class="order-task-line"><span class="order-key">Técnico</span> ${escapeHtml(v.lastModifyUser || v.technician || '—')}</span>`;
+}
+
+/** Pendiente actual: destacada y abierta. Anteriores: tarjetas colapsables. */
+function fsmVisitHtml(v, recs, opts = {}) {
+  if (v.current) {
+    return `
+      <article class="fsm-visit is-current" aria-label="Pendiente actual ${escapeHtml(v.taskId || '')}">
+        <p class="fsm-current-label">Pendiente actual</p>
+        <div class="fsm-visit-head">${fsmVisitHeadHtml(v, opts)}</div>
+        <div class="fsm-visit-body">${fsmVisitBodyHtml(v, recs)}</div>
+      </article>`;
+  }
+  return `
+    <li class="order-task fsm-visit" data-task="${escapeHtml(v.taskId || '')}">
+      <details>
+        <summary class="order-task-summary">
+          ${fsmVisitHeadHtml(v, opts)}
+          <span class="order-task-toggle"><span class="order-task-toggle-txt">Ver detalle</span>${SERVICIO_ICONS.chev}</span>
+        </summary>
+        <div class="order-task-body fsm-visit-body">${fsmVisitBodyHtml(v, recs)}</div>
+      </details>
+    </li>`;
+}
+
+/**
+ * Lista "como en el FSM": la pendiente actual arriba y luego las anteriores
+ * (más reciente → más antigua), con los registros de Wifix de cada una. Lo que
+ * no calza con ninguna visita FSM se muestra al final (no se borra). Pura.
+ */
+function fsmVisitsHtml(visits, merged, opts = {}) {
+  const list = (Array.isArray(visits) ? visits : []).filter(Boolean);
+  const m = merged || { byTask: new Map(), leftover: [] };
+  const pend = list.filter((v) => v.current);
+  const prev = list.filter((v) => !v.current);
+  const uid = opts.uid || '';
+  const recsOf = (v) => m.byTask.get(v.taskId) || null;
+  return `
+    <section class="order-section fsm-visits" aria-labelledby="fsmVisitsTitle${uid}">
+      <h4 class="order-section-title" id="fsmVisitsTitle${uid}">Visitas (como en el FSM)</h4>
+      ${pend.length ? pend.map((v) => fsmVisitHtml(v, recsOf(v), opts)).join('') : '<div class="detail-empty">Sin visita pendiente en el FSM.</div>'}
+      <h5 class="fsm-prev-title">Visitas anteriores (${prev.length})</h5>
+      ${prev.length
+        ? `<ul class="order-task-list fsm-visit-list">${prev.map((v) => fsmVisitHtml(v, recsOf(v), opts)).join('')}</ul>`
+        : '<div class="detail-empty">Sin visitas anteriores.</div>'}
+      ${m.leftover.length ? `
+      <section class="fsm-leftover" aria-labelledby="fsmLeftoverTitle${uid}">
+        <h5 class="fsm-prev-title" id="fsmLeftoverTitle${uid}">Otras visitas con registros de Wifix (sin task del FSM)</h5>
+        ${m.leftover.map(renderVisitCard).join('')}
+      </section>` : ''}
+    </section>`;
+}
+
+function _otherAccountWarning(cl, cuenta) {
+  return cl && cl.accountNumber && cuenta && String(cl.accountNumber) !== String(cuenta)
+    ? `<div class="detail-warning" role="status">Esta task es de la cuenta ${escapeHtml(cl.accountNumber)}, no de la cuenta confirmada (${escapeHtml(cuenta)}). Verifica el Nº de task.</div>`
+    : '';
+}
+
+/**
+ * Panel completo con el contexto de la task. Pura (sin DOM) para el smoke.
+ * opts = { uid, currentTaskId, includeVisits, records (resultado de
+ * /visits?include=records o null), canChange }.
+ */
 function orderContextHtml(data, cuenta, opts = {}) {
   const o = (data && data.order) || {};
   const cl = (data && data.client) || {};
-  const tasks = orderTasksSorted(data && data.tasks);
   const equipos = Array.isArray(data && data.equipment) ? data.equipment.filter(Boolean) : [];
   const simulado = data && data.simulated
     ? '<span class="sim-badge" title="Integración TYTAN simulada: datos de prueba">TYTAN simulado</span>' : '';
-  const otraCuenta = cl.accountNumber && cuenta && String(cl.accountNumber) !== String(cuenta)
-    ? `<div class="detail-warning" role="status">Esta orden es de la cuenta ${escapeHtml(cl.accountNumber)}, no de la cuenta confirmada (${escapeHtml(cuenta)}). Verifica el nº de orden.</div>`
-    : '';
   const dir = data && data.registeredAddress ? data.registeredAddress : cl.address;
+  const uid = opts.uid || '';
+  let visitas;
+  if (!Array.isArray(data && data.visits)) {
+    // Backend anterior sin `visits`: tareas de la orden como antes.
+    const tasks = orderTasksSorted(data && data.tasks);
+    visitas = `
+      <section class="order-section" aria-labelledby="orderTasksTitle${uid}">
+        <h4 class="order-section-title" id="orderTasksTitle${uid}">Tareas de la orden (${tasks.length})</h4>
+        ${tasks.length
+          ? `<ul class="order-task-list">${tasks.map(t => orderTaskHtml(t, opts.currentTaskId)).join('')}</ul>`
+          : '<div class="detail-empty">La orden no trae tareas.</div>'}
+      </section>`;
+  } else if (opts.includeVisits) {
+    visitas = fsmVisitsHtml(data.visits, mergeWifixRecords(data.visits, opts.records), { uid, currentTaskId: opts.currentTaskId });
+  } else {
+    visitas = '<p class="order-muted">La visita pendiente y las anteriores (como en el FSM) están en «Visitas pendientes y anteriores».</p>';
+  }
   return `
     <div class="order-panel" data-panel="order">
       <div class="order-head">
@@ -7423,118 +7675,166 @@ function orderContextHtml(data, cuenta, opts = {}) {
         </div>
         <span class="order-head-type">${escapeHtml([o.orderType, o.technology].filter(Boolean).join(' · ') || 'Orden de trabajo')}</span>
         <dl class="order-facts compact">
+          ${opts.currentTaskId ? `<div><dt>Task</dt><dd class="mono">${escapeHtml(opts.currentTaskId)}</dd></div>` : ''}
           <div><dt>Creada</dt><dd>${escapeHtml(fmtDateTimeEc(o.createdAt, { seconds: false }))}</dd></div>
           <div><dt>SLA</dt><dd>${escapeHtml(fmtDateTimeEc(o.slaAt, { seconds: false }))}</dd></div>
           <div><dt>Cerrada</dt><dd>${o.closedAt ? escapeHtml(fmtDateTimeEc(o.closedAt, { seconds: false })) : 'Abierta'}</dd></div>
           ${o.externalId ? `<div><dt>ID ${escapeHtml(o.externalSystem || 'externo')}</dt><dd class="mono">${escapeHtml(o.externalId)}</dd></div>` : ''}
           ${o.signatureProcess ? `<div><dt>Proceso</dt><dd class="mono">${escapeHtml(o.signatureProcess)}</dd></div>` : ''}
         </dl>
-        <button type="button" class="link-btn order-change-btn" data-action="order-change">Cambiar nº de orden</button>
+        ${opts.canChange ? '<button type="button" class="link-btn order-change-btn" data-action="order-change">Usar otra task</button>' : ''}
       </div>
-      ${otraCuenta}
+      ${_otherAccountWarning(cl, cuenta)}
 
-      <section class="order-section" aria-labelledby="orderTasksTitle${opts.uid || ''}">
-        <h4 class="order-section-title" id="orderTasksTitle${opts.uid || ''}">Tareas de la orden (${tasks.length})</h4>
-        ${tasks.length
-          ? `<ul class="order-task-list">${tasks.map(t => orderTaskHtml(t, opts.currentTaskId)).join('')}</ul>`
-          : '<div class="detail-empty">La orden no trae tareas.</div>'}
-      </section>
+      ${visitas}
 
-      <section class="order-section" aria-labelledby="orderDevicesTitle${opts.uid || ''}">
-        <h4 class="order-section-title" id="orderDevicesTitle${opts.uid || ''}">Dispositivos instalados (${equipos.length})</h4>
+      <section class="order-section" aria-labelledby="orderDevicesTitle${uid}">
+        <h4 class="order-section-title" id="orderDevicesTitle${uid}">Dispositivos instalados (${equipos.length})</h4>
         ${equipos.length
           ? `<ul class="order-device-list">${equipos.map(orderDeviceHtml).join('')}</ul>`
           : '<div class="detail-empty">La orden no trae dispositivos instalados.</div>'}
       </section>
 
-      <section class="order-section" aria-labelledby="orderAddrTitle${opts.uid || ''}">
-        <h4 class="order-section-title" id="orderAddrTitle${opts.uid || ''}">Dirección guardada</h4>
+      <section class="order-section" aria-labelledby="orderAddrTitle${uid}">
+        <h4 class="order-section-title" id="orderAddrTitle${uid}">Dirección guardada</h4>
         <p class="order-text">${dir ? escapeHtml(dir) : '<span class="no-fsm-data">Sin dirección en la orden</span>'}</p>
         ${cl.napCode || cl.zoneCode ? `<p class="order-muted">${cl.napCode ? `NAP ${escapeHtml(cl.napCode)}` : ''}${cl.napCode && cl.zoneCode ? ' · ' : ''}${cl.zoneCode ? `Zona ${escapeHtml(cl.zoneCode)}` : ''}</p>` : ''}
       </section>
 
-      <section class="order-section" aria-labelledby="orderObsTitle${opts.uid || ''}">
-        <h4 class="order-section-title" id="orderObsTitle${opts.uid || ''}">Observaciones</h4>
+      <section class="order-section" aria-labelledby="orderObsTitle${uid}">
+        <h4 class="order-section-title" id="orderObsTitle${uid}">Observaciones</h4>
         <p class="order-text">${data && data.observations ? escapeHtml(data.observations) : '<span class="order-muted">Sin observaciones.</span>'}</p>
       </section>
     </div>`;
 }
 
 /**
- * Formulario "Nº de orden" (cuando el técnico entró por cuenta o cédula, o
- * quiere cambiarla). opts = { value, error, intro, submitLabel }.
+ * Formulario "Nº de task FSM" dentro del módulo (ingreso por cuenta/cédula sin
+ * task, o "Usar otra task"). Solo formato: no se valida contra nada.
  */
-function orderPromptHtml(opts = {}) {
+function taskPromptHtml(opts = {}) {
   const uid = ++_orderUid;
-  const errId = `orderPromptErr${uid}`;
+  const errId = `taskPromptErr${uid}`;
   return `
-    <form class="order-prompt" data-form="order-prompt" novalidate>
+    <form class="order-prompt" data-form="task-prompt" novalidate>
       ${opts.intro ? `<p class="order-prompt-intro">${escapeHtml(opts.intro)}</p>` : ''}
-      <label class="form-label" for="orderPrompt${uid}">Nº de orden de trabajo</label>
-      <input type="text" id="orderPrompt${uid}" class="order-input" data-field="order-number"
+      <label class="form-label" for="taskPrompt${uid}">Nº de task FSM</label>
+      <input type="text" id="taskPrompt${uid}" class="order-input" data-field="task-number"
         inputmode="text" autocapitalize="characters" autocomplete="off" maxlength="32"
-        placeholder="ORDER/463158/2026 o 463158" value="${escapeHtml(opts.value || '')}"
+        placeholder="TASK/549487/2026 o 549487" value="${escapeHtml(opts.value || '')}"
         aria-describedby="${errId}"${opts.error ? ' aria-invalid="true"' : ''}>
-      <p class="order-field-error" id="${errId}" data-slot="order-prompt-error" role="alert">${escapeHtml(opts.error || '')}</p>
-      <button type="submit" class="save-btn order-submit">${escapeHtml(opts.submitLabel || 'Cargar orden')}</button>
+      <p class="order-field-error" id="${errId}" data-slot="task-prompt-error" role="alert">${escapeHtml(opts.error || '')}</p>
+      <button type="submit" class="save-btn order-submit">${escapeHtml(opts.submitLabel || 'Ver visitas')}</button>
     </form>`;
 }
 
 /**
- * Valida y carga una orden escrita por el técnico. Devuelve { ok, workOrder,
- * data } o { ok:false, error }. Solo si el contexto carga se guarda en la sesión.
+ * Task escrita en el módulo: formato + carga del contexto; si carga, queda
+ * como task de la sesión (y por lo tanto como taskId de los registros).
+ * Devuelve { ok, taskId, data } o { ok:false, error }.
  */
-async function submitOrderNumber(cuenta, raw) {
-  const wo = WifixAPI.normalizeOrderNumber(raw);
-  if (!wo) return { ok: false, error: 'Formato inválido. Usa ORDER/463158/2026 o solo el número (463158).' };
+async function submitTaskNumber(cuenta, raw) {
+  const tid = WifixAPI.normalizeTaskId(raw);
+  if (!tid) return { ok: false, error: 'Formato inválido. Usa TASK/549487/2026 o solo el número (6 o 7 dígitos).' };
   try {
-    const data = await loadOrderContext(wo, true);
-    setSessionWorkOrder(cuenta, (data && data.order && data.order.workOrder) || wo, 'module');
-    return { ok: true, workOrder: sessionWorkOrder(cuenta), data };
+    const data = await loadTaskContext(tid, true);
+    setSessionTask(cuenta, { taskId: tid, workOrder: (data && data.order && data.order.workOrder) || null, source: 'manual' });
+    return { ok: true, taskId: tid, data };
   } catch (err) {
-    console.error('[Wifix] orden (módulo):', err);
-    if (err && err.code === 'VALIDATION_ERROR') return { ok: false, error: 'Formato de orden inválido. Usa ORDER/463158/2026 o solo el número.' };
-    if (err && (err.code === 'NOT_FOUND' || err.code === 'HTTP_404')) return { ok: false, error: `No existe la orden ${wo}.` };
-    return { ok: false, error: `No se pudo consultar la orden: ${(err && err.message) || 'error del servidor'}.` };
+    console.error('[Wifix] task (módulo):', err);
+    if (err && err.code === 'VALIDATION_ERROR') return { ok: false, error: 'Formato de task inválido. Usa TASK/549487/2026 o solo el número.' };
+    if (err && (err.code === 'TASK_NOT_FOUND' || err.status === 404)) return { ok: false, error: `La task ${tid} no existe en el FSM.` };
+    return { ok: false, error: `No se pudo consultar la task: ${(err && err.message) || 'error del servidor'}.` };
   }
 }
 
-/** HTML del panel "Orden de trabajo" de Datos del Servicio. */
+/** Registros de Wifix por visita; un fallo no impide mostrar las visitas. */
+function _visitsWithRecordsOrNull(cuenta) {
+  return WifixAPI.getVisits(cuenta, { includeRecords: true })
+    .then((r) => { rememberVisits(cuenta, r); return r; })
+    .catch((err) => { console.warn('[Wifix] registros de Wifix por visita:', err); return null; });
+}
+
+/** HTML del panel "Orden de trabajo y visitas" de Datos del Servicio. */
 async function loadOrderPanel(cuenta, opts = {}) {
-  const wo = sessionWorkOrder(cuenta);
-  if (!wo || opts.change) {
-    return `<div class="order-panel" data-panel="order">${orderPromptHtml({
-      value: opts.change ? (wo || '') : '',
+  const t = sessionTask(cuenta);
+  if (!t || opts.change) {
+    return `<div class="order-panel" data-panel="order">${taskPromptHtml({
+      value: '',
       intro: opts.change
-        ? 'Escribe el nuevo nº de orden de esta visita.'
-        : 'Ingresaste por cuenta o cédula: escribe el nº de orden de esta visita para ver sus tareas, cierres y equipos.',
+        ? 'Escribe el Nº de task FSM de esta visita (queda como la task de todos los registros).'
+        : 'Ingresaste por cuenta o cédula y no hay task de esta visita: escribe el Nº de task FSM para ver la orden y sus visitas.',
     })}</div>`;
   }
   try {
-    const data = await loadOrderContext(wo, !!opts.force);
-    return orderContextHtml(data, cuenta, { uid: ++_orderUid, currentTaskId: opts.currentTaskId || null });
+    const [data, records] = await Promise.all([
+      loadTaskContext(t.taskId, !!opts.force),
+      opts.includeVisits ? _visitsWithRecordsOrNull(cuenta) : Promise.resolve(null),
+    ]);
+    return orderContextHtml(data, cuenta, {
+      uid: ++_orderUid, currentTaskId: t.taskId, includeVisits: !!opts.includeVisits,
+      records, canChange: t.source !== 'lookup',
+    });
   } catch (err) {
-    console.error('[Wifix] contexto de orden:', err);
+    console.error('[Wifix] contexto de la task:', err);
     return `<div class="order-panel" data-panel="order">
-      ${renderPanelError(err, 'No se pudo cargar el contexto de la orden.')}
+      ${renderPanelError(err, `No se pudo cargar la task ${t.taskId}.`)}
       <div class="order-actions">
         <button type="button" class="add-row-btn" data-action="order-retry">Reintentar</button>
-        <button type="button" class="link-btn" data-action="order-change">Cambiar nº de orden</button>
+        ${t.source !== 'lookup' ? '<button type="button" class="link-btn" data-action="order-change">Usar otra task</button>' : ''}
       </div>
     </div>`;
   }
 }
 
-/** Conecta el panel de orden (delegación: el contenido se repinta entero). */
+/**
+ * Panel "Visitas pendientes y anteriores". Con task en la sesión: visitas como
+ * en el FSM (/tasks/context) + registros de Wifix por taskId. Sin task (o si
+ * el contexto falla): la lista de la operadora (/visits) como siempre.
+ */
+async function loadVisitsPanel(cuenta) {
+  const t = sessionTask(cuenta);
+  const recordsP = WifixAPI.getVisits(cuenta, { includeRecords: true });
+  if (!t) {
+    const r = await recordsP;
+    rememberVisits(cuenta, r);
+    return renderVisitsList(r);
+  }
+  const [ctxR, recR] = await Promise.allSettled([loadTaskContext(t.taskId), recordsP]);
+  const records = recR.status === 'fulfilled' ? recR.value : null;
+  if (records) rememberVisits(cuenta, records);
+  else console.warn('[Wifix] registros de Wifix por visita:', recR.reason);
+  const data = ctxR.status === 'fulfilled' ? ctxR.value : null;
+  if (data && Array.isArray(data.visits)) {
+    const simulado = data.simulated
+      ? '<p class="fsm-source"><span class="sim-badge" title="Integración TYTAN simulada: datos de prueba">TYTAN simulado</span> Datos guardados del FSM de la task <span class="mono">' + escapeHtml(t.taskId) + '</span></p>'
+      : '';
+    return `
+      <div class="order-panel fsm-panel" data-panel="visits">
+        ${simulado}
+        ${_otherAccountWarning(data.client, cuenta)}
+        ${fsmVisitsHtml(data.visits, mergeWifixRecords(data.visits, records), { uid: ++_orderUid, currentTaskId: t.taskId })}
+        ${records ? '' : '<p class="detail-note">No se pudieron cargar los registros de Wifix de las visitas.</p>'}
+      </div>`;
+  }
+  if (ctxR.status === 'rejected') console.error('[Wifix] contexto de la task (visitas):', ctxR.reason);
+  if (records) {
+    return `<div class="detail-note">No se pudo cargar la vista del FSM de la task ${escapeHtml(t.taskId)}: se muestran las visitas de la operadora.</div>${renderVisitsList(records)}`;
+  }
+  throw (ctxR.reason || recR.reason || new Error('No se pudieron cargar las visitas.'));
+}
+
+/** Conecta el panel de la orden (delegación: el contenido se repinta entero). */
 function _bootOrderPanel(body, cuenta, opts = {}) {
   if (!body || body.dataset.orderWired === '1') return;
   body.dataset.orderWired = '1';
   const repaint = async (loadOpts) => {
-    body.innerHTML = '<div class="detail-loading">Cargando orden…</div>';
-    const html = await loadOrderPanel(cuenta, Object.assign({ currentTaskId: opts.currentTaskId ? opts.currentTaskId() : null }, loadOpts));
+    body.innerHTML = '<div class="detail-loading">Cargando task…</div>';
+    const html = await loadOrderPanel(cuenta, Object.assign({ includeVisits: !!opts.includeVisits }, loadOpts));
     if (!body.isConnected && body.isConnected !== undefined) return;
     body.innerHTML = html;
-    const foco = body.querySelector('[data-field="order-number"]') || body.querySelector('.order-wo');
+    wireTaskNotesButtons(body);
+    const foco = body.querySelector('[data-field="task-number"]') || body.querySelector('.order-wo');
     if (foco && foco.focus) {
       if (!foco.matches || !foco.matches('input')) foco.setAttribute('tabindex', '-1');
       foco.focus({ preventScroll: true });
@@ -7547,20 +7847,20 @@ function _bootOrderPanel(body, cuenta, opts = {}) {
     else if (btn.dataset.action === 'order-retry') { ev.stopPropagation(); repaint({ force: true }); }
   });
   body.addEventListener('submit', async (ev) => {
-    const form = ev.target && ev.target.closest ? ev.target.closest('[data-form="order-prompt"]') : null;
+    const form = ev.target && ev.target.closest ? ev.target.closest('[data-form="task-prompt"]') : null;
     if (!form) return;
     ev.preventDefault();
-    const input = form.querySelector('[data-field="order-number"]');
-    const errEl = form.querySelector('[data-slot="order-prompt-error"]');
+    const input = form.querySelector('[data-field="task-number"]');
+    const errEl = form.querySelector('[data-slot="task-prompt-error"]');
     const btn = form.querySelector('button[type="submit"]');
     btn.disabled = true;
     btn.setAttribute('aria-busy', 'true');
     btn.textContent = 'Consultando…';
-    const r = await submitOrderNumber(cuenta, input.value);
+    const r = await submitTaskNumber(cuenta, input.value);
     if (!r.ok) {
       btn.disabled = false;
       btn.removeAttribute('aria-busy');
-      btn.textContent = 'Cargar orden';
+      btn.textContent = 'Ver visitas';
       input.setAttribute('aria-invalid', 'true');
       if (errEl) errEl.textContent = r.error;
       input.focus();
@@ -7571,9 +7871,11 @@ function _bootOrderPanel(body, cuenta, opts = {}) {
 }
 
 const SERVICIO_ITEMS = [
-  // Visita técnica / Migraciones: contexto de la orden (TYTAN simulado).
-  { id: 'order',   icon: SERVICIO_ICONS.history, title: 'Orden de trabajo — tareas, cierres y equipos',
-    load: (cuenta) => loadOrderPanel(cuenta, { currentTaskId: visitTaskIdFor(cuenta) }) },
+  // Visita técnica / Migraciones: la orden de la task FSM (TYTAN simulado).
+  // Si el módulo no tiene el panel 'visits' (Migraciones), aquí van también
+  // las visitas "como en el FSM".
+  { id: 'order',   icon: SERVICIO_ICONS.history, title: 'Orden de trabajo y visitas (como en el FSM)',
+    load: (cuenta) => loadOrderPanel(cuenta, { includeVisits: !servicioHasVisitsPanel() }) },
   { id: 'naps',    icon: SERVICIO_ICONS.nap,     title: 'NAPs cercanas y seleccion GPON Xtreme',
     // Visita técnica / Migración: solo la NAP contratada (sin búsqueda).
     titleContracted: 'NAP del cliente (contratada)',
@@ -7590,13 +7892,10 @@ const SERVICIO_ITEMS = [
     load: (cuenta) => WifixAPI.getNodeEvents(cuenta).then(renderEventsList) },
   // Una sola ruta para la visita pendiente y el historial (campos 15-16).
   { id: 'visits',  icon: SERVICIO_ICONS.history, title: 'Visitas pendientes y anteriores',
-    // Con include=records cada visita trae qué se hizo y qué datos arrojó
-    // (reemplaza al antiguo "Historial de la app"). La pendiente se recuerda
-    // para vincular los registros que se guarden durante esta visita.
-    load: (cuenta) => WifixAPI.getVisits(cuenta, { includeRecords: true }).then((r) => {
-      rememberVisits(cuenta, r);
-      return renderVisitsList(r);
-    }) },
+    // Con task FSM en la sesión: las visitas "como en el FSM" (/tasks/context)
+    // con los registros de Wifix de cada una debajo (include=records, por
+    // taskId). Sin task: la lista de la operadora de siempre.
+    load: (cuenta) => loadVisitsPanel(cuenta) },
 ];
 
 // Título del panel según el módulo (la NAP cambia en Visita técnica / Migración).
@@ -7667,7 +7966,8 @@ function openDatosServicio() {
           if (id === 'naps') {
             _bootNapPanel(body);
           } else if (id === 'order') {
-            _bootOrderPanel(body, cuenta, { currentTaskId: () => visitTaskIdFor(cuenta) });
+            _bootOrderPanel(body, cuenta, { includeVisits: !servicioHasVisitsPanel() });
+            wireTaskNotesButtons(body);
           } else if (id === 'isp') {
             _bootIspPanel(body, cuenta);
           } else {

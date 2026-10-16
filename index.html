@@ -205,16 +205,16 @@
         </header>
 
         <div class="account-field">
-          <!-- Ingresar por: nº de cuenta (default), cédula/RUC o nº de orden
-               (TYTAN simulado: la orden trae la cuenta y su contexto). -->
+          <!-- Ingresar por: Nº de task FSM (principal, por defecto; TYTAN simulado:
+               la task trae la cuenta y su contexto), nº de cuenta o cédula/RUC. -->
           <div class="entry-mode" id="entryMode" role="radiogroup" aria-label="Ingresar por">
-            <button type="button" class="entry-mode-btn is-active" role="radio" aria-checked="true" data-mode="account">Nº de cuenta</button>
+            <button type="button" class="entry-mode-btn is-active" role="radio" aria-checked="true" data-mode="task">Nº de task FSM</button>
+            <button type="button" class="entry-mode-btn" role="radio" aria-checked="false" tabindex="-1" data-mode="account">Nº de cuenta</button>
             <button type="button" class="entry-mode-btn" role="radio" aria-checked="false" tabindex="-1" data-mode="document">Cédula / RUC</button>
-            <button type="button" class="entry-mode-btn" role="radio" aria-checked="false" tabindex="-1" data-mode="order">Nº de orden</button>
           </div>
           <label for="accountInput">
             <span class="field-label">Cuenta del Cliente</span>
-            <span class="field-hint" id="accountFieldHint">Nº de cuenta</span>
+            <span class="field-hint" id="accountFieldHint">Nº de task FSM</span>
           </label>
           <div class="input-wrap">
             <span class="input-icon">
@@ -227,10 +227,11 @@
             <input
               type="text"
               id="accountInput"
-              inputmode="numeric"
+              inputmode="text"
               autocomplete="off"
-              placeholder="Ingresa el número de cuenta"
-              maxlength="20"
+              autocapitalize="characters"
+              placeholder="TASK/549487/2026 o 549487"
+              maxlength="32"
             />
             <button class="input-clear" id="clearAccount" aria-label="Limpiar" type="button">
               <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
@@ -240,16 +241,16 @@
 
         <div class="confirm-account-wrap">
           <button class="save-btn confirm-account-btn" id="confirmAccount" type="button">
-            Confirmar cuenta
+            Buscar task
           </button>
           <div class="confirm-account-feedback" id="confirmAccountFeedback" role="alert" aria-live="polite"></div>
           <div class="confirm-account-whitelist" id="confirmAccountWhitelist" aria-live="polite" hidden></div>
-          <!-- Orden de trabajo de la sesión (ingreso por nº de orden o cargada en el módulo). -->
+          <!-- Task FSM de la sesión (y su orden) para la cuenta confirmada. -->
           <div class="account-order-line" id="accountOrderLine" aria-live="polite" hidden></div>
           <div class="account-lookup" id="accountLookupResults" hidden></div>
         </div>
 
-        <!-- Visita técnica: Nº de task obligatorio (validado contra la orden). -->
+        <!-- Visita técnica: task FSM de la visita (sin validación; obligatoria para registrar). -->
         <section class="visit-task-gate" id="visitTaskGate" aria-labelledby="visitTaskGateTitle" hidden></section>
 
         <!-- Bloqueo por equipo que no soporta el plan (Equipo a instalar). -->

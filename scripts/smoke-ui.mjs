@@ -1358,13 +1358,11 @@ console.log('\n== Ubicación "Casa cliente" (Visita técnica / Migración) ==');
   try { await WifixAPI.createClientLocation('35070291', { latitude: -2.2, longitude: -79.9, label: 'CASA_CLIENTE', source: 'GPS' }); } catch (e) { sinTask = e; }
   check('visita sin task validada: el POST se bloquea antes de llamar (TASK_REQUIRED)',
     sinTask && sinTask.code === 'TASK_REQUIRED' && sinTask.message.includes('Nº de task'));
-  // Se valida la task Pendiente de la orden de la sesión (prefill sugerido).
-  ctx.setSessionWorkOrder('35070291', 'ORDER/463158/2026', 'module');
-  const ctxOrden = await WifixAPI.getOrderContext('ORDER/463158/2026');
-  const sugerida = ctx.suggestedVisitTask(ctxOrden);
-  const valida = await ctx.validateVisitTask('35070291', sugerida.taskId.split('/')[1]);
-  check('task de la visita: la sugerida (Pendiente) se valida con task-check',
-    sugerida.status === 'Pendiente' && valida.ok === true && ctx.visitTaskIdFor('35070291') === sugerida.taskId);
+  // La task FSM de la sesión (ingresada al buscar) basta: sin task-check.
+  const sugerida = { taskId: 'TASK/549487/2026' };
+  ctx.setSessionTask('35070291', { taskId: sugerida.taskId, workOrder: 'ORDER/67231072/2026', source: 'lookup' });
+  check('task de la visita: la de la sesión queda sin validación adicional',
+    ctx.visitTaskIdFor('35070291') === sugerida.taskId && ctx.visitTaskGuard('35070291') === null);
 
   // Guardar → POST con la task validada de la visita y respuesta 201.
   let enviado = null;
@@ -1663,6 +1661,9 @@ console.log('\n== Vínculo taskId de la visita en curso ==');
 {
   const cache = vm.runInContext('_pendingVisitCache', ctx);
   cache.clear();
+  // Sin task FSM en la sesión (ingreso por cuenta/cédula fuera de Visita técnica).
+  const tareaPrevia = ctx.sessionTask('35070291');
+  ctx.setSessionTask('35070291', null);
   const ping = await WifixAPI.createPingTest('35070291', { target: '8.8.8.8' });
   check('POST de herramientas: taskId = workOrder de la visita pendiente',
     ping.taskId === 'ORDER/424900/2026', ping.taskId);
@@ -1689,6 +1690,14 @@ console.log('\n== Vínculo taskId de la visita en curso ==');
   const noNap = await WifixAPI.createSpeedtest('35070291', { downloadMbps: 1, uploadMbps: 1 });
   check('nunca usa el TASK/… generado por el panel NAP', noNap.taskId === 'ORDER/424900/2026');
   vm.runInContext('_napPanelState.taskId = null', ctx);
+  cache.clear();
+  // Con task FSM en la sesión: es el taskId de TODOS los registros, en cualquier módulo.
+  ctx.setSessionTask('35070291', { taskId: 'TASK/549487/2026', workOrder: 'ORDER/67231072/2026', source: 'lookup' });
+  const conTask = await WifixAPI.createPingTest('35070291', { target: '8.8.8.8' });
+  const retTask = await WifixAPI.createRetiredEquipment('35070291', { serialValue: 'X', equipmentModelId: 'm', removalReasonCode: 'DANADO' });
+  check('con task FSM de sesión: taskId = la task ingresada (también en Instalaciones), sin consultar /visits',
+    conTask.taskId === 'TASK/549487/2026' && retTask.taskId === 'TASK/549487/2026' && !cache.has('35070291'));
+  ctx.setSessionTask('35070291', tareaPrevia);
   cache.clear();
 }
 
@@ -2243,9 +2252,13 @@ console.log('\n== Ingreso por cédula/RUC (POST /accounts/lookup) ==');
 {
   const api = ctx.WifixAPI;
   const html = readFileSync(base + 'index.html', 'utf8');
-  check('selector "Ingresar por": cuenta, cédula/RUC y orden habilitada (sin "Próximamente")',
-    html.includes('role="radiogroup"') && html.includes('data-mode="account"') && html.includes('data-mode="document"')
-    && html.includes('data-mode="order"') && !/data-mode="order"[^>]*aria-disabled/.test(html) && !html.includes('Próximamente'));
+  check('selector "Ingresar por": task FSM (por defecto, primero), cuenta y cédula/RUC; sin "Nº de orden"',
+    html.includes('role="radiogroup"') && /data-mode="task"[^>]*>Nº de task FSM</.test(html)
+    && /is-active" role="radio" aria-checked="true" data-mode="task"/.test(html)
+    && html.indexOf('data-mode="task"') < html.indexOf('data-mode="account"')
+    && html.includes('data-mode="account"') && html.includes('data-mode="document"')
+    && !html.includes('data-mode="order"') && !html.includes('Próximamente')
+    && html.includes('placeholder="TASK/549487/2026 o 549487"') && vm.runInContext('accountEntryMode', ctx) === 'task');
   const dos = await api.lookupAccountsByDocument('912345678');   // 9 dígitos → se restituye el 0
   check('mock lookup: cédula con 2 cuentas, sin devolver el documento',
     dos.by === 'document' && dos.documentKind === 'CEDULA' && dos.count === 2
@@ -2302,94 +2315,226 @@ console.log('\n== Ingreso por cédula/RUC (POST /accounts/lookup) ==');
   console.warn = origWarn;
 }
 
-console.log('\n== Ingreso por nº de orden (TYTAN simulado) ==');
+console.log('\n== Ingreso por Nº de task FSM (modo principal, TYTAN simulado) ==');
 {
   const api = ctx.WifixAPI;
+  const year = new Date().getFullYear();
   check('normalizador de orden: dígitos → ORDER/n/año; formato completo se respeta; basura → null',
-    api.normalizeOrderNumber('463158') === 'ORDER/463158/' + new Date().getFullYear()
+    api.normalizeOrderNumber('463158') === 'ORDER/463158/' + year
     && api.normalizeOrderNumber(' order/463158/2026 ') === 'ORDER/463158/2026'
     && api.normalizeOrderNumber('ORD-463158') === null && api.normalizeOrderNumber('') === null);
-  check('normalizador de task: 6-7 dígitos', api.normalizeTaskId('549487') === 'TASK/549487/' + new Date().getFullYear()
+  check('normalizador de task: 6-7 dígitos', api.normalizeTaskId('549487') === 'TASK/549487/' + year
     && api.normalizeTaskId('TASK/5494870/2026') === 'TASK/5494870/2026' && api.normalizeTaskId('12345') === null);
+
+  // Peticiones reales: POST /accounts/lookup { task } y GET /tasks/context?task=…
   let enviado = null;
   const origFetch = ctx.fetch;
   api.useRealApi = true;
   ctx.fetch = async (url, init) => { enviado = { url: String(url), init }; return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({}), text: async () => '{}' }; };
-  try { await api.lookupAccountsByOrder('ORDER/463158/2026'); } catch (_) { /* solo la petición */ }
+  try { await api.lookupAccountsByTask('TASK/549487/2026'); } catch (_) { /* solo la petición */ }
   const lookupReq = enviado;
-  try { await api.getOrderContext('ORDER/463158/2026'); } catch (_) { /* idem */ }
+  try { await api.getTaskContext('TASK/549487/2026'); } catch (_) { /* idem */ }
   const ctxReq = enviado;
-  try { await api.checkOrderTask('ORDER/463158/2026', 'TASK/549487/2026'); } catch (_) { /* idem */ }
-  const taskReq = enviado;
   api.useRealApi = false;
   ctx.fetch = origFetch;
-  check('lookup real por orden: POST /accounts/lookup { order }',
+  check('lookup real por task: POST /accounts/lookup { task }',
     lookupReq && lookupReq.init.method === 'POST' && /\/accounts\/lookup$/.test(lookupReq.url)
-    && JSON.parse(lookupReq.init.body).order === 'ORDER/463158/2026');
-  check('contexto y task-check reales: workOrder como query param codificado',
-    ctxReq && /\/orders\/context\?workOrder=ORDER%2F463158%2F2026$/.test(ctxReq.url)
-    && taskReq && /\/orders\/task-check\?workOrder=ORDER%2F463158%2F2026&taskId=TASK%2F549487%2F2026$/.test(taskReq.url));
+    && JSON.parse(lookupReq.init.body).task === 'TASK/549487/2026');
+  check('contexto real: GET /tasks/context con la task como query param codificado',
+    ctxReq && (!ctxReq.init || !ctxReq.init.method || ctxReq.init.method === 'GET')
+    && /\/tasks\/context\?task=TASK%2F549487%2F2026$/.test(ctxReq.url), ctxReq && ctxReq.url);
+  const fuentesApp = ['api.js', 'app.js'].map((f) => readFileSync(base + f, 'utf8')).join('\n');
+  check('task-check deprecado: la app ya no lo llama (sin checkOrderTask ni ruta /orders/task-check)',
+    typeof api.checkOrderTask === 'undefined' && !/['"`]\/orders\/task-check/.test(fuentesApp)
+    && typeof ctx.lookupByOrderFlow === 'undefined' && typeof ctx.validateVisitTask === 'undefined');
 
+  // Mock coherente con el contrato (misma derivación que el backend).
+  const lk = await api.lookupAccountsByTask('TASK/549487/2026');
+  check('mock lookup por task: by task, task normalizada, orden derivada como el backend, 1 cuenta',
+    lk.by === 'task' && lk.task === 'TASK/549487/2026' && lk.workOrder === 'ORDER/67231072/2026'
+    && lk.simulated === true && lk.source === 'TYTAN' && lk.count === 1 && lk.matches.length === 1
+    && !!lk.matches[0].accountNumber && lk.truncated === false, JSON.stringify(lk));
+  const errOf = async (fn) => { try { await fn(); return null; } catch (e) { return e; } };
+  const e400 = await errOf(() => api.lookupAccountsByTask('TASK-12'));
+  const e404 = await errOf(() => api.lookupAccountsByTask('TASK/549487/2099'));
+  const e404b = await errOf(() => api.getTaskContext('0000000'));
+  check('mock errores: formato → 400 VALIDATION_ERROR; año futuro o número cero → 404 TASK_NOT_FOUND',
+    e400 && e400.code === 'VALIDATION_ERROR' && e400.status === 400
+    && e404 && e404.code === 'TASK_NOT_FOUND' && e404.status === 404 && e404b && e404b.code === 'TASK_NOT_FOUND');
+
+  // Flujo de la pantalla de ingreso (Visita técnica).
   const origWarn = console.warn;
+  const origErr = console.error;
   console.warn = () => {};
-  ctx.selectModule('instalaciones');
-  ctx.setEntryMode('order');
+  console.error = () => {};
+  ctx.selectModule('visitas');
+  ctx.setEntryMode('task');
   const input = vm.runInContext('accountInput', ctx);
+  const fb = vm.runInContext('confirmAccountFeedback', ctx);
   input.value = 'xx';
-  await ctx.lookupByOrderFlow();
-  check('orden con formato inválido: no busca ni confirma', vm.runInContext('validatedAccount', ctx) === null
-    && vm.runInContext('confirmAccountFeedback', ctx).textContent.includes('ORDER/463158/2026'));
-  input.value = '463158';
-  await ctx.lookupByOrderFlow();
-  const cuentaOrden = vm.runInContext('validatedAccount', ctx);
-  check('orden válida: confirma la cuenta de la orden y guarda el workOrder en la sesión',
-    !!cuentaOrden && input.value === cuentaOrden && vm.runInContext('accountEntryMode', ctx) === 'account'
-    && ctx.sessionWorkOrder(cuentaOrden) === 'ORDER/463158/' + new Date().getFullYear(), cuentaOrden);
+  await ctx.lookupByTaskFlow();
+  check('task con formato inválido: no busca ni confirma y muestra el formato',
+    vm.runInContext('validatedAccount', ctx) === null && fb.textContent.includes('TASK/549487/2026'));
+  input.value = 'TASK/549487/2099';
+  await ctx.lookupByTaskFlow();
+  check('task inexistente (404): no confirma y lo dice', vm.runInContext('validatedAccount', ctx) === null
+    && fb.textContent.includes('no existe en el FSM'));
+  input.value = '549487';
+  await ctx.lookupByTaskFlow();
+  const cuentaTask = vm.runInContext('validatedAccount', ctx);
+  const st = ctx.sessionTask(cuentaTask);
+  check('task válida: confirma la cuenta de la task (sin paso de validación) y la guarda en la sesión',
+    !!cuentaTask && input.value === cuentaTask && vm.runInContext('accountEntryMode', ctx) === 'account'
+    && st && st.taskId === 'TASK/549487/' + year && st.source === 'lookup' && /^ORDER\/[67]\d{7}\//.test(st.workOrder || ''),
+    JSON.stringify(st));
+  check('Visita técnica: la task ingresada habilita los registros (sin guardia) y no ofrece cambiarla ni validarla',
+    ctx.visitTaskGuard(cuentaTask) === null && ctx.visitTaskIdFor(cuentaTask) === st.taskId
+    && !/Validar|Cambiar orden|visit-task-change/.test(ctx.visitTaskValidHtml(st))
+    && ctx.visitTaskValidHtml(st).includes('Ingresada al buscar la cuenta'));
+  const regTask = await WifixAPI.createPingTest(cuentaTask, { target: '8.8.8.8' });
+  check('Visita técnica: el registro lleva como taskId la task ingresada', regTask.taskId === st.taskId);
+
+  // Ingreso por cuenta en Visita técnica: la task pendiente se toma SOLA.
   ctx.setEntryMode('account');
+  input.value = '40123456';
+  ctx.setSessionTask('40123456', null);
+  await ctx.confirmAccountFlow();
+  const auto = await ctx.visitTaskAutoResolve('40123456');
+  const stAuto = ctx.sessionTask('40123456');
+  check('ingreso por cuenta: toma sola la task pendiente de la cuenta (fsmTaskId de /visits), sin pedir validación',
+    vm.runInContext('validatedAccount', ctx) === '40123456' && auto === 'TASK/294328/2026'
+    && stAuto && stAuto.source === 'visits' && ctx.visitTaskGuard('40123456') === null
+    && ctx.visitTaskValidHtml(stAuto).includes('Tomada de la visita pendiente') && ctx.visitTaskValidHtml(stAuto).includes('Usar otra task'));
+  // Sin pendiente con task: se pide escribirla (solo formato).
+  const origGetVisits = WifixAPI.getVisits;
+  WifixAPI.getVisits = async () => ({ items: [{ result: 'SATISFACTORIA', workOrder: 'ORDER/9/2026' }] });
+  ctx.setSessionTask('40999888', null);
+  const sinPend = await ctx.visitTaskAutoResolve('40999888');
+  WifixAPI.getVisits = origGetVisits;
+  const malo = ctx.setManualVisitTask('40999888', 'abc');
+  const bueno = ctx.setManualVisitTask('40999888', '7123456');
+  check('sin task pendiente: guardia activa; escrita a mano solo se revisa el formato y queda en la sesión',
+    sinPend === null && malo.ok === false && bueno.ok === true && ctx.sessionTask('40999888').taskId === 'TASK/7123456/' + year
+    && ctx.sessionTask('40999888').source === 'manual');
+  const formHtml = ctx.visitTaskFormHtml({ value: '', hint: 'x' });
+  check('formulario de task: label, aria-describedby, "Usar esta task" y sin botón Validar',
+    formHtml.includes('<label class="form-label" for="visitTaskInput">') && formHtml.includes('aria-describedby="visitTaskHint visitTaskError"')
+    && formHtml.includes('Usar esta task') && !formHtml.includes('Validar') && balanced(formHtml) === null);
+  ctx.setEntryMode('task');
   input.value = '';
   ctx.invalidateAccountCache();
   console.warn = origWarn;
+  console.error = origErr;
 }
 
-console.log('\n== Contexto de la orden (Visita técnica / Migraciones) ==');
+console.log('\n== Contexto de la task y visitas "como en el FSM" ==');
 {
   const api = ctx.WifixAPI;
-  const data = await api.getOrderContext('ORDER/463158/2026');
+  const data = await api.getTaskContext('TASK/549487/2026');
   const cuenta = data.client.accountNumber;
-  const html = ctx.orderContextHtml(data, cuenta, { uid: 1, currentTaskId: data.tasks[0].taskId });
-  check('contexto: HTML balanceado', balanced(html) === null, balanced(html));
-  check('contexto: tareas con ID, tipo, estado, agendado, realizado y asignado',
-    data.tasks.every((t) => html.includes(t.taskId)) && html.includes('Agendado') && html.includes('Realizado')
-    && html.includes('Asignado a') && html.includes(data.tasks[0].taskType));
-  const cerrada = data.tasks.find((t) => t.closure && t.closure.materials.length);
-  check('contexto: cierre con resultado, razón, notas y materiales (tipo y cantidad)',
-    !!cerrada && html.includes('Terminado ' + cerrada.closure.result) && html.includes('Razón de cierre')
-    && html.includes(ctx.escapeHtml(cerrada.closure.reason)) && html.includes('<caption>Materiales</caption>')
-    && html.includes(ctx.escapeHtml(cerrada.closure.materials[0].name)));
-  check('contexto: dispositivos con estado, ID servicio, tipo, modelo, serial y MAC',
-    data.equipment.every((e) => html.includes(e.serviceId)) && html.includes('Aprovisionado')
-    && html.includes(data.equipment[0].serial) && html.includes(ctx.fmtMac(data.equipment[0].mac)));
-  check('contexto: dirección guardada, observaciones y task de la visita resaltada',
-    html.includes('Dirección guardada') && html.includes('Observaciones') && html.includes('Task de esta visita'));
-  check('contexto: otra cuenta → aviso (no bloquea)',
-    ctx.orderContextHtml(data, '99999999').includes('no de la cuenta confirmada'));
+  const vs = data.visits;
+  const pend = vs[0];
+  check('contexto por task: currentTaskId = task, visits[0] es la pendiente (current) y tasks[].current',
+    data.currentTaskId === 'TASK/549487/2026' && data.order.workOrder === 'ORDER/67231072/2026'
+    && pend.current === true && pend.taskId === 'TASK/549487/2026' && pend.status === 'Pendiente' && pend.result === 'PENDIENTE'
+    && vs.filter((v) => v.current).length === 1 && data.tasks.some((t) => t.current === true && t.taskId === data.currentTaskId));
+  const campos = ['current', 'taskId', 'fsmTaskId', 'workOrder', 'externalProcess', 'workType', 'status', 'result', 'createdAt',
+    'scheduledFrom', 'scheduledTo', 'startedAt', 'finishedAt', 'technician', 'lastModifyUser', 'closureReason', 'closureNotes',
+    'orderNote', 'notes', 'materials', 'equipment', 'address', 'latitude', 'longitude'];
+  check('mock OrderVisit: todos los campos del contrato; en la pendiente inicio/cierre/último usuario/cierre en null',
+    vs.every((v) => campos.every((k) => k in v)) && pend.startedAt === null && pend.finishedAt === null
+    && pend.lastModifyUser === null && pend.closureReason === null && pend.closureNotes === null && pend.materials.length === 0);
+  const prev = vs.slice(1);
+  const ts = prev.map((v) => Date.parse(v.scheduledFrom));
+  check('anteriores de la más reciente a la más antigua (incluye historial de la cuenta)',
+    prev.length >= 2 && ts.every((t, i) => i === 0 || ts[i - 1] >= t) && prev.some((v) => v.workOrder !== data.order.workOrder));
+
+  // Registros de Wifix: el de la task va debajo de su visita; el que no calza, aparte.
+  const cerrada = prev.find((v) => v.status === 'Realizado' && v.materials.length) || prev[0];
+  const records = { items: [{
+    taskId: 'ORDER/1/2026', workOrder: 'ORDER/1/2026', result: 'SATISFACTORIA', reason: 'Visita de la operadora',
+    occurredAt: '2026-09-01T15:00:00.000Z', technician: 'TEC X', notesLoaded: true,
+    records: {
+      linkedBy: 'MIXED',
+      checklist: [{ type: 'speedtest', label: 'Speedtest (app)', done: true, count: 1 }, { type: 'ping', label: 'Ping', done: true, count: 1 }],
+      pingTests: [{ id: 'r-ping', taskId: cerrada.taskId, target: '8.8.8.8', avgLatencyMs: 12.5, packetsSent: 4, packetsReceived: 4, linkedBy: 'TASK_ID', measuredAt: cerrada.scheduledFrom }],
+      speedtests: [{ id: 'r-st', taskId: 'ORDER/1/2026', downloadMbps: 180, uploadMbps: 90, source: 'app', linkedBy: 'TIME_WINDOW', measuredAt: '2026-09-01T15:10:00.000Z' }],
+    },
+  }] };
+  const merged = ctx.mergeWifixRecords(vs, records);
+  check('registros por taskId: el ping va a su visita FSM; el speedtest sin task queda aparte (no se pierde)',
+    merged.byTask.get(cerrada.taskId).pingTests.length === 1 && merged.byTask.get(cerrada.taskId).checklist.find((c) => c.type === 'ping').done
+    && merged.leftover.length === 1 && merged.leftover[0].records.speedtests.length === 1 && merged.leftover[0].records.pingTests.length === 0);
+
+  const html = ctx.orderContextHtml(data, cuenta, { uid: 7, currentTaskId: data.currentTaskId, includeVisits: true, records, canChange: false });
+  check('panel: HTML balanceado, sin "Cambiar nº de orden" ni "Usar otra task" (entró por task)',
+    balanced(html) === null && !html.includes('Cambiar nº de orden') && !html.includes('Usar otra task'), balanced(html));
+  const iPend = html.indexOf('Pendiente actual');
+  check('panel: "Pendiente actual" arriba, destacada, con la task de esta visita, tipo de trabajo, estado y resultado',
+    iPend > 0 && iPend < html.indexOf('Visitas anteriores') && html.includes('fsm-visit is-current')
+    && html.includes('Task de esta visita') && html.includes(ctx.escapeHtml(pend.workType)) && html.includes('>Pendiente<'));
+  check('panel: anteriores como tarjetas colapsables (<details>), una por visita',
+    (html.match(/<li class="order-task fsm-visit"/g) || []).length === prev.length
+    && (html.match(/<details>/g) || []).length >= prev.length);
+  check('panel: fechas (creada, agenda, inicio, cierre) en hora Ecuador, técnico y último usuario',
+    html.includes('<dt>Creada</dt>') && html.includes('<dt>Agenda</dt>') && html.includes('<dt>Inicio</dt>') && html.includes('<dt>Cierre</dt>')
+    && html.includes(ctx.escapeHtml(ctx.fmtDateTimeEc(cerrada.finishedAt, { seconds: false })))
+    && html.includes('Último usuario') && html.includes(ctx.escapeHtml(cerrada.lastModifyUser)));
+  check('panel: motivo y notas de cierre, nota de la orden, notas, materiales y equipos (modelo/serial/MAC), dirección',
+    html.includes('Motivo de cierre') && html.includes(ctx.escapeHtml(cerrada.closureReason)) && html.includes('Notas de cierre')
+    && html.includes('Nota de la orden') && html.includes(ctx.escapeHtml(cerrada.notes[cerrada.notes.length - 1].content.slice(0, 30)))
+    && (cerrada.materials.length === 0 || html.includes(ctx.escapeHtml(cerrada.materials[0].name)))
+    && html.includes(ctx.escapeHtml(pend.equipment[0].model)) && html.includes(ctx.fmtMac(pend.equipment[0].mac))
+    && html.includes(ctx.escapeHtml(pend.address)));
+  check('panel: registros de Wifix debajo de su visita y "Otras visitas con registros de Wifix" para el resto',
+    html.includes('Registros de Wifix') && html.includes('Ping a 8.8.8.8') && html.includes('Otras visitas con registros de Wifix')
+    && html.indexOf('Ping a 8.8.8.8') < html.indexOf('Otras visitas con registros de Wifix')
+    && html.includes('Aún no hay registros de Wifix en esta visita.'));
+  const sinVisitas = ctx.orderContextHtml(data, cuenta, { uid: 8, currentTaskId: data.currentTaskId, includeVisits: false });
+  check('panel de orden en Visita técnica: no duplica las visitas (remite a "Visitas pendientes y anteriores")',
+    !sinVisitas.includes('Pendiente actual') && sinVisitas.includes('Visitas pendientes y anteriores') && balanced(sinVisitas) === null);
+  const viejo = ctx.orderContextHtml(Object.assign({}, data, { visits: undefined }), cuenta, { uid: 9, includeVisits: true });
+  check('backend sin `visits`: cae a las tareas de la orden', viejo.includes('Tareas de la orden') && balanced(viejo) === null);
+  check('otra cuenta → aviso (no bloquea)', ctx.orderContextHtml(data, '99999999', {}).includes('no de la cuenta confirmada'));
   check('fechas en hora Ecuador: rango del mismo día',
-    ctx.fmtRangeEc('2026-10-06T13:00:00.000Z', '2026-10-06T15:00:00.000Z') === 'mar 6 oct 2026, 08:00 – 10:00', ctx.fmtRangeEc('2026-10-06T13:00:00.000Z', '2026-10-06T15:00:00.000Z'));
-  const prompt = await ctx.loadOrderPanel('11112222');
-  check('sin orden en la sesión: pide el nº de orden dentro del módulo',
-    prompt.includes('data-form="order-prompt"') && balanced(prompt) === null && prompt.includes('<label'));
-  const malo = await ctx.submitOrderNumber('11112222', 'abc');
-  const bueno = await ctx.submitOrderNumber('11112222', '463158');
-  check('nº de orden en el módulo: valida formato y guarda en la sesión solo si carga',
-    malo.ok === false && ctx.sessionWorkOrder('11112222') === bueno.workOrder && bueno.ok === true);
+    ctx.fmtRangeEc('2026-10-06T13:00:00.000Z', '2026-10-06T15:00:00.000Z') === 'mar 6 oct 2026, 08:00 – 10:00');
+
+  // Paneles de Datos del Servicio.
+  ctx.setSessionTask(cuenta, { taskId: 'TASK/549487/2026', workOrder: data.order.workOrder, source: 'lookup' });
+  const panelVis = await ctx.loadVisitsPanel(cuenta);
+  check('"Visitas pendientes y anteriores" con task: vista FSM + registros de Wifix de /visits (los sin task, aparte)',
+    panelVis.includes('Visitas (como en el FSM)') && panelVis.includes('Pendiente actual') && panelVis.includes('TYTAN simulado')
+    && panelVis.includes('Otras visitas con registros de Wifix') && balanced(panelVis) === null, balanced(panelVis));
+  ctx.setSessionTask('11112222', null);
+  const panelSin = await ctx.loadVisitsPanel('11112222');
+  check('"Visitas pendientes y anteriores" sin task: la lista de la operadora de siempre',
+    panelSin.includes('Próxima visita (pendiente)') && !panelSin.includes('como en el FSM'));
+  const prompt = await ctx.loadOrderPanel('11112222', { includeVisits: true });
+  check('panel de orden sin task: pide el Nº de task FSM (no el de orden), con label',
+    prompt.includes('data-form="task-prompt"') && prompt.includes('Nº de task FSM') && !prompt.includes('Nº de orden')
+    && prompt.includes('<label') && balanced(prompt) === null);
+  const origErr = console.error;
+  console.error = () => {};
+  const tMalo = await ctx.submitTaskNumber('11112222', 'abc');
+  const tBueno = await ctx.submitTaskNumber('11112222', '549487');
+  console.error = origErr;
+  check('task escrita en el módulo: solo formato; si carga queda en la sesión (source manual) con su orden',
+    tMalo.ok === false && tBueno.ok === true && ctx.sessionTask('11112222').taskId === 'TASK/549487/' + new Date().getFullYear()
+    && ctx.sessionTask('11112222').source === 'manual' && !!ctx.sessionTask('11112222').workOrder);
+  const conTask = await ctx.loadOrderPanel(cuenta, { includeVisits: true });
+  check('panel de orden en Migraciones (sin panel de visitas): incluye las visitas FSM',
+    conTask.includes('Visitas (como en el FSM)') && conTask.includes('Pendiente actual'));
   ctx.selectModule('migraciones');
   const idsMig = ctx.servicioItemsForModule().map((i) => i.id).join(',');
+  const migVis = ctx.servicioHasVisitsPanel();
   ctx.selectModule('visitas');
   const idsVis = ctx.servicioItemsForModule().map((i) => i.id);
+  const visVis = ctx.servicioHasVisitsPanel();
   ctx.selectModule('instalaciones');
   const idsIns = ctx.servicioItemsForModule().map((i) => i.id);
-  check('panel de orden en Visita técnica y Migraciones, no en Instalaciones',
-    idsMig === 'order,naps,events' && idsVis.includes('order') && !idsIns.includes('order'), idsMig);
+  check('panel de orden en Visita técnica y Migraciones, no en Instalaciones; visitas FSM en el panel que corresponde',
+    idsMig === 'order,naps,events' && idsVis.includes('order') && idsVis.includes('visits') && !idsIns.includes('order')
+    && migVis === false && visVis === true, idsMig);
 }
 
 console.log('\n== NAP elegida en Instalación (nap-assignment) ==');

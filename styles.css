@@ -5212,6 +5212,31 @@ ul.nap-map-legend li { display: inline-flex; align-items: center; }
 .order-device-product { display: block; margin-top: 2px; font-size: 11.5px; color: var(--text-secondary); }
 
 .order-prompt { display: flex; flex-direction: column; gap: 6px; }
+/* Visitas "como en el FSM": pendiente actual destacada + anteriores colapsables. */
+.fsm-visit.is-current {
+  border: 1px solid var(--brand-primary);
+  box-shadow: inset 3px 0 0 var(--brand-primary);
+  border-radius: var(--radius-btn);
+  background: var(--surface-card);
+  padding: 10px 12px 12px;
+}
+.fsm-current-label {
+  margin: 0 0 4px; font-size: 10.5px; font-weight: 700; letter-spacing: 0.5px;
+  text-transform: uppercase; color: var(--brand-primary);
+}
+.fsm-visit-head { display: flex; flex-direction: column; gap: 3px; }
+.fsm-visit.is-current .fsm-visit-body { margin-top: 8px; border-top: 1px dashed var(--border-lavender); }
+.fsm-prev-title { margin: 10px 0 2px; font-size: 12px; font-weight: 700; color: var(--text-secondary); }
+.fsm-sub { margin: 10px 0 2px; font-size: 11.5px; font-weight: 700; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.4px; }
+.fsm-notes { margin: 4px 0 0; padding: 0; }
+.fsm-equipment { list-style: none; margin: 4px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.fsm-equipment li { font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; }
+.fsm-eq-name { font-weight: 700; color: var(--text-primary); }
+.fsm-eq-status { font-size: 11px; color: var(--text-secondary); }
+.fsm-eq-data { display: block; color: var(--text-primary); }
+.fsm-records { margin-top: 4px; }
+.fsm-leftover { margin-top: 6px; display: flex; flex-direction: column; gap: 8px; }
+.fsm-source { margin: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); }
 .order-prompt-intro { margin: 0; font-size: 12px; line-height: 1.45; color: var(--text-primary); }
 .order-input {
   min-height: 44px;
