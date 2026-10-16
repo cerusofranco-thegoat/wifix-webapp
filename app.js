@@ -8448,7 +8448,8 @@ async function scanLanDevices(onProgress) {
 
 // ---- Módulo 4: Latencia -----------------------------------------------------
 // Origen: AfterScan.vue:1171-1273 y MyLayout.vue:1520-1540. Secuencial:
-// Router (gateway), Google (8.8.8.8) e ISP (IP pública). ICMP primero; si
+// Router (gateway), Google (8.8.8.8) e ISP (IP pública) — solo estos tres
+// destinos (sin medición HTTP a terceros como Cloudflare). ICMP primero; si
 // pierde el 100 % se cae a TCP-ping (el ICMP suele estar bloqueado).
 const LATENCY_GATEWAY_PORTS = [80, 443, 8080, 53, 22];
 
@@ -8479,7 +8480,7 @@ async function measureLatencyTarget(host, o) {
 async function runLatencyTest(onProgress) {
   const progress = typeof onProgress === 'function' ? onProgress : () => {};
   const targets = [];
-  progress({ text: 'Midiendo latencia al router…', done: 0, total: 4 });
+  progress({ text: 'Midiendo latencia al router…', done: 0, total: 3 });
   let netConfig = null;
   try { netConfig = await WifixNative.getNetConfig(); } catch (_) { netConfig = null; }
   const gw = netConfig && netConfig.gatewayIp;
@@ -8491,11 +8492,11 @@ async function runLatencyTest(onProgress) {
       error: 'Sin gateway: el teléfono no está en una red WiFi.' });
   }
 
-  progress({ text: 'Midiendo latencia a Google (8.8.8.8)…', done: 1, total: 4 });
+  progress({ text: 'Midiendo latencia a Google (8.8.8.8)…', done: 1, total: 3 });
   targets.push(Object.assign({ key: 'google', label: 'Google' },
     await measureLatencyTarget('8.8.8.8', { icmpCount: 6, tcpPorts: [443], tcpCount: 6, tcpTimeoutMs: 2000 })));
 
-  progress({ text: 'Midiendo latencia al ISP (IP pública)…', done: 2, total: 4 });
+  progress({ text: 'Midiendo latencia al ISP (IP pública)…', done: 2, total: 3 });
   let isp = null;
   try { isp = await WifixNative.getPublicIp(); } catch (_) { isp = null; }
   if (isp && isp.ip) {
@@ -8506,16 +8507,8 @@ async function runLatencyTest(onProgress) {
       error: 'No se pudo obtener la IP pública.' });
   }
 
-  // Latencia HTTP a Internet (opcional, como el origen): mínimo de 7 muestras.
-  progress({ text: 'Midiendo latencia HTTP a Internet…', done: 3, total: 4 });
-  let internet = null;
-  try {
-    const h = await WifixNative.httpLatency('https://speed.cloudflare.com/__down?bytes=0', 7);
-    if (h && h.minMs != null) internet = { minMs: h.minMs, avgMs: h.avgMs ?? null, jitterMs: h.jitterMs ?? null };
-  } catch (_) { internet = null; }
-
   const simulated = !!((netConfig && netConfig.simulated) || targets.some((t) => t.simulated));
-  return { targets, internet, simulated, measuredAt: new Date().toISOString() };
+  return { targets, simulated, measuredAt: new Date().toISOString() };
 }
 
 const LATENCY_TARGET_NOTES = Object.freeze({
@@ -9076,13 +9069,6 @@ function renderLatencyTile(t) {
 
 function renderLatencyResult(data) {
   const targets = data.targets || [];
-  const internet = data.internet;
-  const internetTile = `
-    <div class="status-tile ${internet ? RI_LEVEL_TILE[latencyLevel(internet.minMs).cls] : 'fail'}">
-      <span class="st-label">Internet (HTTP)</span>
-      <span class="st-value">${internet ? escapeHtml(_fmtNum(internet.minMs, 1)) + ' ms' : 'Sin respuesta'}</span>
-      <span class="st-sub">mínimo de 7 muestras a Cloudflare</span>
-    </div>`;
   const series = targets
     .filter((t) => t.stat && Array.isArray(t.stat.samples) && t.stat.samples.length)
     .map((t, i) => ({ label: `${t.label} (${t.method || '—'})`, color: _ISP_COLORS[i % _ISP_COLORS.length],
@@ -9095,7 +9081,7 @@ function renderLatencyResult(data) {
     : '<button type="button" class="save-btn" data-action="ri-save-latency">Guardar en la visita</button><div class="ri-save-status" data-slot="save-status" role="status" aria-live="polite"></div>';
   return `
     ${data.simulated ? riSimNotice() : ''}
-    <div class="status-grid">${targets.map(renderLatencyTile).join('')}${internetTile}</div>
+    <div class="status-grid ri-lat-grid">${targets.map(renderLatencyTile).join('')}</div>
     <h4 class="band-title ri-subtitle">Muestras por destino</h4>
     ${chart}
     <p class="form-note">Promedio ≤ ${LATENCY_GOOD_MS} ms: buena · ≤ ${LATENCY_WARN_MS} ms: aceptable · más: alta. Jitter = desviación de las muestras. Si el ICMP no responde se mide por TCP.</p>

@@ -239,13 +239,6 @@
       return unwrapIpMap(r);
     },
 
-    /** Latencia HTTP (plugin.httpPing) o mock: {ok, avgMs, minMs, jitterMs, packetLossPercent}. */
-    async httpLatency(url, samples) {
-      const plugin = nativePlugin();
-      if (!plugin) return netMock.http();
-      return callPlugin(plugin, 'httpPing', { url, samples: samples || 5 });
-    },
-
     /**
      * IP pública (la del ISP) como en el origen: GET http://ip-api.com/json →
      * `query`. En el APK va por CapacitorHttp (sin CORS); respaldo HTTPS en
@@ -970,10 +963,6 @@
           // Otra subred: mergeDiscovery la descarta (no es el /24 local).
           '10.0.0.5': { name: 'Equipo de otra subred', type: 'PC', source: 'mdns' },
         };
-      },
-      async http() {
-        await wait(300);
-        return { simulated: true, ok: true, avgMs: 21.3, minMs: 17.4, jitterMs: 2.1, packetLossPercent: 0 };
       },
       async publicIp() {
         await wait(150);

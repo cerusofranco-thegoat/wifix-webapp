@@ -123,7 +123,6 @@
 
   const MOCK_NETWORK_SERVERS = [
     { id: 'ns-01', name: 'Google DNS', target: '8.8.8.8', type: 'DNS', active: true },
-    { id: 'ns-02', name: 'Cloudflare DNS', target: '1.1.1.1', type: 'DNS', active: true },
     { id: 'ns-03', name: 'Gateway local', target: '192.168.1.1', type: 'GATEWAY', active: true },
   ];
 

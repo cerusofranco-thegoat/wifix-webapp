@@ -1702,6 +1702,13 @@ body {
   gap: 8px;
   margin-top: 4px;
 }
+/* Latencia (Red Interna): 3 destinos (Router, Google, ISP). En teléfono el
+   tercero ocupa todo el ancho para no dejar un hueco; en pantallas anchas, 3 columnas. */
+.status-grid.ri-lat-grid > .status-tile:last-child:nth-child(odd) { grid-column: 1 / -1; }
+@media (min-width: 640px) {
+  .status-grid.ri-lat-grid { grid-template-columns: repeat(3, 1fr); }
+  .status-grid.ri-lat-grid > .status-tile:last-child:nth-child(odd) { grid-column: auto; }
+}
 .status-tile {
   padding: 10px;
   border-radius: var(--radius-btn);

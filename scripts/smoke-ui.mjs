@@ -2635,8 +2635,9 @@ console.log('\n== Red Interna: módulos medidos (mock de navegador) ==');
   const latBody = riBody();
   await rc.riMount('latency', latBody);
   const latHtml = latBody.slots.result.innerHTML;
-  check('Latencia (mock): tiles Router/Google/ISP + Internet, min/máx/jitter/pérdida y gráfico de muestras',
-    latHtml.includes('>Router<') && latHtml.includes('>Google<') && latHtml.includes('>ISP<') && latHtml.includes('Internet (HTTP)')
+  check('Latencia (mock): solo tiles Router/Google/ISP (sin Cloudflare ni HTTP), min/máx/jitter/pérdida y gráfico de muestras',
+    latHtml.includes('>Router<') && latHtml.includes('>Google<') && latHtml.includes('>ISP<') && !latHtml.includes('Internet (HTTP)')
+    && !/cloudflare/i.test(latHtml) && (latHtml.match(/class="status-tile/g) || []).length === 3
     && latHtml.includes('jitter') && latHtml.includes('pérdida') && latHtml.includes('chart-svg') && balanced(latHtml) === null,
     balanced(latHtml));
   check('Latencia simulada: no ofrece guardar en la visita', !latHtml.includes('ri-save-latency') && latHtml.includes('no se guardan'));
@@ -2648,7 +2649,12 @@ console.log('\n== Red Interna: módulos medidos (mock de navegador) ==');
   rc.WifixNative.icmpPing = realIcmp;
   check('ICMP sin respuesta → TCP-ping con el puerto que respondió', fb.method === 'TCP' && fb.port === 80 && fb.stat.avg > 0);
 
-  const res = await rc.runLatencyTest(() => {});
+  const latProg = [];
+  const res = await rc.runLatencyTest((p) => latProg.push(p));
+  check('latencia: 3 destinos (router, google, isp), progreso sobre 3 y sin medición HTTP',
+    res.targets.map((t) => t.key).join(',') === 'router,google,isp' && !('internet' in res)
+    && latProg.length === 3 && latProg.every((p) => p.total === 3)
+    && typeof rc.WifixNative.httpLatency === 'undefined');
   const pls = rc.buildLatencyPingPayloads(res);
   check('payload de latencia = PingTestInput (un registro por destino, sin nulls)',
     pls.length === 3 && pls.every((p) => p.target && p.packetsSent >= p.packetsReceived && p.notes.startsWith('Red Interna')
