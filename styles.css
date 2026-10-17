@@ -1486,14 +1486,29 @@ body {
 }
 .servicio-item.open .servicio-chev { transform: rotate(180deg); }
 
+/* Acordeón sin tope de alto: se anima grid-template-rows 0fr -> 1fr, así el
+   panel abierto mide exactamente su contenido (ISP Monitor cuenta + serial,
+   etc.) y nunca se corta. Navegadores sin soporte de transición en grid
+   simplemente abren sin animación, pero sin recortar. */
 .servicio-body {
-  max-height: 0;
+  display: grid;
+  grid-template-rows: 0fr;
   overflow: hidden;
-  transition: max-height 0.35s ease;
+  transition: grid-template-rows 0.35s ease;
 }
-.servicio-item.open .servicio-body { max-height: 4000px; }
+.servicio-item.open .servicio-body { grid-template-rows: 1fr; }
+/* Cerrado: sin padding ni borde para que el track 0fr colapse a 0 real
+   (el padding/borde del hijo no se puede comprimir y dejaría ~21px). */
+.servicio-item:not(.open) .servicio-body-inner {
+  padding-top: 0;
+  padding-bottom: 0;
+  border-top-width: 0;
+}
 .servicio-body-inner {
+  min-height: 0;
+  min-width: 0;
   padding: 4px 14px 16px;
+  transition: padding 0.35s ease;
   border-top: 1px solid var(--border-lavender);
   margin-top: 0;
 }
@@ -2848,7 +2863,7 @@ body {
   min-height: 160px;
   max-height: 260px;
   overflow-y: auto;
-  overflow-x: auto;
+  overflow-x: hidden;
   overscroll-behavior: contain;
   font-family: 'Courier New', Courier, monospace;
   font-size: 11.5px;
@@ -2876,7 +2891,8 @@ body {
   max-height: none;
   height: 100dvh;
   border-radius: 0;
-  overflow: auto;
+  overflow-y: auto;
+  overflow-x: hidden;
   padding: calc(10px + env(safe-area-inset-top))
            calc(12px + env(safe-area-inset-right))
            calc(10px + env(safe-area-inset-bottom))
@@ -2920,8 +2936,13 @@ body.console-fullscreen-open { overflow: hidden; }
 }
 
 /* Líneas individuales (sobre el fondo oscuro de la consola) */
+/* pre-wrap conserva los espacios de alineación tipo terminal, pero las
+   líneas largas (resumen "Mínimo=…, Máximo=…, Media=…", saltos con host
+   largo) hacen wrap en vez de quedar cortadas/ocultas a la derecha. */
 .console-line {
-  white-space: pre;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: normal;
 }
 .console-line.console-ok    { color: var(--terminal-ok); }
 .console-line.console-warn  { color: var(--terminal-warn); }
