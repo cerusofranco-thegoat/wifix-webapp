@@ -41,11 +41,12 @@ const backFromRed = document.getElementById('backFromRed');
 // - cards: sub-tarjetas visibles (data-sub del #subscreen).
 // - servicio: ids de SERVICIO_ITEMS que se muestran en Datos del Servicio;
 //   null = todos. Si la tarjeta 'servicio' no está en cards, no se usa.
-// Instalaciones y Migraciones comparten secciones: en la migración el técnico
-// instala lo nuevo y retira el equipo anterior (Equipos Retirados es clave).
+// Instalaciones y Migraciones comparten secciones, salvo Equipos Retirados:
+// en una instalación nueva no se retira nada (2026-10-19, Franco). Equipos
+// Retirados queda solo en Migraciones, Visitas técnicas y Cancelación.
 // 'equipo' = Equipo a instalar (validación de capacidad vs plan contratado).
 const INSTALL_SECTIONS = Object.freeze({
-  cards: Object.freeze(['personales', 'servicio', 'equipo', 'herramientas', 'retirados']),
+  cards: Object.freeze(['personales', 'servicio', 'equipo', 'herramientas']),
   servicio: Object.freeze(['naps', 'events']),
 });
 
@@ -57,7 +58,9 @@ const MODULES = {
   migraciones: {
     eyebrow: 'Categoría', title: 'Migraciones', label: 'Migraciones',
     ...INSTALL_SECTIONS,
-    // Además de lo de Instalaciones: el contexto de la orden (como en FSM).
+    // En la migración el técnico instala lo nuevo y retira el equipo anterior.
+    cards: Object.freeze([...INSTALL_SECTIONS.cards, 'retirados']),
+    // Además de lo de Instalaciones: la task del FSM (como en FSM).
     servicio: Object.freeze(['order', 'naps', 'events']),
   },
   visitas: {
@@ -344,8 +347,8 @@ function invalidateAccountCache() {
     feedback.className = 'confirm-account-feedback';
   }
   clearWhitelistLine();
-  // Línea de la orden (se lee del DOM: esta función corre antes de que se
-  // declaren las constantes de la sección de orden).
+  // Línea de la task FSM (se lee del DOM: esta función corre antes de que se
+  // declaren las constantes de esa sección).
   const orderLine = document.getElementById('accountOrderLine');
   if (orderLine) {
     orderLine.innerHTML = '';
@@ -480,7 +483,11 @@ function setSessionTask(cuenta, entry) {
   if (validatedAccount === c) renderVisitTaskGate();
 }
 
-/** Línea "Task TASK/… · Orden ORDER/… · TYTAN simulado" bajo Confirmar cuenta. */
+/**
+ * Línea "Task FSM TASK/… · TYTAN simulado" bajo Confirmar cuenta. El técnico
+ * trabaja por task: la orden derivada no se muestra aquí (sigue en la sesión
+ * para los payloads que la piden).
+ */
 function renderAccountOrderLine(cuenta) {
   if (!accountOrderLine) return;
   const confirmada = validatedAccount && validatedAccount === String(cuenta || '').trim();
@@ -490,9 +497,8 @@ function renderAccountOrderLine(cuenta) {
     accountOrderLine.hidden = true;
     return;
   }
-  accountOrderLine.innerHTML = `<span class="order-line-key">Task</span>` +
+  accountOrderLine.innerHTML = `<span class="order-line-key">Task FSM</span>` +
     `<span class="order-line-value mono">${escapeHtml(t.taskId)}</span>` +
-    (t.workOrder ? `<span class="order-line-key">Orden</span><span class="order-line-value mono">${escapeHtml(t.workOrder)}</span>` : '') +
     (t.source === 'lookup' ? `<span class="sim-badge" title="Integración TYTAN simulada">TYTAN simulado</span>` : '');
   accountOrderLine.hidden = false;
 }
@@ -1482,12 +1488,22 @@ function renderStatusFromContract(contract, account) {
   const descripcion = literal && literal.toUpperCase() !== grupo.label.toUpperCase()
     ? `<span class="st-sub">${escapeHtml(literal)}</span>`
     : '';
-  const lastWo = own && own.lastWorkOrder
-    ? `<div class="mini-row">
-        <span class="mr-label">Última orden</span>
+  // El técnico trabaja por task FSM: si la sesión la conoce, se muestra ella.
+  // El contrato de /contract-status solo trae `lastWorkOrder` (no la task):
+  // sin task en la sesión queda ese dato como referencia secundaria.
+  const tareaSesion = sessionTask(account);
+  let lastWo = '';
+  if (tareaSesion) {
+    lastWo = `<div class="mini-row">
+        <span class="mr-label">Task FSM</span>
+        <span class="mr-value mono">${escapeHtml(tareaSesion.taskId)}</span>
+      </div>`;
+  } else if (own && own.lastWorkOrder) {
+    lastWo = `<div class="mini-row">
+        <span class="mr-label">Orden asociada más reciente</span>
         <span class="mr-value">${escapeHtml(own.lastWorkOrder)}</span>
-      </div>`
-    : '';
+      </div>`;
+  }
   // FSM entrega una sola cuenta por contrato: la lista se ve bien con 1 fila.
   const filas = accounts.map(a => `
       <div class="mini-row">
@@ -2891,7 +2907,7 @@ function _napAssignHtml() {
           <div><dt>NAP</dt><dd class="mono">${escapeHtml(saved.napCode || '—')}</dd></div>
           <div><dt>Puerto</dt><dd>${saved.port ? escapeHtml(pad(saved.port)) : 'Sin puerto'}</dd></div>
           ${dist ? `<div><dt>Distancia</dt><dd>${escapeHtml(dist)}</dd></div>` : ''}
-          ${saved.workOrder ? `<div><dt>Orden</dt><dd class="mono">${escapeHtml(saved.workOrder)}</dd></div>` : ''}
+          ${saved.taskId || saved.workOrder ? `<div><dt>Task FSM</dt><dd class="mono">${escapeHtml(saved.taskId || saved.workOrder)}</dd></div>` : ''}
         </dl>
         ${st.items.length > 1 ? `<p class="client-loc-count">${escapeHtml(String(st.items.length))} NAPs guardadas para esta cuenta; se muestra la más reciente.</p>` : ''}
       </div>`;
@@ -2994,7 +3010,7 @@ function _recNapAssignmentHtml(a) {
     <li class="rec-item">
       <div class="rec-head"><span class="rec-title">NAP elegida (instalación)</span></div>
       <div class="rec-values">NAP <strong class="mono">${escapeHtml(a.napCode || '—')}</strong>${a.port ? ` · puerto <strong>${escapeHtml(pad(a.port))}</strong>` : ' · sin puerto'}${dist ? ` · a ${escapeHtml(dist)}` : ''}</div>
-      ${a.workOrder ? `<div class="rec-values">Orden <span class="mono">${escapeHtml(a.workOrder)}</span></div>` : ''}
+      ${a.taskId || a.workOrder ? `<div class="rec-values">Task FSM <span class="mono">${escapeHtml(a.taskId || a.workOrder)}</span></div>` : ''}
       <div class="rec-meta">${_recordWhen(a, 'createdAt')}${_recordLinkHint(a)}</div>
     </li>`;
 }
@@ -3858,7 +3874,7 @@ function renderNapPanel() {
     gpsStatusTxt = `Ubicacion capturada (precision ±${_napPanelState.coords.accuracy != null ? _napPanelState.coords.accuracy.toFixed(0) : '?'}m)`;
     gpsStatusCls = ' ok';
   } else if (usandoDomicilio) {
-    gpsStatusTxt = 'Coordenada del domicilio (de la orden). Toca "Buscar NAPs" o cámbiala si estás en otro punto.';
+    gpsStatusTxt = 'Coordenada del domicilio (de la task). Toca "Buscar NAPs" o cámbiala si estás en otro punto.';
     gpsStatusCls = '';
   } else {
     gpsStatusTxt = 'Sin ubicacion — toca el boton o ingresa lat/lng manualmente.';
@@ -6816,7 +6832,7 @@ function renderVisitRecords(records) {
 
 /**
  * Visita anterior como tarjeta expandible (<details>): en el resumen, fecha,
- * resultado, orden y cuántas pruebas se hicieron; dentro, fechas completas,
+ * resultado, task y cuántas pruebas se hicieron; dentro, fechas completas,
  * notas, checklist y datos de cada prueba.
  */
 function renderVisitCard(t) {
@@ -6827,7 +6843,10 @@ function renderVisitCard(t) {
     ? `${_visitDoneCount(t.records)} de ${checklist.length} pruebas`
     : '';
   const fechaResumen = t.endedAt || t.occurredAt;
-  const fsm = t.fsmTaskId && t.fsmTaskId !== t.workOrder ? `<div><dt>Tarea FSM</dt><dd>${escapeHtml(t.fsmTaskId)}</dd></div>` : '';
+  // Task FSM: el taskId de la visita; si la operadora no lo trae, su
+  // identificador (workOrder) rotulado igual. El ID interno del FSM aparte.
+  const taskVisita = t.taskId || t.workOrder || '';
+  const fsm = t.fsmTaskId && t.fsmTaskId !== taskVisita ? `<div><dt>ID FSM</dt><dd class="mono">${escapeHtml(t.fsmTaskId)}</dd></div>` : '';
   return `
     <details class="visit-card" data-workorder="${escapeHtml(t.workOrder || '')}" data-result="${escapeHtml(t.result || '')}">
       <summary class="visit-card-summary">
@@ -6841,7 +6860,7 @@ function renderVisitCard(t) {
       </summary>
       <div class="visit-card-body">
         <dl class="visit-card-dates">
-          <div><dt>Orden</dt><dd>${escapeHtml(t.workOrder || '—')}</dd></div>
+          <div><dt>Task FSM</dt><dd class="mono">${escapeHtml(taskVisita || '—')}</dd></div>
           ${fsm}
           <div><dt>Creada</dt><dd>${t.createdAt ? dateTimeHtml(t.createdAt) : '—'}</dd></div>
           <div><dt>Finalizada</dt><dd>${t.endedAt ? dateTimeHtml(t.endedAt) : (t.result === 'CANCELADA' ? 'Cancelada' : '—')}</dd></div>
@@ -7051,7 +7070,6 @@ function visitTaskValidHtml(entry) {
         <span class="visit-task-id mono">${escapeHtml(entry.taskId)}</span>
       </span>
       <span class="visit-task-type">${escapeHtml(VISIT_TASK_SOURCE_TEXT[entry.source] || '')}</span>
-      ${entry.workOrder ? `<span class="visit-task-wo">Orden <span class="mono">${escapeHtml(entry.workOrder)}</span></span>` : ''}
       ${entry.source !== 'lookup' ? '<button type="button" class="link-btn" data-action="visit-task-change">Usar otra task</button>' : ''}
     </div>`;
 }
@@ -7179,7 +7197,8 @@ function visitTaskOnAccountConfirmed(cuenta) {
   });
 })();
 
-// Notas de cierre de una orden, cargadas solo cuando el técnico las pide.
+// Notas de cierre de una visita (GET /orders/{workOrder}/tasks: el contrato
+// sigue por orden), cargadas solo cuando el técnico las pide.
 function wireTaskNotesButtons(scope) {
   scope.querySelectorAll('[data-action="task-notes"]').forEach((btn) => {
     btn.addEventListener('click', async () => {
@@ -7201,7 +7220,7 @@ function wireTaskNotesButtons(scope) {
         btn.setAttribute('aria-expanded', 'true');
         btn.textContent = 'Ocultar notas de cierre';
       } catch (err) {
-        console.error('[Wifix] notas de orden', err);
+        console.error('[Wifix] notas de cierre', err);
         slot.innerHTML = renderPanelError(err, 'No se pudieron cargar las notas.');
       } finally {
         btn.disabled = false;
@@ -7219,7 +7238,7 @@ function renderWorkOrderNotes(data) {
     });
   });
   if (notas.length === 0) {
-    return `<div class="detail-empty">Esta orden no tiene notas de cierre.</div>`;
+    return `<div class="detail-empty">Esta visita no tiene notas de cierre en el FSM.</div>`;
   }
   return `
     <ul class="task-notes-list">
@@ -7232,7 +7251,7 @@ function renderWorkOrderNotes(data) {
 }
 
 // ============================================================================
-// Contexto de la task FSM (TYTAN simulado) — orden, visitas "como en el FSM",
+// Contexto de la task FSM (TYTAN simulado) — task, visitas "como en el FSM",
 // equipos, dirección y observaciones. GET /tasks/context?task=… (2026-10-16):
 // mismo objeto que /orders/context + currentTaskId, tasks[].current y
 // visits[] (pendiente actual primero, luego de la más reciente a la más
@@ -7337,8 +7356,8 @@ function orderClosureHtml(t) {
   const c = t.closure;
   if (!c) {
     return `<p class="order-muted">${t.status === 'Pendiente'
-      ? 'Tarea pendiente: todavía no tiene cierre.'
-      : 'La orden no trae detalle de cierre para esta tarea.'}</p>`;
+      ? 'Task pendiente: todavía no tiene cierre.'
+      : 'El FSM no trae detalle de cierre para esta task.'}</p>`;
   }
   return `
         <div class="order-closure">
@@ -7364,7 +7383,7 @@ function orderTaskHtml(t, highlightTaskId) {
             ${orderStatusChip(t.status)}
             ${actual ? '<span class="order-current-badge">Task de esta visita</span>' : ''}
           </span>
-          <span class="order-task-type">${escapeHtml(t.taskType || 'Tarea')}</span>
+          <span class="order-task-type">${escapeHtml(t.taskType || 'Task')}</span>
           <span class="order-task-line"><span class="order-key">Agendado</span> ${escapeHtml(fmtRangeEc(t.scheduledFrom, t.scheduledTo))}</span>
           <span class="order-task-line"><span class="order-key">Realizado</span> ${escapeHtml(hecho)}</span>
           <span class="order-task-line"><span class="order-key">Asignado a</span> ${escapeHtml(t.assignedTo || '—')}</span>
@@ -7457,7 +7476,7 @@ function _finishWifixRecords(r, template) {
 /**
  * Reparte los registros de Wifix (de /visits?include=records) entre las
  * visitas FSM por taskId (o fsmTaskId; si el registro trae el workOrder, va a
- * la visita más reciente de esa orden). Lo que no calza con ninguna queda en
+ * la visita más reciente con esa orden asociada). Lo que no calza con ninguna queda en
  * `leftover` (agrupado por la visita de la operadora): no se pierde nada.
  * Pura. Devuelve { byTask: Map(taskId → VisitRecords), leftover: VisitItem[] }.
  */
@@ -7507,7 +7526,7 @@ function mergeWifixRecords(visits, visitsResult) {
 
 function _fsmEquipmentHtml(list) {
   const eq = (Array.isArray(list) ? list : []).filter(Boolean);
-  if (!eq.length) return '<p class="order-muted">Sin equipos en la orden.</p>';
+  if (!eq.length) return '<p class="order-muted">Sin equipos en la task.</p>';
   return `<ul class="fsm-equipment">${eq.map((e) => {
     const nombre = e.shortName || e.productName || 'Equipo';
     const datos = [
@@ -7537,7 +7556,6 @@ function fsmVisitBodyHtml(v, recs) {
       <div><dt>Cierre</dt><dd>${v.finishedAt ? _fsmDt(v.finishedAt) : (pend ? 'Abierta' : '—')}</dd></div>
       <div><dt>Técnico</dt><dd>${escapeHtml(v.technician || '—')}</dd></div>
       <div><dt>Último usuario</dt><dd>${escapeHtml(v.lastModifyUser || '—')}</dd></div>
-      <div><dt>Orden</dt><dd class="mono">${escapeHtml(v.workOrder || '—')}</dd></div>
       ${v.externalProcess ? `<div><dt>Proceso</dt><dd class="mono">${escapeHtml(v.externalProcess)}</dd></div>` : ''}
       ${v.fsmTaskId !== null && v.fsmTaskId !== undefined ? `<div><dt>ID FSM</dt><dd class="mono">${escapeHtml(String(v.fsmTaskId))}</dd></div>` : ''}
     </dl>
@@ -7547,7 +7565,7 @@ function fsmVisitBodyHtml(v, recs) {
       <div><dt>Motivo de cierre</dt><dd>${escapeHtml(v.closureReason || '—')}</dd></div>
       <div><dt>Notas de cierre</dt><dd class="order-notes">${escapeHtml(v.closureNotes || '—')}</dd></div>
     </dl>` : (pend ? '' : '<p class="order-muted">La visita no trae datos de cierre.</p>')}
-    ${v.orderNote ? `<h5 class="fsm-sub">Nota de la orden</h5><p class="order-text">${escapeHtml(v.orderNote)}</p>` : ''}
+    ${v.orderNote ? `<h5 class="fsm-sub">Nota de la task</h5><p class="order-text">${escapeHtml(v.orderNote)}</p>` : ''}
     <h5 class="fsm-sub">Notas (${notas.length})</h5>
     ${notas.length ? `<ol class="task-notes-list fsm-notes">${notas.map((n) => `
       <li class="task-note"><span class="task-note-date">${_fsmDt(n.createdAt)}</span>
@@ -7637,28 +7655,91 @@ function _otherAccountWarning(cl, cuenta) {
 }
 
 /**
+ * La task de esta visita dentro del contexto: la de `currentTaskId` (opts o
+ * data), si no la marcada `current`. Junta lo que traen tasks[] (tipo,
+ * prioridad, cierre) y visits[] (resultado, ID FSM, proceso, fechas). Pura.
+ */
+function currentTaskOf(data, currentTaskId) {
+  const tasks = Array.isArray(data && data.tasks) ? data.tasks.filter(Boolean) : [];
+  const visits = Array.isArray(data && data.visits) ? data.visits.filter(Boolean) : [];
+  const tid = currentTaskId || (data && data.currentTaskId) || null;
+  const task = (tid && tasks.find((t) => t.taskId === tid)) || (!tid ? tasks.find((t) => t.current) : null) || null;
+  const id = tid || (task && task.taskId) || null;
+  const visit = (id && visits.find((v) => v.taskId === id)) || (!id ? visits.find((v) => v.current) : null) || null;
+  return { taskId: id || (visit && visit.taskId) || null, task, visit };
+}
+
+/** Cabecera del panel: la task FSM de esta visita (Nº grande + sus datos). */
+function taskHeadHtml(data, opts = {}) {
+  const o = (data && data.order) || {};
+  const { taskId, task, visit } = currentTaskOf(data, opts.currentTaskId);
+  const t = task || {};
+  const v = visit || {};
+  const simulado = data && data.simulated
+    ? '<span class="sim-badge" title="Integración TYTAN simulada: datos de prueba">TYTAN simulado</span>' : '';
+  const estado = v.status || t.status || null;
+  let resultado = '';
+  if (v.result) resultado = fsmResultChip(v.result);
+  else if (t.closure && t.closure.result) {
+    resultado = `<span class="event-badge order-chip ${ORDER_CLOSURE_BADGE[t.closure.result] || 'badge-neutral'}">${escapeHtml(t.closure.result)}</span>`;
+  }
+  const tipo = v.workType || t.taskType || [o.orderType, o.technology].filter(Boolean).join(' · ') || 'Task del FSM';
+  const inicio = v.startedAt || t.doneFrom || null;
+  const cierre = v.finishedAt || t.doneTo || null;
+  const pend = estado === 'Pendiente';
+  const tecnico = v.technician || t.assignedTo || '';
+  const proceso = v.externalProcess || o.signatureProcess || '';
+  const fsmId = v.fsmTaskId !== null && v.fsmTaskId !== undefined ? String(v.fsmTaskId) : '';
+  return `
+      <div class="order-head">
+        <p class="order-head-label">Task FSM de esta visita</p>
+        <div class="order-head-top">
+          <span class="order-wo mono">${escapeHtml(taskId || '—')}</span>
+          ${orderStatusChip(estado)}
+          ${resultado}
+          ${simulado}
+        </div>
+        <span class="order-head-type">${escapeHtml(tipo)}</span>
+        <dl class="order-facts compact">
+          ${v.createdAt ? `<div><dt>Creada</dt><dd>${escapeHtml(fmtDateTimeEc(v.createdAt, { seconds: false }))}</dd></div>` : ''}
+          <div><dt>Agenda</dt><dd>${escapeHtml(fmtRangeEc(v.scheduledFrom || t.scheduledFrom, v.scheduledTo || t.scheduledTo))}</dd></div>
+          <div><dt>Inicio</dt><dd>${inicio ? escapeHtml(fmtDateTimeEc(inicio, { seconds: false })) : (pend ? 'Sin iniciar' : '—')}</dd></div>
+          <div><dt>Cierre</dt><dd>${cierre ? escapeHtml(fmtDateTimeEc(cierre, { seconds: false })) : (pend ? 'Abierta' : '—')}</dd></div>
+          <div><dt>Técnico</dt><dd>${escapeHtml(tecnico || '—')}</dd></div>
+          ${t.priority !== null && t.priority !== undefined ? `<div><dt>Prioridad</dt><dd>${escapeHtml(String(t.priority))}</dd></div>` : ''}
+          ${fsmId ? `<div><dt>ID FSM</dt><dd class="mono">${escapeHtml(fsmId)}</dd></div>` : ''}
+          ${proceso ? `<div><dt>Proceso</dt><dd class="mono">${escapeHtml(proceso)}</dd></div>` : ''}
+        </dl>
+        ${o.workOrder ? `<p class="order-head-secondary">Orden asociada <span class="mono">${escapeHtml(o.workOrder)}</span></p>` : ''}
+        ${opts.canChange ? '<button type="button" class="link-btn order-change-btn" data-action="order-change">Usar otra task</button>' : ''}
+      </div>`;
+}
+
+/**
  * Panel completo con el contexto de la task. Pura (sin DOM) para el smoke.
  * opts = { uid, currentTaskId, includeVisits, records (resultado de
  * /visits?include=records o null), canChange }.
  */
 function orderContextHtml(data, cuenta, opts = {}) {
-  const o = (data && data.order) || {};
   const cl = (data && data.client) || {};
-  const equipos = Array.isArray(data && data.equipment) ? data.equipment.filter(Boolean) : [];
-  const simulado = data && data.simulated
-    ? '<span class="sim-badge" title="Integración TYTAN simulada: datos de prueba">TYTAN simulado</span>' : '';
-  const dir = data && data.registeredAddress ? data.registeredAddress : cl.address;
+  const v = currentTaskOf(data, opts.currentTaskId).visit || {};
+  // Todo sale de la task: equipos/dirección/observaciones del contexto y, si
+  // faltan, los de la visita FSM de esta misma task.
+  let equipos = Array.isArray(data && data.equipment) ? data.equipment.filter(Boolean) : [];
+  if (!equipos.length && Array.isArray(v.equipment)) equipos = v.equipment.filter(Boolean);
+  const dir = (data && data.registeredAddress) || cl.address || v.address || '';
+  const observaciones = (data && data.observations) || v.orderNote || '';
   const uid = opts.uid || '';
   let visitas;
   if (!Array.isArray(data && data.visits)) {
-    // Backend anterior sin `visits`: tareas de la orden como antes.
+    // Backend anterior sin `visits`: las tasks del FSM como antes.
     const tasks = orderTasksSorted(data && data.tasks);
     visitas = `
       <section class="order-section" aria-labelledby="orderTasksTitle${uid}">
-        <h4 class="order-section-title" id="orderTasksTitle${uid}">Tareas de la orden (${tasks.length})</h4>
+        <h4 class="order-section-title" id="orderTasksTitle${uid}">Tasks del FSM (${tasks.length})</h4>
         ${tasks.length
           ? `<ul class="order-task-list">${tasks.map(t => orderTaskHtml(t, opts.currentTaskId)).join('')}</ul>`
-          : '<div class="detail-empty">La orden no trae tareas.</div>'}
+          : '<div class="detail-empty">El FSM no trae tasks para esta visita.</div>'}
       </section>`;
   } else if (opts.includeVisits) {
     visitas = fsmVisitsHtml(data.visits, mergeWifixRecords(data.visits, opts.records), { uid, currentTaskId: opts.currentTaskId });
@@ -7667,23 +7748,7 @@ function orderContextHtml(data, cuenta, opts = {}) {
   }
   return `
     <div class="order-panel" data-panel="order">
-      <div class="order-head">
-        <div class="order-head-top">
-          <span class="order-wo mono">${escapeHtml(o.workOrder || '—')}</span>
-          ${orderStatusChip(o.status)}
-          ${simulado}
-        </div>
-        <span class="order-head-type">${escapeHtml([o.orderType, o.technology].filter(Boolean).join(' · ') || 'Orden de trabajo')}</span>
-        <dl class="order-facts compact">
-          ${opts.currentTaskId ? `<div><dt>Task</dt><dd class="mono">${escapeHtml(opts.currentTaskId)}</dd></div>` : ''}
-          <div><dt>Creada</dt><dd>${escapeHtml(fmtDateTimeEc(o.createdAt, { seconds: false }))}</dd></div>
-          <div><dt>SLA</dt><dd>${escapeHtml(fmtDateTimeEc(o.slaAt, { seconds: false }))}</dd></div>
-          <div><dt>Cerrada</dt><dd>${o.closedAt ? escapeHtml(fmtDateTimeEc(o.closedAt, { seconds: false })) : 'Abierta'}</dd></div>
-          ${o.externalId ? `<div><dt>ID ${escapeHtml(o.externalSystem || 'externo')}</dt><dd class="mono">${escapeHtml(o.externalId)}</dd></div>` : ''}
-          ${o.signatureProcess ? `<div><dt>Proceso</dt><dd class="mono">${escapeHtml(o.signatureProcess)}</dd></div>` : ''}
-        </dl>
-        ${opts.canChange ? '<button type="button" class="link-btn order-change-btn" data-action="order-change">Usar otra task</button>' : ''}
-      </div>
+      ${taskHeadHtml(data, opts)}
       ${_otherAccountWarning(cl, cuenta)}
 
       ${visitas}
@@ -7692,18 +7757,18 @@ function orderContextHtml(data, cuenta, opts = {}) {
         <h4 class="order-section-title" id="orderDevicesTitle${uid}">Dispositivos instalados (${equipos.length})</h4>
         ${equipos.length
           ? `<ul class="order-device-list">${equipos.map(orderDeviceHtml).join('')}</ul>`
-          : '<div class="detail-empty">La orden no trae dispositivos instalados.</div>'}
+          : '<div class="detail-empty">La task no trae dispositivos instalados.</div>'}
       </section>
 
       <section class="order-section" aria-labelledby="orderAddrTitle${uid}">
         <h4 class="order-section-title" id="orderAddrTitle${uid}">Dirección guardada</h4>
-        <p class="order-text">${dir ? escapeHtml(dir) : '<span class="no-fsm-data">Sin dirección en la orden</span>'}</p>
+        <p class="order-text">${dir ? escapeHtml(dir) : '<span class="no-fsm-data">Sin dirección en la task</span>'}</p>
         ${cl.napCode || cl.zoneCode ? `<p class="order-muted">${cl.napCode ? `NAP ${escapeHtml(cl.napCode)}` : ''}${cl.napCode && cl.zoneCode ? ' · ' : ''}${cl.zoneCode ? `Zona ${escapeHtml(cl.zoneCode)}` : ''}</p>` : ''}
       </section>
 
       <section class="order-section" aria-labelledby="orderObsTitle${uid}">
         <h4 class="order-section-title" id="orderObsTitle${uid}">Observaciones</h4>
-        <p class="order-text">${data && data.observations ? escapeHtml(data.observations) : '<span class="order-muted">Sin observaciones.</span>'}</p>
+        <p class="order-text">${observaciones ? escapeHtml(observaciones) : '<span class="order-muted">Sin observaciones.</span>'}</p>
       </section>
     </div>`;
 }
@@ -7755,7 +7820,7 @@ function _visitsWithRecordsOrNull(cuenta) {
     .catch((err) => { console.warn('[Wifix] registros de Wifix por visita:', err); return null; });
 }
 
-/** HTML del panel "Orden de trabajo y visitas" de Datos del Servicio. */
+/** HTML del panel "Task del FSM" de Datos del Servicio. */
 async function loadOrderPanel(cuenta, opts = {}) {
   const t = sessionTask(cuenta);
   if (!t || opts.change) {
@@ -7763,7 +7828,7 @@ async function loadOrderPanel(cuenta, opts = {}) {
       value: '',
       intro: opts.change
         ? 'Escribe el Nº de task FSM de esta visita (queda como la task de todos los registros).'
-        : 'Ingresaste por cuenta o cédula y no hay task de esta visita: escribe el Nº de task FSM para ver la orden y sus visitas.',
+        : 'Ingresaste por cuenta o cédula y no hay task de esta visita: escribe el Nº de task FSM para ver la task y sus visitas.',
     })}</div>`;
   }
   try {
@@ -7824,7 +7889,7 @@ async function loadVisitsPanel(cuenta) {
   throw (ctxR.reason || recR.reason || new Error('No se pudieron cargar las visitas.'));
 }
 
-/** Conecta el panel de la orden (delegación: el contenido se repinta entero). */
+/** Conecta el panel de la task (delegación: el contenido se repinta entero). */
 function _bootOrderPanel(body, cuenta, opts = {}) {
   if (!body || body.dataset.orderWired === '1') return;
   body.dataset.orderWired = '1';
@@ -7871,10 +7936,12 @@ function _bootOrderPanel(body, cuenta, opts = {}) {
 }
 
 const SERVICIO_ITEMS = [
-  // Visita técnica / Migraciones: la orden de la task FSM (TYTAN simulado).
+  // Visita técnica / Migraciones: la task FSM de la visita (TYTAN simulado).
   // Si el módulo no tiene el panel 'visits' (Migraciones), aquí van también
-  // las visitas "como en el FSM".
-  { id: 'order',   icon: SERVICIO_ICONS.history, title: 'Orden de trabajo y visitas (como en el FSM)',
+  // las visitas "como en el FSM" y el título lo dice (titleWithVisits).
+  // El id 'order' se mantiene: es la clave de MODULES.servicio y del smoke.
+  { id: 'order',   icon: SERVICIO_ICONS.history, title: 'Task del FSM',
+    titleWithVisits: 'Task del FSM y sus visitas',
     load: (cuenta) => loadOrderPanel(cuenta, { includeVisits: !servicioHasVisitsPanel() }) },
   { id: 'naps',    icon: SERVICIO_ICONS.nap,     title: 'NAPs cercanas y seleccion GPON Xtreme',
     // Visita técnica / Migración: solo la NAP contratada (sin búsqueda).
@@ -7900,6 +7967,7 @@ const SERVICIO_ITEMS = [
 
 // Título del panel según el módulo (la NAP cambia en Visita técnica / Migración).
 function servicioItemTitle(item) {
+  if (item.titleWithVisits && !servicioHasVisitsPanel()) return item.titleWithVisits;
   return item.titleContracted && _napUsesContractedNap() ? item.titleContracted : item.title;
 }
 

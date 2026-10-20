@@ -1537,7 +1537,17 @@ const statusHtml = ctx.renderStatusFromContract(contract, '35070291');
 check('contractId null se muestra como guion, no como "null"',
   !statusHtml.includes('null') && statusHtml.includes('—'));
 check('muestra la descripción literal de la operadora', statusHtml.includes('Activo'));
-check('muestra la última orden', statusHtml.includes('ORDER/424900/2026'));
+check('con task en la sesión muestra la task FSM (no la última orden)',
+  statusHtml.includes('Task FSM') && statusHtml.includes(ctx.sessionTask('35070291').taskId)
+  && !statusHtml.includes('ORDER/424900/2026') && !statusHtml.includes('Última orden'));
+{
+  const guardada = ctx.sessionTask('35070291');
+  ctx.setSessionTask('35070291', null);
+  const sinTaskHtml = ctx.renderStatusFromContract(contract, '35070291');
+  ctx.setSessionTask('35070291', guardada);
+  check('sin task en la sesión: la última orden queda como "Orden asociada más reciente"',
+    sinTaskHtml.includes('Orden asociada más reciente') && sinTaskHtml.includes('ORDER/424900/2026'));
+}
 check('agrupa los 5 estados + desconocido en Activo/Suspendido/Cancelado',
   ctx.statusTileClass('ACTIVA') === 'ok' && ctx.statusTileClass('SUSPENDIDA') === 'warn'
   && ctx.statusTileClass('TERMINADA') === 'fail' && ctx.statusTileClass('ORDENADA') === 'ok'
@@ -1800,7 +1810,8 @@ console.log('\n== Módulos del menú (qué secciones ve cada uno) ==');
 const MODULE_TABLE = {
   instalaciones: {
     title: 'Instalaciones',
-    cards: ['personales', 'servicio', 'equipo', 'herramientas', 'retirados'],
+    // Equipos Retirados solo en Migraciones, Visitas técnicas y Cancelación.
+    cards: ['personales', 'servicio', 'equipo', 'herramientas'],
     servicio: ['naps', 'events'],
   },
   migraciones: {
@@ -2391,6 +2402,12 @@ console.log('\n== Ingreso por Nº de task FSM (modo principal, TYTAN simulado) =
     ctx.visitTaskGuard(cuentaTask) === null && ctx.visitTaskIdFor(cuentaTask) === st.taskId
     && !/Validar|Cambiar orden|visit-task-change/.test(ctx.visitTaskValidHtml(st))
     && ctx.visitTaskValidHtml(st).includes('Ingresada al buscar la cuenta'));
+  const tarjeta = ctx.renderVisitCard({ taskId: 'TASK/1/2026', workOrder: 'ORDER/9/2026', fsmTaskId: 8001, result: 'SATISFACTORIA' });
+  const tarjetaSinTask = ctx.renderVisitCard({ taskId: null, workOrder: 'ORDER/9/2026', result: 'SATISFACTORIA' });
+  check('task de la visita y tarjetas de visita rotuladas como Task FSM (sin "Orden")',
+    !/Orden/.test(ctx.visitTaskValidHtml(st))
+    && tarjeta.includes('<dt>Task FSM</dt><dd class="mono">TASK/1/2026</dd>') && tarjeta.includes('<dt>ID FSM</dt>') && !tarjeta.includes('<dt>Orden</dt>')
+    && tarjetaSinTask.includes('<dt>Task FSM</dt><dd class="mono">ORDER/9/2026</dd>'));
   const regTask = await WifixAPI.createPingTest(cuentaTask, { target: '8.8.8.8' });
   check('Visita técnica: el registro lleva como taskId la task ingresada', regTask.taskId === st.taskId);
 
@@ -2480,9 +2497,9 @@ console.log('\n== Contexto de la task y visitas "como en el FSM" ==');
     html.includes('<dt>Creada</dt>') && html.includes('<dt>Agenda</dt>') && html.includes('<dt>Inicio</dt>') && html.includes('<dt>Cierre</dt>')
     && html.includes(ctx.escapeHtml(ctx.fmtDateTimeEc(cerrada.finishedAt, { seconds: false })))
     && html.includes('Último usuario') && html.includes(ctx.escapeHtml(cerrada.lastModifyUser)));
-  check('panel: motivo y notas de cierre, nota de la orden, notas, materiales y equipos (modelo/serial/MAC), dirección',
+  check('panel: motivo y notas de cierre, nota de la task, notas, materiales y equipos (modelo/serial/MAC), dirección',
     html.includes('Motivo de cierre') && html.includes(ctx.escapeHtml(cerrada.closureReason)) && html.includes('Notas de cierre')
-    && html.includes('Nota de la orden') && html.includes(ctx.escapeHtml(cerrada.notes[cerrada.notes.length - 1].content.slice(0, 30)))
+    && html.includes('Nota de la task') && !html.includes('Nota de la orden') && html.includes(ctx.escapeHtml(cerrada.notes[cerrada.notes.length - 1].content.slice(0, 30)))
     && (cerrada.materials.length === 0 || html.includes(ctx.escapeHtml(cerrada.materials[0].name)))
     && html.includes(ctx.escapeHtml(pend.equipment[0].model)) && html.includes(ctx.fmtMac(pend.equipment[0].mac))
     && html.includes(ctx.escapeHtml(pend.address)));
@@ -2494,7 +2511,24 @@ console.log('\n== Contexto de la task y visitas "como en el FSM" ==');
   check('panel de orden en Visita técnica: no duplica las visitas (remite a "Visitas pendientes y anteriores")',
     !sinVisitas.includes('Pendiente actual') && sinVisitas.includes('Visitas pendientes y anteriores') && balanced(sinVisitas) === null);
   const viejo = ctx.orderContextHtml(Object.assign({}, data, { visits: undefined }), cuenta, { uid: 9, includeVisits: true });
-  check('backend sin `visits`: cae a las tareas de la orden', viejo.includes('Tareas de la orden') && balanced(viejo) === null);
+  check('backend sin `visits`: cae a las tasks del FSM', viejo.includes('Tasks del FSM') && !viejo.includes('Tareas de la orden') && balanced(viejo) === null);
+  // Cabecera = la task de esta visita (no la orden).
+  const wo = (html.match(/<span class="order-wo mono">([^<]*)<\/span>/) || [])[1];
+  const tPend = data.tasks.find((t) => t.taskId === data.currentTaskId);
+  check('cabecera: Nº de task grande, estado/resultado/tipo/agenda/técnico de la task; orden solo como "Orden asociada"',
+    wo === data.currentTaskId && html.includes('Task FSM de esta visita')
+    && html.includes(ctx.escapeHtml(pend.workType)) && html.includes(ctx.escapeHtml(ctx.fmtRangeEc(pend.scheduledFrom, pend.scheduledTo)))
+    && html.includes(ctx.escapeHtml(pend.technician)) && html.includes('>Pendiente<') && html.includes(String(pend.fsmTaskId))
+    && html.includes(`<dt>Prioridad</dt><dd>${tPend.priority}</dd>`)
+    && html.includes('Orden asociada') && !html.includes('Orden de trabajo')
+    && !/<dt>Orden<\/dt>/.test(html), wo);
+  check('cabecera sin visits (backend anterior): sale de tasks[] (tipo, asignado, estado)',
+    (viejo.match(/<span class="order-wo mono">([^<]*)<\/span>/) || [])[1] === data.currentTaskId
+    && viejo.includes(ctx.escapeHtml(tPend.assignedTo)) && viejo.includes(ctx.escapeHtml(tPend.taskType)));
+  const vacio = ctx.orderContextHtml({ order: {}, client: {}, visits: [] }, cuenta, { uid: 10, currentTaskId: 'TASK/1/2026' });
+  check('textos vacíos en términos de la task',
+    vacio.includes('La task no trae dispositivos instalados.') && vacio.includes('Sin dirección en la task')
+    && !/la orden/i.test(vacio) && balanced(vacio) === null);
   check('otra cuenta → aviso (no bloquea)', ctx.orderContextHtml(data, '99999999', {}).includes('no de la cuenta confirmada'));
   check('fechas en hora Ecuador: rango del mismo día',
     ctx.fmtRangeEc('2026-10-06T13:00:00.000Z', '2026-10-06T15:00:00.000Z') === 'mar 6 oct 2026, 08:00 – 10:00');
@@ -2510,8 +2544,9 @@ console.log('\n== Contexto de la task y visitas "como en el FSM" ==');
   check('"Visitas pendientes y anteriores" sin task: la lista de la operadora de siempre',
     panelSin.includes('Próxima visita (pendiente)') && !panelSin.includes('como en el FSM'));
   const prompt = await ctx.loadOrderPanel('11112222', { includeVisits: true });
-  check('panel de orden sin task: pide el Nº de task FSM (no el de orden), con label',
+  check('panel de la task sin task: pide el Nº de task FSM (no el de orden), con label',
     prompt.includes('data-form="task-prompt"') && prompt.includes('Nº de task FSM') && !prompt.includes('Nº de orden')
+    && prompt.includes('para ver la task y sus visitas')
     && prompt.includes('<label') && balanced(prompt) === null);
   const origErr = console.error;
   console.error = () => {};
@@ -2532,9 +2567,17 @@ console.log('\n== Contexto de la task y visitas "como en el FSM" ==');
   const visVis = ctx.servicioHasVisitsPanel();
   ctx.selectModule('instalaciones');
   const idsIns = ctx.servicioItemsForModule().map((i) => i.id);
-  check('panel de orden en Visita técnica y Migraciones, no en Instalaciones; visitas FSM en el panel que corresponde',
+  check('panel de la task en Visita técnica y Migraciones, no en Instalaciones; visitas FSM en el panel que corresponde',
     idsMig === 'order,naps,events' && idsVis.includes('order') && idsVis.includes('visits') && !idsIns.includes('order')
     && migVis === false && visVis === true, idsMig);
+  const itemOrder = vm.runInContext("SERVICIO_ITEMS.find((i) => i.id === 'order')", ctx);
+  ctx.selectModule('migraciones');
+  const tituloMig = ctx.servicioItemTitle(itemOrder);
+  ctx.selectModule('visitas');
+  const tituloVis = ctx.servicioItemTitle(itemOrder);
+  ctx.selectModule('instalaciones');
+  check('título del panel: "Task del FSM y sus visitas" en Migraciones y "Task del FSM" en Visita técnica (sin "Orden")',
+    tituloMig === 'Task del FSM y sus visitas' && tituloVis === 'Task del FSM', `${tituloMig} | ${tituloVis}`);
 }
 
 console.log('\n== NAP elegida en Instalación (nap-assignment) ==');
