@@ -2554,6 +2554,34 @@ console.log('\n== Contexto de la task y visitas "como en el FSM" ==');
     vacio.includes('La task no trae dispositivos instalados.') && vacio.includes('Sin dirección en la task')
     && !/la orden/i.test(vacio) && balanced(vacio) === null);
   check('otra cuenta → aviso (no bloquea)', ctx.orderContextHtml(data, '99999999', {}).includes('no de la cuenta confirmada'));
+
+  // Chip de resultado solo si aporta: sin cierre (Pendiente) o igual al estado → un solo chip.
+  const chipsDe = (frag) => (frag.match(/class="event-badge order-chip [^"]*">[^<]*</g) || []).map((m) => m.replace(/.*">/, '').slice(0, -1));
+  const headDe = (h) => h.slice(h.indexOf('class="order-head-top"'), h.indexOf('order-head-type'));
+  const topDe = (h, tid) => { const i = h.indexOf(`order-task-id mono">${tid}<`); return i < 0 ? '' : h.slice(i, h.indexOf('order-task-type', i)); };
+  check('chips: helper showResultChip (pendiente/sin resultado/vacío/igual al estado → no; cierre real → sí)',
+    !ctx.showResultChip('Pendiente', 'PENDIENTE') && !ctx.showResultChip('Pendiente', '') && !ctx.showResultChip('Pendiente', null)
+    && !ctx.showResultChip('Realizado', 'Sin resultado') && !ctx.showResultChip('En curso', 'EN  CURSO') && !ctx.showResultChip('Cancelado', 'cancelado') && !ctx.showResultChip('En curso', 'En cúrso') && !ctx.showResultChip('Realizado', ' SIN RESULTADO ')
+    && ctx.showResultChip('Realizado', 'SATISFACTORIA') && ctx.showResultChip('Realizado', 'Insatisfactoria'));
+  check('chips: pendiente → un solo chip "Pendiente" en la cabecera y en la lista FSM',
+    chipsDe(headDe(html)).join('|') === 'Pendiente' && chipsDe(topDe(html, pend.taskId)).join('|') === 'Pendiente',
+    chipsDe(headDe(html)).join('|') + ' / ' + chipsDe(topDe(html, pend.taskId)).join('|'));
+  const vSat = { current: true, taskId: 'TASK/777/2026', status: 'Realizado', result: 'SATISFACTORIA', workType: 'Instalación', scheduledFrom: '2026-10-01T13:00:00.000Z', finishedAt: '2026-10-01T15:00:00.000Z', notes: [], materials: [], equipment: [] };
+  const vIns = Object.assign({}, vSat, { current: false, taskId: 'TASK/778/2026', result: 'INSATISFACTORIA' });
+  const vEq = Object.assign({}, vSat, { current: false, taskId: 'TASK/779/2026', status: 'Cancelado', result: 'CANCELADO' });
+  const dSat = { order: {}, client: {}, currentTaskId: vSat.taskId, visits: [vSat, vIns, vEq] };
+  const hSat = ctx.orderContextHtml(dSat, cuenta, { uid: 11, currentTaskId: vSat.taskId, includeVisits: true });
+  check('chips: realizada satisfactoria → 2 chips (estado + resultado) en cabecera y lista; insatisfactoria también',
+    chipsDe(headDe(hSat)).join('|') === 'Realizado|Satisfactoria' && chipsDe(topDe(hSat, vSat.taskId)).join('|') === 'Realizado|Satisfactoria'
+    && chipsDe(topDe(hSat, vIns.taskId)).join('|') === 'Realizado|Insatisfactoria' && balanced(hSat) === null,
+    chipsDe(headDe(hSat)).join('|') + ' / ' + chipsDe(topDe(hSat, vSat.taskId)).join('|'));
+  check('chips: resultado igual al estado con distinta capitalización → 1 chip',
+    chipsDe(topDe(hSat, vEq.taskId)).join('|') === 'Cancelado', chipsDe(topDe(hSat, vEq.taskId)).join('|'));
+  const dTasks = { order: {}, client: {}, currentTaskId: 'TASK/1/2026', tasks: [{ taskId: 'TASK/1/2026', status: 'Pendiente', closure: { result: 'pendiente' } }] };
+  const dTasksOk = { order: {}, client: {}, currentTaskId: 'TASK/1/2026', tasks: [{ taskId: 'TASK/1/2026', status: 'Realizado', closure: { result: 'Satisfactoria' } }] };
+  check('chips: cabecera desde tasks[].closure aplica la misma regla',
+    chipsDe(headDe(ctx.taskHeadHtml(dTasks, {}))).join('|') === 'Pendiente'
+    && chipsDe(headDe(ctx.taskHeadHtml(dTasksOk, {}))).join('|') === 'Realizado|Satisfactoria');
   check('fechas en hora Ecuador: rango del mismo día',
     ctx.fmtRangeEc('2026-10-06T13:00:00.000Z', '2026-10-06T15:00:00.000Z') === 'mar 6 oct 2026, 08:00 – 10:00');
 

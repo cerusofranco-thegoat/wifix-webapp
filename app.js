@@ -7427,6 +7427,22 @@ function orderDeviceHtml(e) {
 const FSM_RESULT_BADGE = Object.freeze({ SATISFACTORIA: 'badge-resolved', INSATISFACTORIA: 'badge-fail', PENDIENTE: 'badge-pending' });
 const FSM_RESULT_TEXT = Object.freeze({ SATISFACTORIA: 'Satisfactoria', INSATISFACTORIA: 'Insatisfactoria', PENDIENTE: 'Pendiente' });
 
+/** Normaliza para comparar estado/resultado: sin mayúsculas, acentos ni espacios. */
+function _chipKey(x) {
+  return String(x ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/\s+/g, '');
+}
+const _NO_RESULT_KEYS = Object.freeze(['', 'pendiente', 'sinresultado']);
+
+/**
+ * ¿El chip de resultado aporta información junto al de estado? Solo si hay un
+ * resultado real de cierre (no vacío / "Pendiente" / "Sin resultado") y no es
+ * equivalente al estado. Pura.
+ */
+function showResultChip(status, result) {
+  const r = _chipKey(result);
+  return !_NO_RESULT_KEYS.includes(r) && r !== _chipKey(status);
+}
+
 /** Chip del resultado (texto + color, nunca solo color). */
 function fsmResultChip(result) {
   return `<span class="event-badge order-chip ${FSM_RESULT_BADGE[result] || 'badge-neutral'}">${escapeHtml(FSM_RESULT_TEXT[result] || result || 'Sin resultado')}</span>`;
@@ -7596,7 +7612,7 @@ function fsmVisitHeadHtml(v, opts = {}) {
     <span class="order-task-top">
       <span class="order-task-id mono">${escapeHtml(v.taskId || '—')}</span>
       ${orderStatusChip(v.status)}
-      ${fsmResultChip(v.result)}
+      ${showResultChip(v.status, v.result) ? fsmResultChip(v.result) : ''}
       ${deEsta ? '<span class="order-current-badge">Task de esta visita</span>' : ''}
     </span>
     <span class="order-task-type">${escapeHtml(v.workType || 'Visita')}</span>
@@ -7685,8 +7701,9 @@ function taskHeadHtml(data, opts = {}) {
     ? '<span class="sim-badge" title="Integración TYTAN simulada: datos de prueba">TYTAN simulado</span>' : '';
   const estado = v.status || t.status || null;
   let resultado = '';
-  if (v.result) resultado = fsmResultChip(v.result);
-  else if (t.closure && t.closure.result) {
+  if (v.result) {
+    if (showResultChip(estado, v.result)) resultado = fsmResultChip(v.result);
+  } else if (t.closure && t.closure.result && showResultChip(estado, t.closure.result)) {
     resultado = `<span class="event-badge order-chip ${ORDER_CLOSURE_BADGE[t.closure.result] || 'badge-neutral'}">${escapeHtml(t.closure.result)}</span>`;
   }
   const tipo = v.workType || t.taskType || [o.orderType, o.technology].filter(Boolean).join(' · ') || 'Task del FSM';
