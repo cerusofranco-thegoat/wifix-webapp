@@ -1488,15 +1488,21 @@ function renderStatusFromContract(contract, account) {
   const descripcion = literal && literal.toUpperCase() !== grupo.label.toUpperCase()
     ? `<span class="st-sub">${escapeHtml(literal)}</span>`
     : '';
-  // El técnico trabaja por task FSM: si la sesión la conoce, se muestra ella.
-  // El contrato de /contract-status solo trae `lastWorkOrder` (no la task):
-  // sin task en la sesión queda ese dato como referencia secundaria.
+  // El técnico trabaja por task FSM. Prioridad: task de la sesión →
+  // `lastTaskId` de /contract-status (task FSM más reciente de la cuenta) →
+  // solo si faltan ambas (backend sin `lastTaskId`), `lastWorkOrder`.
   const tareaSesion = sessionTask(account);
+  const ultimaTask = own && typeof own.lastTaskId === 'string' ? own.lastTaskId.trim() : '';
   let lastWo = '';
   if (tareaSesion) {
     lastWo = `<div class="mini-row">
         <span class="mr-label">Task FSM</span>
         <span class="mr-value mono">${escapeHtml(tareaSesion.taskId)}</span>
+      </div>`;
+  } else if (ultimaTask) {
+    lastWo = `<div class="mini-row">
+        <span class="mr-label">Última task FSM</span>
+        <span class="mr-value mono">${escapeHtml(ultimaTask)}</span>
       </div>`;
   } else if (own && own.lastWorkOrder) {
     lastWo = `<div class="mini-row">

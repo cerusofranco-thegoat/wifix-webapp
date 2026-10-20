@@ -369,6 +369,9 @@
   function mockBrand() {
     return getBrand() || 'telenews';
   }
+  // Task FSM más reciente de la cuenta mock (contract-status.lastTaskId y
+  // fsmTaskId de la visita pendiente en mockVisits).
+  const MOCK_LAST_TASK_ID = 'TASK/294328/2026';
   function mockWorkOrderId(seed) {
     return 'ORDER/' + (424900 + (seed || 0)) + '/2026';
   }
@@ -454,6 +457,9 @@
           statusCode: 'A',
           statusDescription: 'Activo',
           lastWorkOrder: mockWorkOrderId(0),
+          // Task FSM más reciente de la cuenta: la misma que la visita
+          // pendiente de mockVisits (fsmTaskId de la orden mockWorkOrderId(0)).
+          lastTaskId: MOCK_LAST_TASK_ID,
         },
       ],
       brand: mockBrand(),
@@ -3115,7 +3121,7 @@
     pendiente.notesLoaded = true;
     pendiente.createdAt = pendiente.occurredAt;
     pendiente.endedAt = null;
-    pendiente.fsmTaskId = 'TASK/294328/2026';
+    pendiente.fsmTaskId = MOCK_LAST_TASK_ID;
     pendiente.taskId = pendiente.workOrder;
 
     const historial = [

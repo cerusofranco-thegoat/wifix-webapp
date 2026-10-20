@@ -1545,8 +1545,32 @@ check('con task en la sesión muestra la task FSM (no la última orden)',
   ctx.setSessionTask('35070291', null);
   const sinTaskHtml = ctx.renderStatusFromContract(contract, '35070291');
   ctx.setSessionTask('35070291', guardada);
-  check('sin task en la sesión: la última orden queda como "Orden asociada más reciente"',
-    sinTaskHtml.includes('Orden asociada más reciente') && sinTaskHtml.includes('ORDER/424900/2026'));
+  check('mock contract-status trae lastTaskId con formato de task FSM',
+    /^TASK\/\d{6,7}\/\d{4}$/.test(contract.accounts[0].lastTaskId || ''));
+  check('con task en la sesión no se muestra lastTaskId',
+    ctx.sessionTask('35070291').taskId === contract.accounts[0].lastTaskId
+    || !statusHtml.includes(contract.accounts[0].lastTaskId));
+  check('sin task en la sesión y con lastTaskId: "Última task FSM", sin "Orden"',
+    sinTaskHtml.includes('Última task FSM') && sinTaskHtml.includes(contract.accounts[0].lastTaskId)
+    && !sinTaskHtml.includes('Orden') && !sinTaskHtml.includes('ORDER/424900/2026'));
+  const viejo = JSON.parse(JSON.stringify(contract));
+  delete viejo.accounts[0].lastTaskId;
+  const nulo = JSON.parse(JSON.stringify(contract));
+  nulo.accounts[0].lastTaskId = null;
+  ctx.setSessionTask('35070291', null);
+  const viejoHtml = ctx.renderStatusFromContract(viejo, '35070291');
+  const nuloHtml = ctx.renderStatusFromContract(nulo, '35070291');
+  ctx.setSessionTask('35070291', guardada);
+  check('sin task en la sesión ni lastTaskId (backend viejo): fallback "Orden asociada más reciente"',
+    viejoHtml.includes('Orden asociada más reciente') && viejoHtml.includes('ORDER/424900/2026')
+    && !viejoHtml.includes('Última task FSM'));
+  check('lastTaskId null cae al mismo fallback',
+    nuloHtml.includes('Orden asociada más reciente') && !nuloHtml.includes('Última task FSM'));
+  // guardada ya está restaurada en la sesión.
+  const conTaskViejo = ctx.renderStatusFromContract(viejo, '35070291');
+  check('con task en la sesión y backend viejo: sigue mostrando la task de la sesión',
+    conTaskViejo.includes('Task FSM') && !conTaskViejo.includes('Orden asociada'));
+  check('status HTML balanceado (Última task FSM)', balanced(sinTaskHtml) === null, balanced(sinTaskHtml));
 }
 check('agrupa los 5 estados + desconocido en Activo/Suspendido/Cancelado',
   ctx.statusTileClass('ACTIVA') === 'ok' && ctx.statusTileClass('SUSPENDIDA') === 'warn'
